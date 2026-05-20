@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Black Relay 2026: Safehouse Systems</title>
+    <meta
+      name="description"
+      content="A four-month technical build culminating in an in-person field event focused on portable safehouse systems, degraded operation, and operator decision support."
+    />
+    <meta property="og:title" content="Black Relay 2026: Safehouse Systems" />
+    <meta
+      property="og:description"
+      content="Build a portable, survivable safehouse operating stack for temporary urban sites."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="./og-preview.png" />
+    <meta name="theme-color" content="#07100d" />
+    <link rel="stylesheet" href="styles.css" />
+    <script defer src="site.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header" aria-label="Primary navigation">
+      <a class="brand" href="#top" aria-label="Black Relay 2026 home">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>Black Relay 2026</span>
+      </a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">Menu</button>
+      <nav id="site-nav" class="site-nav">
+        <a href="#challenge">Challenge</a>
+        <a href="#lanes">Lanes</a>
+        <a href="#timeline">Timeline</a>
+        <a href="#outputs">Outputs</a>
+        <a class="nav-cta" data-link="apply" href="#contact">Express Interest</a>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section id="top" class="hero section-shell">
+        <div class="hero-copy">
+          <p class="eyebrow">Arrowhead Research Field Systems Program</p>
+          <h1>Black Relay 2026: Safehouse Systems</h1>
+          <p class="subtitle">Build a portable, survivable safehouse operating stack for temporary urban sites.</p>
+          <p class="lede">
+            A four-month technical build culminating in an in-person field event focused on awareness, degraded operation,
+            and operator decision support.
+          </p>
+          <div class="cta-row" aria-label="Primary calls to action">
+            <a class="button button-primary" data-link="apply" href="#contact">Apply to Participate</a>
+            <a class="button button-secondary" href="#lanes">View Technical Lanes</a>
+          </div>
+        </div>
+        <div class="system-panel" aria-label="Safehouse system status preview">
+          <div class="panel-header">
+            <span>SAFEHOUSE STACK</span>
+            <strong>DEGRADED-READY</strong>
+          </div>
+          <div class="node-map" aria-hidden="true">
+            <span class="node node-a"></span>
+            <span class="node node-b"></span>
+            <span class="node node-c"></span>
+            <span class="node node-d"></span>
+            <span class="link link-1"></span>
+            <span class="link link-2"></span>
+            <span class="link link-3"></span>
+          </div>
+          <dl class="status-list">
+            <div><dt>Awareness</dt><dd>Sensor fusion online</dd></div>
+            <div><dt>Continuity</dt><dd>Local services resilient</dd></div>
+            <div><dt>Operator View</dt><dd>Alerts normalized</dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <section class="section-shell two-column" id="what-it-is">
+        <div>
+          <p class="eyebrow">What it is</p>
+          <h2>A technical systems-integration event, not a generic hackathon.</h2>
+        </div>
+        <div class="rich-copy">
+          <p>
+            Participants work remotely over roughly four months to build partially fieldable subsystems with documentation,
+            interfaces, and test evidence. The program culminates in a live in-person integration and deployment phase.
+          </p>
+          <p>
+            The final system should be deployable in an unfamiliar building with minimal setup and continue functioning when
+            connectivity or individual components fail.
+          </p>
+        </div>
+      </section>
+
+      <section class="section-shell feature" id="challenge">
+        <p class="eyebrow">The challenge</p>
+        <h2>Rapidly emplace a portable safehouse system under realistic constraints.</h2>
+        <p>
+          How can a small team provide local awareness, detect compromise or degradation, preserve essential functions,
+          and support operator decisions during a multi-day stress period?
+        </p>
+        <div class="challenge-grid">
+          <article><span>01</span><h3>Understand</h3><p>Turn distributed sensors into useful site context and prioritized alerts.</p></article>
+          <article><span>02</span><h3>Survive</h3><p>Keep critical compute, power, network, and reporting pathways visible under disruption.</p></article>
+          <article><span>03</span><h3>Decide</h3><p>Present degradation, risk, and recommended operator actions without overwhelming the user.</p></article>
+        </div>
+      </section>
+
+      <section class="section-shell" id="lanes">
+        <div class="section-heading">
+          <p class="eyebrow">Technical lanes</p>
+          <h2>Four teams, one integrated safehouse stack.</h2>
+        </div>
+        <div class="lane-grid">
+          <article class="lane-card">
+            <h3>Fabrication</h3>
+            <p>Make the system physically fieldable, modular, transportable, serviceable, and fast to install.</p>
+            <ul><li>Collaborative CAD</li><li>Enclosures and mounts</li><li>Cable routing</li><li>Setup and teardown workflows</li></ul>
+          </article>
+          <article class="lane-card">
+            <h3>Detection</h3>
+            <p>Turn raw sensor inputs into meaningful site awareness with confidence and corroboration.</p>
+            <ul><li>Sensor architecture</li><li>Ingest pipelines</li><li>Event schema</li><li>Alert prioritization</li></ul>
+          </article>
+          <article class="lane-card">
+            <h3>Continuity</h3>
+            <p>Keep essential functions alive and visible when links, components, or power degrade.</p>
+            <ul><li>Power model</li><li>Edge compute</li><li>Backhaul progression</li><li>Health telemetry</li></ul>
+          </article>
+          <article class="lane-card">
+            <h3>TAK</h3>
+            <p>Transform technical outputs into clear operator workflows, overlays, and decisions.</p>
+            <ul><li>TAK plugin concept</li><li>Common ingest contract</li><li>Alert hierarchy</li><li>Health visualization</li></ul>
+          </article>
+        </div>
+      </section>
+
+      <section class="section-shell" id="timeline">
+        <div class="section-heading">
+          <p class="eyebrow">Build rhythm</p>
+          <h2>Four remote months, then live deployment and stress testing.</h2>
+        </div>
+        <ol class="timeline">
+          <li><strong>Month 1 — Requirements and Architecture</strong><span>Define subsystem concepts, interfaces, assumptions, and integration points.</span></li>
+          <li><strong>Month 2 — Prototyping</strong><span>Build early subsystem prototypes and validate technical feasibility.</span></li>
+          <li><strong>Month 3 — Cross-Team Integration</strong><span>Connect subsystems, refine interfaces, discover failure modes, and iterate.</span></li>
+          <li><strong>Month 4 — Hardening and Rehearsal</strong><span>Improve reliability, documentation, installation workflow, and demo readiness.</span></li>
+          <li><strong>In-Person Event — Deployment and Stress Testing</strong><span>Install, operate, and evaluate the integrated safehouse stack in a live setting.</span></li>
+        </ol>
+      </section>
+
+      <section class="section-shell split-panel" id="outputs">
+        <div>
+          <p class="eyebrow">Expected outputs</p>
+          <h2>Arrive with more than a prototype.</h2>
+          <p>Each lane should produce a credible, explainable package that can be integrated, tested, and operated.</p>
+        </div>
+        <ul class="check-list">
+          <li>Subsystem concept and architecture diagram</li>
+          <li>Interface definition for consumed and published data</li>
+          <li>BOM or dependency list</li>
+          <li>Installation or deployment notes</li>
+          <li>Test plan, evidence, risks, and open issues</li>
+          <li>Final in-person demo package</li>
+        </ul>
+      </section>
+
+      <section class="section-shell two-column" id="apply">
+        <div>
+          <p class="eyebrow">Who should apply</p>
+          <h2>Builders with useful starting competence.</h2>
+        </div>
+        <div class="rich-copy">
+          <p>
+            Black Relay is designed for military technologists, engineers, RF and communications practitioners, hardware
+            builders, CAD contributors, cybersecurity specialists, TAK developers, and edge compute or sensor systems builders.
+          </p>
+          <p>
+            You do not need to know everything on day one, but you should bring hands-on skill in at least one relevant domain.
+            Coaching is available; starting from scratch is not the goal.
+          </p>
+        </div>
+      </section>
+
+      <section class="section-shell success" id="success">
+        <p class="eyebrow">Success criteria</p>
+        <h2>Credible. Modular. Survivable. Operator-usable.</h2>
+        <div class="success-grid">
+          <span>Installs quickly in unfamiliar structures</span>
+          <span>Continues under degraded conditions</span>
+          <span>Detects tampering or failure</span>
+          <span>Preserves critical information</span>
+          <span>Presents useful decisions to operators</span>
+          <span>Uses clear interfaces and documentation</span>
+        </div>
+      </section>
+
+      <section class="section-shell final-cta" id="contact">
+        <p class="eyebrow">Get involved</p>
+        <h2>Interested in building Black Relay 2026?</h2>
+        <p>
+          We are looking for technically capable participants, advisors, and partners who want to build fieldable systems under
+          realistic constraints.
+        </p>
+        <div class="cta-row">
+          <a class="button button-primary" data-link="apply" href="mailto:contact@example.com?subject=Black%20Relay%202026%20Interest">Apply to Participate</a>
+          <a class="button button-secondary" data-link="advisor" href="mailto:contact@example.com?subject=Black%20Relay%202026%20Advisor%20Interest">Become an Advisor</a>
+          <a class="button button-ghost" data-link="contact" href="mailto:contact@example.com?subject=Black%20Relay%202026">Contact Arrowhead</a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>Black Relay 2026: Safehouse Systems</span>
+      <span>Arrowhead Research</span>
+    </footer>
+  </body>
+</html>
