@@ -11,7 +11,7 @@
     <meta property="og:title" content="Black Relay 2026: Safehouse Systems" />
     <meta
       property="og:description"
-      content="Build a portable, survivable safehouse operating stack for temporary urban sites."
+      content="Build a portable, survivable safehouse operating stack for temporary sites."
     />
     <meta property="og:type" content="website" />
     <meta property="og:image" content="./og-preview.png" />
@@ -26,13 +26,20 @@
         <span class="brand-mark" aria-hidden="true"></span>
         <span>Black Relay 2026</span>
       </a>
-      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">Menu</button>
+      <button
+        class="nav-toggle"
+        type="button"
+        aria-expanded="false"
+        aria-controls="site-nav"
+      >
+        Menu
+      </button>
       <nav id="site-nav" class="site-nav">
-        <a href="#challenge">Challenge</a>
-        <a href="#lanes">Lanes</a>
-        <a href="#timeline">Timeline</a>
-        <a href="#outputs">Outputs</a>
-        <a class="nav-cta" data-link="apply" href="#contact">Express Interest</a>
+        <a href="#what-it-is">What</a>
+        <a href="#apply">Who</a>
+        <a href="#why-participate">Why</a>
+        <a href="https://arrowheadresearch.org">About</a>
+        <a class="nav-cta" href="#lanes">Apply</a>
       </nav>
     </header>
 
@@ -41,14 +48,20 @@
         <div class="hero-copy">
           <p class="eyebrow">Arrowhead Research Field Systems Program</p>
           <h1>Black Relay 2026: Safehouse Systems</h1>
-          <p class="subtitle">Build a portable, survivable safehouse operating stack for temporary urban sites.</p>
+          <p class="subtitle">
+            Build a portable, survivable safehouse operating stack for temporary
+            sites.
+          </p>
           <p class="lede">
-            A four-month technical build culminating in an in-person field event focused on awareness, degraded operation,
-            and operator decision support.
+            A four-month technical build culminating in an in-person field event
+            focused on awareness, degraded operation, and operator decision
+            support.
           </p>
           <div class="cta-row" aria-label="Primary calls to action">
-            <a class="button button-primary" data-link="apply" href="#contact">Apply to Participate</a>
-            <a class="button button-secondary" href="#lanes">View Technical Lanes</a>
+            <a class="button button-primary" href="#lanes"
+              >Apply to Participate</a
+            >
+            <a class="button button-secondary" href="#lanes">Team Breakdown</a>
           </div>
         </div>
         <div class="system-panel" aria-label="Safehouse system status preview">
@@ -66,69 +79,88 @@
             <span class="link link-3"></span>
           </div>
           <dl class="status-list">
-            <div><dt>Awareness</dt><dd>Sensor fusion online</dd></div>
-            <div><dt>Continuity</dt><dd>Local services resilient</dd></div>
-            <div><dt>Operator View</dt><dd>Alerts normalized</dd></div>
+            <div>
+              <dt>Awareness</dt>
+              <dd>Sensor fusion online</dd>
+            </div>
+            <div>
+              <dt>Continuity</dt>
+              <dd>Local services resilient</dd>
+            </div>
+            <div>
+              <dt>Operator View</dt>
+              <dd>Alerts normalized</dd>
+            </div>
           </dl>
         </div>
       </section>
 
       <section class="section-shell two-column" id="what-it-is">
         <div>
-          <p class="eyebrow">What it is</p>
-          <h2>A technical systems-integration event, not a generic hackathon.</h2>
+          <p class="eyebrow">What is black relay?</p>
+          <h2>
+            A technical systems-integration event. Not a generic hackathon.
+          </h2>
         </div>
         <div class="rich-copy">
-          <p>
-            Participants work remotely over roughly four months to build partially fieldable subsystems with documentation,
-            interfaces, and test evidence. The program culminates in a live in-person integration and deployment phase.
-          </p>
-          <p>
-            The final system should be deployable in an unfamiliar building with minimal setup and continue functioning when
-            connectivity or individual components fail.
-          </p>
+          <h3>No obligations</h3>
+            <p>
+              Black Relay is not a full-time commitment. Work is asynchronous and
+              remote. Replace your homelab time or side-project commitments with
+              Black Relay.
+            </p>
+          <h3>Add to your portfolio</h3>
+            <p>
+              In a timeframe of approximately four months, the goal is to build a
+              fieldable subsystems with documentation, interfaces, and test
+              evidence.
+            </p>
+          <h3>Work on a real problem</h3>
+            <p>
+              The final system should be deployable in an unfamiliar building with
+              minimal setup and continue functioning when connectivity or
+              individual components fail.
+            </p>
+          <h3>Network with like-minded talent</h3>
+            <p>
+              The program culminates in a live, in-person integration and
+              deployment phase with travel paid for by Arrowhead Research.
+            </p>
         </div>
       </section>
 
       <section class="section-shell feature" id="challenge">
         <p class="eyebrow">The challenge</p>
-        <h2>Rapidly emplace a portable safehouse system under realistic constraints.</h2>
+        <h2>
+          Rapidly emplace a portable safehouse system under realistic
+          constraints.
+        </h2>
         <p>
-          How can a small team provide local awareness, detect compromise or degradation, preserve essential functions,
-          and support operator decisions during a multi-day stress period?
+          How can a small team provide local awareness, detect compromise or
+          degradation, preserve essential functions, and support operator
+          decisions during a multi-day stress period?
         </p>
         <div class="challenge-grid">
-          <article><span>01</span><h3>Understand</h3><p>Turn distributed sensors into useful site context and prioritized alerts.</p></article>
-          <article><span>02</span><h3>Survive</h3><p>Keep critical compute, power, network, and reporting pathways visible under disruption.</p></article>
-          <article><span>03</span><h3>Decide</h3><p>Present degradation, risk, and recommended operator actions without overwhelming the user.</p></article>
-        </div>
-      </section>
-
-      <section class="section-shell" id="lanes">
-        <div class="section-heading">
-          <p class="eyebrow">Technical lanes</p>
-          <h2>Four teams, one integrated safehouse stack.</h2>
-        </div>
-        <div class="lane-grid">
-          <article class="lane-card">
-            <h3>Fabrication</h3>
-            <p>Make the system physically fieldable, modular, transportable, serviceable, and fast to install.</p>
-            <ul><li>Collaborative CAD</li><li>Enclosures and mounts</li><li>Cable routing</li><li>Setup and teardown workflows</li></ul>
+          <article>
+            <h3>Understand</h3>
+            <p>
+              Turn distributed sensors into useful site context and prioritized
+              alerts.
+            </p>
           </article>
-          <article class="lane-card">
-            <h3>Detection</h3>
-            <p>Turn raw sensor inputs into meaningful site awareness with confidence and corroboration.</p>
-            <ul><li>Sensor architecture</li><li>Ingest pipelines</li><li>Event schema</li><li>Alert prioritization</li></ul>
+          <article>
+            <h3>Survive</h3>
+            <p>
+              Keep critical compute, power, network, and reporting pathways
+              visible under disruption.
+            </p>
           </article>
-          <article class="lane-card">
-            <h3>Continuity</h3>
-            <p>Keep essential functions alive and visible when links, components, or power degrade.</p>
-            <ul><li>Power model</li><li>Edge compute</li><li>Backhaul progression</li><li>Health telemetry</li></ul>
-          </article>
-          <article class="lane-card">
-            <h3>TAK</h3>
-            <p>Transform technical outputs into clear operator workflows, overlays, and decisions.</p>
-            <ul><li>TAK plugin concept</li><li>Common ingest contract</li><li>Alert hierarchy</li><li>Health visualization</li></ul>
+          <article>
+            <h3>Decide</h3>
+            <p>
+              Present degradation, risk, and recommended operator actions
+              without overwhelming the user.
+            </p>
           </article>
         </div>
       </section>
@@ -139,45 +171,42 @@
           <h2>Four remote months, then live deployment and stress testing.</h2>
         </div>
         <ol class="timeline">
-          <li><strong>Month 1 — Requirements and Architecture</strong><span>Define subsystem concepts, interfaces, assumptions, and integration points.</span></li>
-          <li><strong>Month 2 — Prototyping</strong><span>Build early subsystem prototypes and validate technical feasibility.</span></li>
-          <li><strong>Month 3 — Cross-Team Integration</strong><span>Connect subsystems, refine interfaces, discover failure modes, and iterate.</span></li>
-          <li><strong>Month 4 — Hardening and Rehearsal</strong><span>Improve reliability, documentation, installation workflow, and demo readiness.</span></li>
-          <li><strong>In-Person Event — Deployment and Stress Testing</strong><span>Install, operate, and evaluate the integrated safehouse stack in a live setting.</span></li>
+          <li>
+            <strong>Month 1 — Requirements and Architecture</strong
+            ><span
+              >Define subsystem concepts, interfaces, assumptions, and
+              integration points.</span
+            >
+          </li>
+          <li>
+            <strong>Month 2 — Prototyping</strong
+            ><span
+              >Build early subsystem prototypes and validate technical
+              feasibility.</span
+            >
+          </li>
+          <li>
+            <strong>Month 3 — Cross-Team Integration</strong
+            ><span
+              >Connect subsystems, refine interfaces, discover failure modes,
+              and iterate.</span
+            >
+          </li>
+          <li>
+            <strong>Month 4 — Hardening and Rehearsal</strong
+            ><span
+              >Improve reliability, documentation, installation workflow, and
+              demo readiness.</span
+            >
+          </li>
+          <li>
+            <strong>In-Person Event — Deployment and Stress Testing</strong
+            ><span
+              >Install, operate, and evaluate the integrated safehouse stack in
+              a live setting.</span
+            >
+          </li>
         </ol>
-      </section>
-
-      <section class="section-shell split-panel" id="outputs">
-        <div>
-          <p class="eyebrow">Expected outputs</p>
-          <h2>Arrive with more than a prototype.</h2>
-          <p>Each lane should produce a credible, explainable package that can be integrated, tested, and operated.</p>
-        </div>
-        <ul class="check-list">
-          <li>Subsystem concept and architecture diagram</li>
-          <li>Interface definition for consumed and published data</li>
-          <li>BOM or dependency list</li>
-          <li>Installation or deployment notes</li>
-          <li>Test plan, evidence, risks, and open issues</li>
-          <li>Final in-person demo package</li>
-        </ul>
-      </section>
-
-      <section class="section-shell two-column" id="apply">
-        <div>
-          <p class="eyebrow">Who should apply</p>
-          <h2>Builders with useful starting competence.</h2>
-        </div>
-        <div class="rich-copy">
-          <p>
-            Black Relay is designed for military technologists, engineers, RF and communications practitioners, hardware
-            builders, CAD contributors, cybersecurity specialists, TAK developers, and edge compute or sensor systems builders.
-          </p>
-          <p>
-            You do not need to know everything on day one, but you should bring hands-on skill in at least one relevant domain.
-            Coaching is available; starting from scratch is not the goal.
-          </p>
-        </div>
       </section>
 
       <section class="section-shell success" id="success">
@@ -193,18 +222,143 @@
         </div>
       </section>
 
-      <section class="section-shell final-cta" id="contact">
-        <p class="eyebrow">Get involved</p>
-        <h2>Interested in building Black Relay 2026?</h2>
-        <p>
-          We are looking for technically capable participants, advisors, and partners who want to build fieldable systems under
-          realistic constraints.
-        </p>
-        <div class="cta-row">
-          <a class="button button-primary" data-link="apply" href="mailto:contact@example.com?subject=Black%20Relay%202026%20Interest">Apply to Participate</a>
-          <a class="button button-secondary" data-link="advisor" href="mailto:contact@example.com?subject=Black%20Relay%202026%20Advisor%20Interest">Become an Advisor</a>
-          <a class="button button-ghost" data-link="contact" href="mailto:contact@example.com?subject=Black%20Relay%202026">Contact Arrowhead</a>
+      <section class="section-shell two-column" id="apply">
+        <div>
+          <p class="eyebrow">Who should apply</p>
+          <h2>Builders in the armed forces looking for an outlet.</h2>
         </div>
+        <div class="rich-copy">
+          <h3>The diamonds in the rough</h3>
+          <p>
+            Black Relay is for the engineering minds of the armed forces who
+            are looking for an outlet to provide value in alignment with their passions.
+            It's for the infantryman who spends his off-time building robots;
+            for the cannon crewmember who moonlights as a full stack software
+            engineer; for the engineer on the Army data team who just can't get
+            enough.
+          </p>
+        </div>
+      </section>
+      
+      <section class="section-shell two-column" id="why-participate">
+        <div>
+          <p class="eyebrow">The benefits</p>
+          <h2>Why participate?</h2>
+        </div>
+        <div class="rich-copy">
+          <h3>Expand your network</h3>
+          <p>Collaborate with like-minded engineers in the armed forces.</p>
+          <h3>Play with cool hardware</h3>
+          <p>
+            Equipment is subsidized by our sponsors. Some you get to keep. Some
+            you get to use again at the next Black Relay
+          </p>
+          <h3>Add to your resume</h3>
+          <p>
+            Black Relay is built in the open. You become a contributor. Add it
+            to your portfolio.
+          </p>
+          <h3>Free travel</h3>
+          <p>
+            Culminating event takes place in Southern Pines, NC with travel
+            paid-for by Arrowhead Research
+          </p>
+        </div>
+      </section>
+      
+      <section class="section-shell" id="lanes">
+        <div class="section-heading">
+          <p class="eyebrow">Team Breakdown</p>
+          <h2>Four teams, one integrated safehouse stack.</h2>
+        </div>
+        <div class="lane-grid">
+          <article class="lane-card">
+            <h3>Fabrication</h3>
+            <p>
+              Make the system physically fieldable, modular, transportable,
+              serviceable, and fast to install.
+            </p>
+            <ul>
+              <li>Collaborative CAD</li>
+              <li>Enclosures and mounts</li>
+              <li>Cable routing</li>
+              <li>Setup and teardown workflows</li>
+            </ul>
+            <a href="https://docs.google.com/forms/d/e/1FAIpQLSdxjioDQKIpLq7wS9CU846Ul9YNLRQ0AcMsBBJXAV7m3l_UDg/viewform" class="button button-primary">Apply to this team</a>
+          </article>
+          <article class="lane-card">
+            <h3>Detection</h3>
+            <p>
+              Turn raw sensor inputs into meaningful site awareness with
+              confidence and corroboration.
+            </p>
+            <ul>
+              <li>Sensor architecture</li>
+              <li>Ingest pipelines</li>
+              <li>Event schema</li>
+              <li>Alert prioritization</li>
+            </ul>
+            <a href="https://docs.google.com/forms/d/e/1FAIpQLSfEmfUf2DVKzHbdgAi1O_iogEcAXXCOtvo4rlV8TXQY3WefWQ/viewform" class="button button-primary">Apply to this team</a>
+          </article>
+          <article class="lane-card">
+            <h3>Survivability</h3>
+            <p>
+              Keep essential functions alive and visible when links, components,
+              or power degrade.
+            </p>
+            <ul>
+              <li>Power model</li>
+              <li>Edge compute</li>
+              <li>Backhaul progression</li>
+              <li>Health telemetry</li>
+            </ul>
+            <a href="https://docs.google.com/forms/d/e/1FAIpQLSd_mUUm1TCSdOaXyACgRf5xNOCJ49Bq35D7ZSRlyYnha2g7IA/viewform" class="button button-primary">Apply to this team</a>
+          </article>
+          <article class="lane-card">
+            <h3>TAK</h3>
+            <p>
+              Transform technical outputs into clear operator workflows,
+              overlays, and decisions.
+            </p>
+            <ul>
+              <li>TAK plugin concept</li>
+              <li>Common ingest contract</li>
+              <li>Alert hierarchy</li>
+              <li>Health visualization</li>
+            </ul>
+            <a href="https://docs.google.com/forms/d/e/1FAIpQLSeKwHui9EoU_SWnTfK-JQ0mN5iPXbJIlCbDOnPm6wRVfb7u8g/viewform" class="button button-primary">Apply to this team</a>
+          </article>
+        </div>
+        <br></br>
+        <div class="general-application">
+          <p class="eyebrow">Can't decide?</p>
+          <a href="https://docs.google.com/forms/d/e/1FAIpQLSfzlXhQTx_hxFaZOihsWMh-mOyqpYRyKcfFpNcNaWIMRZ7mFQ/viewform" class="button button-secondary">Submit a general application</a>
+        </div>
+      </section>
+
+
+      <section class="section-shell two-column" id="contact">
+        <div>
+          <h2> Frequently Asked Questions</h2>
+        </div>
+        <div class="rich-copy">
+          <h3>Do I have to be in the military?</h3>
+            <p>Black Relay participants <strong>must be either active military or actively drilling members of the national guard or reserves.</strong></p>
+            <p>However, if you are a veteran or a member of industry looking to support, we can bring you on as an advisor for the project; acting as an observer, coach and mentor to the participants.</p>
+          <h3>What if I don't have any experience?</h3>
+            <p>You don't have to be an expert, but Black Relay is not a boot camp. The expectation is that you can provide meaningful contributions to your team.</p>
+          <h3>Who owns the IP?</h3>
+            <p>Black Relay is built in the open and will be open sourced under the MIT license. The goal of black relay is not to produce something that can be productized, but to produce an experience that meaningfully engages and develops engineering talent within the military.</p>
+          <h3>I don't think I'll have the time. Can I still participate?</h3>
+            <p>We understand that life happens and that this is a volunteer event. Black Relay does not take precedence over family matters or your day job. We expect participants to be able to commit at least a few hours per week to the project to provide meaningful contributions.</p>
+        </div>
+      </section>
+
+      <section class="section-shell final-cta" id="arrowhead-research">
+        <h3>
+          Learn more about Arrowhead Research
+          <a href="https://arrowheadresearch.org">here</a>.
+        </h3>
       </section>
     </main>
 
