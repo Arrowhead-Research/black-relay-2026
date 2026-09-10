@@ -3,6 +3,7 @@ FROM node:24-trixie-slim@sha256:50c3b2f6988dfc307b86e5301d69611af31f4789bdf23286
 ARG TARGETARCH=amd64
 ARG PI_VERSION=0.85.1
 ARG PI_WEB_VERSION=1.202609.0
+ARG PI_WEB_ACCESS_VERSION=0.28.0
 ARG SOPS_VERSION=3.13.3
 ARG AGE_VERSION=1.3.2
 ARG YQ_VERSION=4.53.6
@@ -147,8 +148,13 @@ RUN usermod --login pi --home /home/pi --move-home node \
 COPY --chown=pi:pi dev/pi-web-config.json /home/pi/.config/pi-web/config.json
 COPY --chown=pi:pi --chmod=0755 dev/entrypoint.sh /usr/local/bin/pi-entrypoint
 COPY --chown=pi:pi --chmod=0755 dev/doctor.sh /usr/local/bin/dev-doctor
+COPY --chown=pi:pi dev/pi-skills/ /home/pi/.agents/skills/
 
 USER pi
+
+RUN pi install "npm:pi-web-access@${PI_WEB_ACCESS_VERSION}" \
+    && npm cache clean --force
+
 WORKDIR /workspace
 
 EXPOSE 8504

@@ -16,15 +16,14 @@ complete architecture, accepted risks, phases, and recovery objectives.
 
 ## Current status
 
-Phase 1, architecture and workspace reset, is complete. The previous
-personal-account migration and server-audit workflow has been removed. No Packer
-build, OpenTofu import, server rebuild, or production deployment is available
-yet.
+Phases 1 through 3 are complete. The obsolete migration workflow is gone, the
+pinned credential-free toolchain passed trusted-host and GitHub Actions checks,
+and a trusted operator completed protected OpenTofu adoption. The existing
+CPX32 and independent Primary IPv4 are managed without replacement, and the
+firewall, DNS records, encrypted B2 state, and protected BX11 have converged.
 
-Phase 2's repository changes pin the credential-free Packer, OpenTofu, Ansible,
-provider, and linting toolchain. A trusted-host development-image rebuild,
-`make dev-doctor`, and the GitHub Actions run remain before the phase is marked
-complete. Work proceeds one roadmap phase at a time.
+Phase 4, building and validating the generic Debian 13 gold image, is next. No
+production-server rebuild or application deployment is available yet.
 
 ## Trust boundary
 
@@ -51,7 +50,7 @@ Read [`AGENTS.md`](AGENTS.md) before making changes.
 Run from the trusted host:
 
 ```bash
-cd /home/robbie/pi-dev-coding/workspaces/hetzner-identity-stack
+cd /home/robbie/pi-dev-coding/workspaces/black-relay-2026/survivability/identity-stack
 make dev-build
 make dev-up
 make dev-status
@@ -100,9 +99,11 @@ host details. `secrets.example.yml` files contain variable names and placeholder
 values only. Operators create and edit encrypted `*.sops.yml` files from trusted
 workstations; plaintext values are never committed or sent to Pi.
 
-OpenTofu state will use a manually bootstrapped, versioned Backblaze B2 bucket
-with client-side encryption. The design deliberately accepts no dependable
-distributed lock, so only one operator may run OpenTofu at a time.
+OpenTofu state uses a manually bootstrapped, versioned Backblaze B2 bucket with
+enforced client-side encryption. The design deliberately accepts no dependable
+distributed lock, so only one operator may run OpenTofu at a time. See
+[`docs/runbooks/phase3-opentofu-adoption.md`](docs/runbooks/phase3-opentofu-adoption.md)
+for the trusted-workstation procedure.
 
 `operator.env.example` documents trusted-workstation variable names with empty
 values. Never populate that tracked file; copy it outside the repository and

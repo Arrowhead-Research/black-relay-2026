@@ -1,0 +1,21 @@
+# Non-secret structure only. Copy to production.tfvars (ignored by Git) on a
+# trusted operator workstation and replace every placeholder from independently
+# verified provider metadata. Secret values are supplied through TF_VAR_*.
+
+expected_server_id     = 12345678
+existing_server_name   = "REPLACE_WITH_EXISTING_SERVER_NAME"
+server_backups_enabled = false
+
+expected_primary_ipv4_id   = 12345678
+existing_primary_ipv4_name = "REPLACE_WITH_EXISTING_PRIMARY_IPV4_NAME"
+primary_ipv4_address        = "192.0.2.10"
+
+cloudflare_zone_id   = "REPLACE_WITH_CLOUDFLARE_ZONE_ID"
+cloudflare_zone_name = "example.com"
+pocket_id_hostname   = "id.example.com"
+headscale_hostname   = "headscale.example.com"
+
+storage_box_name     = "survivability-production-backups"
+storage_box_location = "hel1"
+
+project_slug = "survivability"

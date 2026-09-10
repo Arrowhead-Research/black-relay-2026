@@ -1,4 +1,5 @@
 COMPOSE := docker compose -f dev/compose.yml
+SAFE_ANSIBLE_INVENTORY := ansible/inventory/production/hosts.yml
 
 .PHONY: help
 help:
@@ -57,14 +58,16 @@ lint:
 	shellcheck dev/*.sh
 	python3 -m json.tool dev/pi-web-config.json >/dev/null
 	python3 -m json.tool renovate.json >/dev/null
-	ansible-lint ansible
+	ANSIBLE_INVENTORY=$(SAFE_ANSIBLE_INVENTORY) ansible-lint ansible
 
 .PHONY: validate
 validate:
 	docker compose -f dev/compose.yml config --quiet
 	packer init packer
 	packer inspect packer >/dev/null
-	tofu -chdir=tofu init -backend=false -input=false -lockfile=readonly
-	tofu -chdir=tofu validate
-	ansible-playbook --syntax-check ansible/playbooks/site.yml
+	@tofu_data_dir="$$(mktemp -d)"; \
+	trap 'rm -rf "$$tofu_data_dir"' EXIT; \
+	TF_DATA_DIR="$$tofu_data_dir" tofu -chdir=tofu init -backend=false -input=false -lockfile=readonly; \
+	TF_DATA_DIR="$$tofu_data_dir" tofu -chdir=tofu validate
+	ANSIBLE_INVENTORY=$(SAFE_ANSIBLE_INVENTORY) ansible-playbook --syntax-check ansible/playbooks/site.yml
 	python3 -m unittest discover -s tests

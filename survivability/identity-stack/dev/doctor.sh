@@ -29,6 +29,10 @@ test -z "${SSH_AUTH_SOCK:-}"
 test ! -S /var/run/docker.sock
 test ! -e /home/pi/.config/sops/age/keys.txt
 test ! -e /run/secrets/sops-age-key
+test -f /home/pi/.agents/skills/grill-me/SKILL.md
+test -f /home/pi/.agents/skills/grilling/SKILL.md
+test "$(node -p "require('/home/pi/.pi/agent/npm/node_modules/pi-web-access/package.json').version")" = "0.28.0"
+pi list | grep -Fxq '  npm:pi-web-access@0.28.0'
 
 printf '%s\n' \
   "user=$(id -un) uid=$(id -u)" \
@@ -42,6 +46,8 @@ printf '%s\n' \
   "age=$(age --version)" \
   "docker=$(docker --version)" \
   "compose=$(docker compose version)" \
+  "pi-web-access=0.28.0" \
+  "pi-skills=grill-me,grilling" \
   "ssh-agent=absent" \
   "age-private-key=absent" \
   "docker-socket=absent" \

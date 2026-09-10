@@ -29,6 +29,23 @@ class ArchitectureSafetyTests(unittest.TestCase):
         forbidden = {"apply", "deploy", "destroy", "prod-audit", "rebuild"}
         self.assertTrue(forbidden.isdisjoint(targets), targets & forbidden)
 
+    def test_credential_free_checks_force_safe_inventory(self):
+        makefile = MAKEFILE.read_text(encoding="utf-8")
+        self.assertIn(
+            "SAFE_ANSIBLE_INVENTORY := ansible/inventory/production/hosts.yml",
+            makefile,
+        )
+        self.assertEqual(
+            makefile.count("ANSIBLE_INVENTORY=$(SAFE_ANSIBLE_INVENTORY)"),
+            2,
+        )
+
+    def test_validation_cannot_reuse_the_authoritative_backend_cache(self):
+        makefile = MAKEFILE.read_text(encoding="utf-8")
+        self.assertIn('tofu_data_dir="$$(mktemp -d)"', makefile)
+        self.assertEqual(makefile.count('TF_DATA_DIR="$$tofu_data_dir" tofu'), 2)
+        self.assertIn("init -backend=false", makefile)
+
     def test_sensitive_opentofu_files_are_ignored(self):
         patterns = {
             line.strip()

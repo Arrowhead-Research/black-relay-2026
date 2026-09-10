@@ -17,7 +17,7 @@ services:
       - "127.0.0.1:8504:8504"
     volumes:
       - type: bind
-        source: ..
+        source: ../../..
         target: /workspace
       - type: volume
         source: pi_agent_state

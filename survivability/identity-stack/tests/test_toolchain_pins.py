@@ -17,6 +17,14 @@ class ToolchainPinTests(unittest.TestCase):
         self.assertEqual(containerfile.count("packer_sha='"), 2)
         self.assertEqual(containerfile.count("tofu_sha='"), 2)
 
+    def test_pi_web_access_is_pinned(self):
+        containerfile = (ROOT / "dev/Containerfile").read_text(encoding="utf-8")
+        self.assertIn("ARG PI_WEB_ACCESS_VERSION=0.28.0", containerfile)
+        self.assertIn(
+            'pi install "npm:pi-web-access@${PI_WEB_ACCESS_VERSION}"',
+            containerfile,
+        )
+
     def test_packer_plugin_is_exactly_pinned(self):
         config = (ROOT / "packer/versions.pkr.hcl").read_text(encoding="utf-8")
         self.assertIn('required_version = "= 1.16.0"', config)
@@ -32,14 +40,14 @@ class ToolchainPinTests(unittest.TestCase):
         self.assertIn('provider "registry.opentofu.org/cloudflare/cloudflare"', lock)
         self.assertIn('provider "registry.opentofu.org/hetznercloud/hcloud"', lock)
 
-    def test_phase_two_has_no_resources_or_backend(self):
+    def test_opentofu_configuration_contains_no_provider_credentials(self):
         tofu_config = "\n".join(
             path.read_text(encoding="utf-8") for path in (ROOT / "tofu").glob("*.tf")
         )
-        self.assertIsNone(re.search(r'(?m)^\s*resource\s+"', tofu_config))
-        self.assertIsNone(re.search(r'(?m)^\s*backend\s+"', tofu_config))
         self.assertNotIn("HCLOUD_TOKEN", tofu_config)
         self.assertNotIn("CLOUDFLARE_API_TOKEN", tofu_config)
+        self.assertNotIn("AWS_ACCESS_KEY_ID", tofu_config)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", tofu_config)
 
     def test_operator_example_contains_names_without_values(self):
         example = (ROOT / "operator.env.example").read_text(encoding="utf-8")

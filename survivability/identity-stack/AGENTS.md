@@ -14,16 +14,17 @@ Caddy/Coraza edge.
 
 ## Current Phase
 
-Phase 1, architecture and workspace reset, is complete. The previous
-personal-account migration and read-only service-audit plan was removed: the
-placeholder Ubuntu server contains no application data or configuration to
-preserve. Do not recreate the old production audit/migration workflow.
+Phases 1 through 3 are complete. The obsolete personal-account migration
+workflow was removed, the credential-free tooling foundation passed its checks,
+and a trusted operator completed protected OpenTofu adoption with a converged,
+non-destructive plan. Do not recreate the old production audit/migration
+workflow.
 
-Phase 2, reproducible tooling foundation, is in progress. Its repository changes
-are implemented; trusted-host development-image rebuild, `make dev-doctor`, and
-GitHub Actions verification remain before completion. Do not write or import
-infrastructure resources, build production images, or rebuild the server in
-this phase.
+Phase 4, the Debian 13 gold image, is next. Pi may implement and validate
+credential-free Packer configuration, tests, and runbooks, but only a trusted
+operator may access Hetzner, build snapshots, create disposable test resources,
+or promote an image. Do not rebuild the production server; that remains the
+separately confirmed Phase 5 operation.
 
 ## Credential and authority boundary
 

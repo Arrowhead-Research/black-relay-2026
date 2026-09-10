@@ -334,8 +334,8 @@ Exit criteria:
 
 ### Phase 2: Reproducible tooling foundation
 
-Status: implementation complete; trusted-host development-image rebuild,
-`make dev-doctor`, and GitHub Actions verification pending.
+Status: complete. The trusted-host development image, `make dev-doctor`, and
+GitHub Actions credential-free checks were operator-verified.
 
 - Pin Packer, OpenTofu, Ansible, collections, providers, and linters.
 - Add credential-free formatting, validation, policy, and template tests.
@@ -348,6 +348,12 @@ Exit criteria:
 - Build and production credentials remain outside Pi and CI.
 
 ### Phase 3: Protected OpenTofu adoption
+
+Status: complete. A trusted operator bootstrapped the encrypted B2 backend,
+imported only the existing CPX32 and independent Primary IPv4, removed the
+unneeded IPv6 allocation through the reviewed procedure, applied the protected
+resources, and verified convergence without replacement or deletion of the
+adopted resources.
 
 - Define the CPX32, independent Primary IPv4, firewall, Cloudflare records, and
   BX11 with deletion safeguards.

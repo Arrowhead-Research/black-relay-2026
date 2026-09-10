@@ -35,10 +35,11 @@ jobs:
       - name: Run lint checks
         run: >-
           docker compose -f dev/compose.yml run --rm --no-deps
+          --workdir /workspace/survivability/identity-stack
           --entrypoint make pi lint
 
       - name: Run validation checks
         run: >-
           docker compose -f dev/compose.yml run --rm --no-deps
-          --env TF_DATA_DIR=/tmp/opentofu-data
+          --workdir /workspace/survivability/identity-stack
           --entrypoint make pi validate
