@@ -1,0 +1,9 @@
+{
+  "host": "0.0.0.0",
+  "port": 8504,
+  "pathAccess": {
+    "allowedPaths": ["/workspace"]
+  },
+  "spawnSessions": true,
+  "subsessions": true
+}

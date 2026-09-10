@@ -1,0 +1,43 @@
+---
+name: hetzner-identity-dev
+
+services:
+  pi:
+    image: hetzner-identity-pi:dev
+    build:
+      context: ..
+      dockerfile: dev/Containerfile
+    restart: unless-stopped
+    init: false
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "127.0.0.1:8504:8504"
+    volumes:
+      - type: bind
+        source: ..
+        target: /workspace
+      - type: volume
+        source: pi_agent_state
+        target: /home/pi/.pi/agent
+      - type: volume
+        source: pi_web_state
+        target: /home/pi/.pi-web
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - --show-error
+        - http://127.0.0.1:8504/
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  pi_agent_state:
+  pi_web_state:
