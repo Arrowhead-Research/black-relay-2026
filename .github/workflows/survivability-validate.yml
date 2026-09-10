@@ -3,9 +3,15 @@ name: Survivability Validate
 
 on:
   pull_request:
+    paths:
+      - "survivability/identity-stack/**"
+      - ".github/workflows/survivability-validate.yml"
   push:
     branches:
       - main
+    paths:
+      - "survivability/identity-stack/**"
+      - ".github/workflows/survivability-validate.yml"
 
 permissions:
   contents: read

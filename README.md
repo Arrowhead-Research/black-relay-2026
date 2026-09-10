@@ -4,10 +4,10 @@ Black Relay 2026 is a four-month, open-source build to create a portable, surviv
 
 [Learn more about Black Relay](https://arrowheadresearch.org/black-relay/)
 
-## Project workstreams                                                                                             │
-                                                                                                                      │
-### Survivability                                                                                                  │
-                                                                                                                      │
-   - [Identity and private-access stack](survivability/identity-stack/README.md) —                                    │
-     reproducible infrastructure for LLDAP, Pocket ID, Headscale, and the                                             │
-     Caddy/Coraza edge.
+## Project workstreams
+
+### Survivability
+
+- [Identity and private-access stack](survivability/identity-stack/README.md) —
+  reproducible infrastructure for LLDAP, Pocket ID, Headscale, and the
+  Caddy/Coraza edge.
