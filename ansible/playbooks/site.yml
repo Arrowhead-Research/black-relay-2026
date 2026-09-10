@@ -1,0 +1,7 @@
+---
+# Phase 1 credential-free syntax-check scaffold. Deployment roles are added in
+# later roadmap phases after tooling and protected infrastructure adoption.
+- name: Identity stack deployment scaffold
+  hosts: identity_stack
+  gather_facts: false
+  tasks: []

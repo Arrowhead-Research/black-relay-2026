@@ -1,0 +1,4 @@
+---
+creation_rules:
+  - path_regex: ansible/inventory/production/group_vars/all/secrets\.sops\.yml$
+    age: age1mgzajc9u3ld9w82e9u8e6n2y9ahuf8s266es86cee4hlzcf6zups9fctrr
