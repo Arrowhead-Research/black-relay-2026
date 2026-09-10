@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 20
 
     defaults:
-      runs:
+      run:
         working-directory: survivability/identity-stack
 
     steps:
