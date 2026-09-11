@@ -38,6 +38,8 @@ __pycache__/
 *.tfplan
 *.tfvars
 *.tfvars.json
+*.pkrvars.hcl
+!*.pkrvars.hcl.example
 tofu/backend.hcl
 crash.log
 crash.*.log

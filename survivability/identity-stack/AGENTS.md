@@ -14,17 +14,18 @@ Caddy/Coraza edge.
 
 ## Current Phase
 
-Phases 1 through 3 are complete. The obsolete personal-account migration
+Phases 1 through 4 are complete. The obsolete personal-account migration
 workflow was removed, the credential-free tooling foundation passed its checks,
-and a trusted operator completed protected OpenTofu adoption with a converged,
-non-destructive plan. Do not recreate the old production audit/migration
+a trusted operator completed protected OpenTofu adoption, and the generic
+Debian 13 gold image was built, validated before and after reboot, and promoted
+by explicit snapshot ID. Do not recreate the old production audit/migration
 workflow.
 
-Phase 4, the Debian 13 gold image, is next. Pi may implement and validate
-credential-free Packer configuration, tests, and runbooks, but only a trusted
-operator may access Hetzner, build snapshots, create disposable test resources,
-or promote an image. Do not rebuild the production server; that remains the
-separately confirmed Phase 5 operation.
+Phase 5, the explicitly confirmed CPX32 rebuild, is next. Pi may implement and
+validate credential-free safeguards, tests, and runbook changes, but only a
+trusted operator may access Hetzner or rebuild the production server. The
+rebuild must preserve the server object and independent Primary IPv4 and must
+use the validated numeric snapshot ID recorded by the operator.
 
 ## Credential and authority boundary
 

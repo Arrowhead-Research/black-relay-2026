@@ -1,0 +1,13 @@
+# Operator-maintained example only. Copy to a private *.pkrvars.hcl file on a
+# trusted workstation and replace with exact package versions available for
+# Debian 13/trixie at build time. Private *.pkrvars.hcl files are ignored.
+
+snapshot_epoch = "YYYYMMDDhhmm"
+
+# Use exact package versions from `apt-cache madison`, not unpinned names.
+docker_package_version         = "REPLACE_WITH_EXACT_DOCKER_CE_VERSION"
+docker_cli_package_version     = "REPLACE_WITH_EXACT_DOCKER_CE_CLI_VERSION"
+containerd_package_version     = "REPLACE_WITH_EXACT_CONTAINERD_IO_VERSION"
+docker_buildx_package_version  = "REPLACE_WITH_EXACT_DOCKER_BUILDX_PLUGIN_VERSION"
+docker_compose_package_version = "REPLACE_WITH_EXACT_DOCKER_COMPOSE_PLUGIN_VERSION"
+fluent_bit_package_version     = "REPLACE_WITH_EXACT_FLUENT_BIT_VERSION"

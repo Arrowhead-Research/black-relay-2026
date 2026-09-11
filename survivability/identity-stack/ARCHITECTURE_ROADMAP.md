@@ -369,6 +369,13 @@ Exit criteria:
 
 ### Phase 4: Debian 13 gold image
 
+Status: complete. A trusted operator discovered exact Debian 13 package pins,
+built the generic image on a disposable CX23, validated the resulting x86
+snapshot before and after reboot, promoted its explicit numeric ID, and verified
+that all disposable servers were removed. This is the first validated snapshot,
+so there is no previous validated snapshot to retain until the next successful
+image cycle.
+
 - Build the generic image on a temporary server.
 - Pin and verify Docker, Compose, and Fluent Bit sources.
 - Add pragmatic baseline hardening without credentials.

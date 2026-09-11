@@ -16,14 +16,17 @@ complete architecture, accepted risks, phases, and recovery objectives.
 
 ## Current status
 
-Phases 1 through 3 are complete. The obsolete migration workflow is gone, the
+Phases 1 through 4 are complete. The obsolete migration workflow is gone, the
 pinned credential-free toolchain passed trusted-host and GitHub Actions checks,
 and a trusted operator completed protected OpenTofu adoption. The existing
 CPX32 and independent Primary IPv4 are managed without replacement, and the
-firewall, DNS records, encrypted B2 state, and protected BX11 have converged.
+firewall, DNS records, encrypted B2 state, and protected BX11 have converged. A
+generic Debian 13 x86 gold image was built, validated before and after reboot,
+and promoted by explicit numeric snapshot ID; all disposable servers were
+removed.
 
-Phase 4, building and validating the generic Debian 13 gold image, is next. No
-production-server rebuild or application deployment is available yet.
+Phase 5, the separately confirmed in-place CPX32 rebuild from that validated
+snapshot, is next. No application deployment is available yet.
 
 ## Trust boundary
 

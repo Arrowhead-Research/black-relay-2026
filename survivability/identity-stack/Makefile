@@ -55,7 +55,8 @@ lint:
 	packer fmt -check -recursive packer
 	tofu fmt -check -recursive tofu
 	yamllint -c .yamllint.yml .
-	shellcheck dev/*.sh
+	shellcheck dev/*.sh packer/scripts/*.sh scripts/operator/*.sh
+	@for script in dev/*.sh packer/scripts/*.sh scripts/operator/*.sh; do bash -n "$$script"; done
 	python3 -m json.tool dev/pi-web-config.json >/dev/null
 	python3 -m json.tool renovate.json >/dev/null
 	ANSIBLE_INVENTORY=$(SAFE_ANSIBLE_INVENTORY) ansible-lint ansible
