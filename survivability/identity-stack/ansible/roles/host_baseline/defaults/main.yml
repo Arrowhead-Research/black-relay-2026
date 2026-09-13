@@ -1,0 +1,13 @@
+---
+host_baseline_packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - jq
+  - needrestart
+  - unattended-upgrades
+host_baseline_apply_package_updates: true
+host_baseline_journal_system_max_use: 512M
+host_baseline_journal_runtime_max_use: 128M
+host_baseline_journal_max_retention: 14day
+host_baseline_disk_free_warning_percent: 15

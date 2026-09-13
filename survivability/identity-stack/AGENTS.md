@@ -14,18 +14,35 @@ Caddy/Coraza edge.
 
 ## Current Phase
 
-Phases 1 through 4 are complete. The obsolete personal-account migration
+Phases 1 through 6 are complete. The obsolete personal-account migration
 workflow was removed, the credential-free tooling foundation passed its checks,
-a trusted operator completed protected OpenTofu adoption, and the generic
-Debian 13 gold image was built, validated before and after reboot, and promoted
-by explicit snapshot ID. Do not recreate the old production audit/migration
-workflow.
+a trusted operator completed protected OpenTofu adoption, the generic Debian 13
+gold image was built and validated, and the existing CPX32 was rebuilt in place
+without losing its protected Primary IPv4.
 
-Phase 5, the explicitly confirmed CPX32 rebuild, is next. Pi may implement and
-validate credential-free safeguards, tests, and runbook changes, but only a
-trusted operator may access Hetzner or rebuild the production server. The
-rebuild must preserve the server object and independent Primary IPv4 and must
-use the validated numeric snapshot ID recorded by the operator.
+A trusted operator completed Phase 6 production verification: dedicated-key
+named access and sudo work, the manual FIDO2 recovery key remains authorized,
+root and password SSH are disabled, the host baseline is active, and the guarded
+nftables policy permits only TCP 22/80/443 plus required ICMP while enforcing
+the Docker-DNAT boundary. Candidate validation, timed rollback, fresh SSH proof,
+and final no-change `site.yml` convergence succeeded. Do not recreate the old
+production audit/migration workflow or the discarded multi-person SSH
+bootstrap.
+
+Phase 7, backup foundation, is implemented and awaits trusted-operator
+execution per `docs/runbooks/phase7-backup-foundation.md`. OpenTofu adds the
+home-scoped SFTP-only restic subaccount on the protected BX11 over port 22.
+External Storage Box reachability stays disabled after its short reviewed key-
+enrollment bootstrap. The `backup_restic` role renders root-only restic
+credentials from SOPS and
+schedules guarded daily backup and weekly verification timers with separate
+Healthchecks.io signals, while repository initialization and retention pruning
+require exact operator confirmations. The isolated restore test runs only on
+a disposable server with an exact confirmation value. CrowdSec is assigned to
+Phase 8 alongside SSH/Caddy log integration, and email delivery for
+pending-reboot and disk-pressure status is assigned to Phase 11 monitoring.
+Only a trusted operator may use SSH, SOPS, production Ansible, OpenTofu,
+Healthchecks.io, or BX11 credentials.
 
 ## Credential and authority boundary
 
@@ -116,9 +133,11 @@ The following always remain outside Pi:
 - Running OpenTofu plan/apply against provider accounts.
 - Rebuilding the CPX32 from the validated snapshot.
 - Creating or decrypting SOPS files.
-- Enrolling SSH TOTP/FIDO credentials or Pocket ID passkeys.
+- Generating backup credentials or creating Healthchecks.io checks.
+- Rotating production SSH credentials or enrolling Pocket ID passkeys.
 - Running production Ansible check/deploy.
 - Accessing BX11 or performing production backup/restore operations.
+- Running the isolated Phase 7 restore test.
 
 Documentation must clearly label commands by execution location. A command that
 needs production authority must not be represented as runnable from Pi.
@@ -135,5 +154,8 @@ needs production authority must not be represented as runnable from Pi.
 - Disposable test resources require owner/expiry labels and documented teardown.
 - Quarterly restore tests use isolated temporary infrastructure, never
   production.
+- The Phase 7 restore test requires CONFIRM_RESTORE_TEST_<inventory
+  hostname>, targets only a disposable server, and restores into a temporary
+  directory; it must never run against the production host.
 - No production deployment is complete until OpenTofu and Ansible are
   idempotent and recovery, external monitoring, and backup alerts are tested.

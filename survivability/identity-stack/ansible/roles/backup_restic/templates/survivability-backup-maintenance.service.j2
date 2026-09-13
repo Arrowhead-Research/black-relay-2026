@@ -1,0 +1,19 @@
+# Managed by Ansible. Weekly repository verification and snapshot freshness
+# check with Healthchecks.io signaling. Retention pruning is operator-only.
+[Unit]
+Description=Survivability weekly restic verification
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ backup_restic_script_path }} verify
+User=root
+Group=root
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+RestrictSUIDSGID=yes

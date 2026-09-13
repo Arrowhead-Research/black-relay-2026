@@ -1,0 +1,19 @@
+# Managed by Ansible. One-shot daily restic backup with Healthchecks.io
+# signaling. A timer starts it; systemd will not start it twice concurrently.
+[Unit]
+Description=Survivability daily restic backup
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ backup_restic_script_path }} backup
+User=root
+Group=root
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+RestrictSUIDSGID=yes

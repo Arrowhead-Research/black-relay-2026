@@ -1,7 +1,37 @@
 ---
-# Phase 1 credential-free syntax-check scaffold. Deployment roles are added in
-# later roadmap phases after tooling and protected infrastructure adoption.
-- name: Identity stack deployment scaffold
+- name: Converge the identity stack host
   hosts: identity_stack
-  gather_facts: false
-  tasks: []
+  become: true
+  gather_facts: true
+  vars:
+    # The external inventory retains the one-time root/bootstrap identity, but
+    # every normal convergence uses the named account and dedicated Ansible key.
+    ansible_user: "{{ operator_access_user }}"
+    ansible_ssh_private_key_file: "{{ operator_access_ansible_ssh_private_key_file }}"
+    operator_access_allow_root_ssh: false
+  pre_tasks:
+    - name: Require the rebuilt Debian 13 host
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == 'Debian'
+          - ansible_facts.distribution_major_version == '13'
+          - ansible_facts.architecture == 'x86_64'
+        fail_msg: "Host convergence requires the validated Debian 13 x86 host."
+
+    - name: Prove named-operator passwordless elevation
+      ansible.builtin.command: /usr/bin/id -u
+      become: true
+      check_mode: false
+      register: operator_access_elevated_identity
+      changed_when: false
+
+    - name: Require root-equivalent Ansible execution
+      ansible.builtin.assert:
+        that:
+          - operator_access_elevated_identity.stdout == '0'
+        fail_msg: "The named operator could not elevate for host convergence."
+  roles:
+    - role: operator_access
+    - role: host_baseline
+    - role: host_firewall
+    - role: backup_restic

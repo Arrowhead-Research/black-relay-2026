@@ -125,6 +125,23 @@ variable "storage_box_password" {
   }
 }
 
+variable "storage_box_subaccount_password" {
+  description = "Initial password for the home-scoped production backup subaccount. Supply only from trusted secret storage; automated backups use SSH key authentication."
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = length(var.storage_box_subaccount_password) >= 20
+    error_message = "The Storage Box backup-subaccount password must contain at least 20 characters."
+  }
+}
+
+variable "storage_box_bootstrap_external_reachability" {
+  description = "Temporary bootstrap switch for workstation key enrollment. Keep false after the production VPS proves private Hetzner-network SFTP access."
+  type        = bool
+  default     = false
+}
+
 variable "project_slug" {
   description = "Non-sensitive label applied to managed Hetzner resources."
   type        = string

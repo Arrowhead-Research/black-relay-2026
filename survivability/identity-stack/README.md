@@ -16,17 +16,30 @@ complete architecture, accepted risks, phases, and recovery objectives.
 
 ## Current status
 
-Phases 1 through 4 are complete. The obsolete migration workflow is gone, the
+Phases 1 through 6 are complete. The obsolete migration workflow is gone, the
 pinned credential-free toolchain passed trusted-host and GitHub Actions checks,
-and a trusted operator completed protected OpenTofu adoption. The existing
-CPX32 and independent Primary IPv4 are managed without replacement, and the
-firewall, DNS records, encrypted B2 state, and protected BX11 have converged. A
-generic Debian 13 x86 gold image was built, validated before and after reboot,
-and promoted by explicit numeric snapshot ID; all disposable servers were
-removed.
+and a trusted operator completed protected OpenTofu adoption. A generic Debian
+13 x86 gold image was built and validated, and the existing CPX32 was rebuilt in
+place without losing its protected Primary IPv4.
 
-Phase 5, the separately confirmed in-place CPX32 rebuild from that validated
-snapshot, is next. No application deployment is available yet.
+The operator completed Phase 6 production verification: dedicated-key named
+access and sudo work, the manual FIDO2 recovery key remains authorized, root and
+password SSH are disabled, and the declarative host baseline and guarded
+nftables policy are active. TCP 22/80/443 plus required ICMP exposure,
+Docker-DNAT enforcement, timed rollback safety, fresh SSH, and final no-change
+`site.yml` convergence were confirmed.
+
+Phase 7, backup foundation, is implemented and awaits trusted-operator
+execution per
+[`docs/runbooks/phase7-backup-foundation.md`](docs/runbooks/phase7-backup-foundation.md):
+restic over SFTP to a home-scoped Storage Box subaccount with external
+reachability disabled after reviewed key bootstrap, root-only
+credentials rendered from SOPS, guarded daily backup and weekly verification
+timers with separate Healthchecks.io signals, exact operator confirmations for
+repository initialization and retention pruning, and an isolated disposable-
+server restore test. CrowdSec moves to Phase 8 edge/log integration, while
+email delivery for host status moves to Phase 11 monitoring. No application
+deployment is available yet.
 
 ## Trust boundary
 
@@ -98,15 +111,40 @@ protected according to the roadmap.
 ## Safe repository inputs
 
 `ansible/inventory/production/hosts.yml` intentionally contains no production
-host details. `secrets.example.yml` files contain variable names and placeholder
-values only. Operators create and edit encrypted `*.sops.yml` files from trusted
-workstations; plaintext values are never committed or sent to Pi.
+host details and is only for credential-free Pi/CI checks. Before production
+Ansible, an operator copies
+`ansible/inventory/production/hosts.example.yml` to a mode-`0600` file such as
+`~/.config/survivability/production-hosts.yml` and replaces the access
+placeholders: the host, named operator, existing manual/FIDO2 key path, and
+dedicated Ansible key path. Phase 7 adds three non-secret backup
+placeholders in the same file: the Storage Box endpoint and subaccount
+username from `tofu output`, plus the pinned port 22 known_hosts entry. Ansible
+reads the two adjacent `.pub` files, so public-key content is
+not copied into variables. Only local paths—not key content—belong in the
+inventory. After the dedicated public key is authorized for the existing root
+account, the one-time bootstrap uses it for both root and named-operator
+connections. See
+[`docs/runbooks/phase6-access-bootstrap.md`](docs/runbooks/phase6-access-bootstrap.md)
+for the concise operator procedure. Routine host configuration is documented in
+[`docs/runbooks/phase6-host-baseline.md`](docs/runbooks/phase6-host-baseline.md),
+and guarded nftables activation is documented in
+[`docs/runbooks/phase6-host-firewall.md`](docs/runbooks/phase6-host-firewall.md).
+
+`secrets.example.yml` files contain variable names and placeholder values only.
+Operators create and edit encrypted `*.sops.yml` files from trusted workstations;
+plaintext values are never committed or sent to Pi. The Phase 7 backup secrets
+are created from
+`ansible/inventory/production/group_vars/all/secrets.example.yml`; the
+committed `secrets.sops.yml` file stays SOPS-encrypted and is rendered
+root-only by the `backup_restic` role.
 
 OpenTofu state uses a manually bootstrapped, versioned Backblaze B2 bucket with
 enforced client-side encryption. The design deliberately accepts no dependable
 distributed lock, so only one operator may run OpenTofu at a time. See
 [`docs/runbooks/phase3-opentofu-adoption.md`](docs/runbooks/phase3-opentofu-adoption.md)
-for the trusted-workstation procedure.
+for the trusted-workstation procedure. The separately confirmed rebuild is
+specified in
+[`docs/runbooks/phase5-cpx32-rebuild.md`](docs/runbooks/phase5-cpx32-rebuild.md).
 
 `operator.env.example` documents trusted-workstation variable names with empty
 values. Never populate that tracked file; copy it outside the repository and

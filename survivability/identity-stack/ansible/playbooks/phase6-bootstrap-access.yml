@@ -1,0 +1,25 @@
+---
+- name: Bootstrap the named operator with manual and Ansible SSH identities
+  hosts: identity_stack
+  become: true
+  gather_facts: true
+  vars:
+    operator_access_allow_root_ssh: true
+  pre_tasks:
+    - name: Require the rebuilt Debian 13 host
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == 'Debian'
+          - ansible_facts.distribution_major_version == '13'
+          - ansible_facts.architecture == 'x86_64'
+        fail_msg: "Access bootstrap requires the validated Debian 13 x86 host."
+  roles:
+    - role: operator_access
+  post_tasks:
+    - name: Close the bootstrap connection before named-operator verification
+      ansible.builtin.meta: reset_connection
+
+# The normal play reconnects with the dedicated Ansible identity, proves sudo,
+# and only then applies the declarative policy that disables root SSH.
+- name: Continue with normal host convergence
+  ansible.builtin.import_playbook: site.yml

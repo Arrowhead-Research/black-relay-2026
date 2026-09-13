@@ -1,0 +1,173 @@
+#!/bin/bash
+# Managed by Ansible: {{ backup_restic_script_path }}
+# Root-only wrapper for restic backup operations with Healthchecks.io
+# signaling. Secrets are sourced from the mode-0600 environment file.
+set -uo pipefail
+
+ENV_FILE="{{ backup_restic_env_file }}"
+STAGING_DIR="{{ backup_restic_staging_dir }}"
+FRESHNESS_HELPER="{{ backup_restic_freshness_helper }}"
+SSH_CONFIG="{{ backup_restic_ssh_config_file }}"
+LOCK_RETRY="{{ backup_restic_lock_retry }}"
+CHECK_SUBSET="{{ backup_restic_check_read_data_subset }}"
+STALE_HOURS="{{ backup_restic_stale_after_hours }}"
+EXPECTED_PRUNE_CONFIRMATION="{{ backup_restic_required_prune_confirmation }}"
+
+BACKUP_PATHS=(
+{% for path in backup_restic_backup_paths %}
+  {{ path }}
+{% endfor %}
+)
+EXCLUDE_ARGS=(
+{% for pattern in backup_restic_exclude_patterns %}
+  --exclude '{{ pattern }}'
+{% endfor %}
+)
+KEEP_ARGS=(
+  --keep-daily {{ backup_restic_keep_daily }}
+  --keep-weekly {{ backup_restic_keep_weekly }}
+  --keep-monthly {{ backup_restic_keep_monthly }}
+)
+SQLITE_ROOTS=(
+{% for root in backup_restic_sqlite_roots %}
+  {{ root }}
+{% endfor %}
+)
+SQLITE_GLOBS=(
+{% for glob in backup_restic_sqlite_globs %}
+  '{{ glob }}'
+{% endfor %}
+)
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "survivability-backup: must run as root" >&2
+  exit 1
+fi
+if [ ! -r "${ENV_FILE}" ]; then
+  echo "survivability-backup: missing environment file ${ENV_FILE}" >&2
+  exit 1
+fi
+# shellcheck disable=SC1090
+. "${ENV_FILE}"
+
+restic_cmd() {
+  restic -o "sftp.args=-F ${SSH_CONFIG}" "$@"
+}
+
+hc_ping() {
+  curl --retry 3 --retry-delay 2 --max-time 10 --silent --output /dev/null "$1" || true
+}
+
+stage_sqlite() {
+  local root glob db relative destination escaped_destination
+  if ! rm -rf "${STAGING_DIR}/sqlite" || ! mkdir -p "${STAGING_DIR}/sqlite"; then
+    echo "survivability-backup: cannot reset SQLite staging" >&2
+    return 1
+  fi
+  for root in "${SQLITE_ROOTS[@]}"; do
+    [ -d "${root}" ] || continue
+    for glob in "${SQLITE_GLOBS[@]}"; do
+      while IFS= read -r -d '' db; do
+        relative="${db#/}"
+        destination="${STAGING_DIR}/sqlite/${relative}"
+        if ! mkdir -p "$(dirname "${destination}")"; then
+          echo "survivability-backup: cannot stage SQLite copy: ${db}" >&2
+          return 1
+        fi
+        escaped_destination="${destination//\"/\"\"}"
+        if ! sqlite3 "${db}" ".backup \"${escaped_destination}\""; then
+          echo "survivability-backup: SQLite copy failed: ${db}" >&2
+          return 1
+        fi
+      done < <(find "${root}" -xdev -type f -name "${glob}" -print0)
+    done
+  done
+}
+
+cmd_backup() {
+  hc_ping "${SURVIVABILITY_HC_BACKUP_URL}/start"
+  if ! stage_sqlite; then
+    hc_ping "${SURVIVABILITY_HC_BACKUP_URL}/fail"
+    return 1
+  fi
+  if restic_cmd --retry-lock "${LOCK_RETRY}" backup --one-file-system \
+    "${EXCLUDE_ARGS[@]}" "${BACKUP_PATHS[@]}"; then
+    hc_ping "${SURVIVABILITY_HC_BACKUP_URL}"
+    return 0
+  fi
+  local rc=$?
+  hc_ping "${SURVIVABILITY_HC_BACKUP_URL}/fail"
+  return "${rc}"
+}
+
+cmd_verify() {
+  hc_ping "${SURVIVABILITY_HC_MAINTENANCE_URL}/start"
+  local rc=0
+  restic_cmd --retry-lock "${LOCK_RETRY}" check \
+    --read-data-subset="${CHECK_SUBSET}" || rc=$?
+  if [ "${rc}" -eq 0 ]; then
+    restic_cmd snapshots --json | "${FRESHNESS_HELPER}" "${STALE_HOURS}" || rc=$?
+  fi
+  if [ "${rc}" -eq 0 ]; then
+    hc_ping "${SURVIVABILITY_HC_MAINTENANCE_URL}"
+  else
+    hc_ping "${SURVIVABILITY_HC_MAINTENANCE_URL}/fail"
+  fi
+  return "${rc}"
+}
+
+cmd_prune() {
+  local confirmation="${1:-}"
+  if [ "${confirmation}" != "${EXPECTED_PRUNE_CONFIRMATION}" ]; then
+    echo "survivability-backup: pruning requires exact confirmation:" >&2
+    echo "${EXPECTED_PRUNE_CONFIRMATION}" >&2
+    return 64
+  fi
+  restic_cmd --retry-lock "${LOCK_RETRY}" forget --prune "${KEEP_ARGS[@]}"
+}
+
+cmd_init() {
+  local rc=0
+  restic_cmd snapshots >/dev/null 2>&1 || rc=$?
+  if [ "${rc}" -eq 0 ]; then
+    echo "survivability-backup: repository already present"
+    return 0
+  fi
+  if [ "${rc}" -eq 10 ]; then
+    restic_cmd init
+    echo "survivability-backup: repository initialized"
+    return 0
+  fi
+  return "${rc}"
+}
+
+cmd_require_repository() {
+  restic_cmd snapshots >/dev/null
+}
+
+case "${1:-}" in
+  backup)
+    cmd_backup
+    ;;
+  verify)
+    cmd_verify
+    ;;
+  prune)
+    shift
+    cmd_prune "${1:-}"
+    ;;
+  init-if-needed)
+    cmd_init
+    ;;
+  require-repository)
+    cmd_require_repository
+    ;;
+  run)
+    shift
+    restic_cmd "$@"
+    ;;
+  *)
+    echo "usage: survivability-backup {backup|verify|prune CONFIRMATION|init-if-needed|require-repository|run RESTIC_ARGS...}" >&2
+    exit 64
+    ;;
+esac

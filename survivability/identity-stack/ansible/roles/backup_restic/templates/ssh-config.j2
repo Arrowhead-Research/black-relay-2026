@@ -1,0 +1,13 @@
+# Managed by Ansible. Used only by the restic SFTP backend via -F; it does not
+# replace or modify the operator's /root/.ssh/config.
+Host {{ backup_restic_storage_box_server }}
+  IdentityFile {{ backup_restic_ssh_key_file }}
+  IdentitiesOnly yes
+  PasswordAuthentication no
+  KbdInteractiveAuthentication no
+  BatchMode yes
+  StrictHostKeyChecking yes
+  UserKnownHostsFile {{ backup_restic_known_hosts_file }}
+  AddressFamily inet
+  ServerAliveInterval 60
+  ServerAliveCountMax 240

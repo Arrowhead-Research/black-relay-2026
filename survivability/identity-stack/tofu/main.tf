@@ -158,8 +158,45 @@ resource "hcloud_storage_box" "backups" {
   location         = var.storage_box_location
   password         = var.storage_box_password
 
+  # Port 22 remains available for SFTP/SCP on Storage Boxes. Do not enable the
+  # optional port-23 interactive SSH service for the primary account.
+  access_settings = {
+    ssh_enabled          = false
+    reachable_externally = var.storage_box_bootstrap_external_reachability
+    samba_enabled        = false
+    webdav_enabled       = false
+    zfs_enabled          = false
+  }
+
   delete_protection = true
   labels            = local.common_labels
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# Home-scoped, least-privilege account for automated restic backups over SFTP
+# port 22. The production VPS authenticates with a dedicated SSH key installed
+# by the operator; this password is a recovery path only, kept in encrypted
+# state, and is never used by scheduled backups.
+resource "hcloud_storage_box_subaccount" "restic" {
+  storage_box_id = hcloud_storage_box.backups.id
+  name           = "restic"
+  home_directory = "backups/"
+  password       = var.storage_box_subaccount_password
+  description    = "Restic SFTP backups from the production identity stack."
+  labels         = local.common_labels
+
+  # Port 22 SFTP/SCP is always available; leave the optional interactive
+  # port-23 SSH service disabled. The account is writable for restic retention.
+  access_settings = {
+    ssh_enabled          = false
+    reachable_externally = var.storage_box_bootstrap_external_reachability
+    samba_enabled        = false
+    webdav_enabled       = false
+    readonly             = false
+  }
 
   lifecycle {
     prevent_destroy = true

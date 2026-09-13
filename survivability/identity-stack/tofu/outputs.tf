@@ -27,3 +27,13 @@ output "storage_box_server" {
   description = "Public endpoint of the protected BX11 storage box."
   value       = hcloud_storage_box.backups.server
 }
+
+output "storage_box_subaccount_username" {
+  description = "Username of the home-scoped restic backup subaccount."
+  value       = hcloud_storage_box_subaccount.restic.username
+}
+
+output "storage_box_subaccount_server" {
+  description = "Public endpoint of the home-scoped restic backup subaccount."
+  value       = hcloud_storage_box_subaccount.restic.server
+}

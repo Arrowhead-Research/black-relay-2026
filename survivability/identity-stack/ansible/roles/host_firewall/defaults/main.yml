@@ -1,0 +1,5 @@
+---
+# Required only when the desired policy differs from the active policy. Use the
+# exact value APPLY_HOST_FIREWALL_<inventory hostname> from the operator command.
+host_firewall_apply_confirmation: ""
+host_firewall_rollback_seconds: 120

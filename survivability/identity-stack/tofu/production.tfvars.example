@@ -6,6 +6,9 @@ expected_server_id     = 12345678
 existing_server_name   = "REPLACE_WITH_EXISTING_SERVER_NAME"
 server_backups_enabled = false
 
+# Phase 7 enables optional Hetzner server backups by setting the value above
+# to true in the operator's private production.tfvars.
+
 expected_primary_ipv4_id   = 12345678
 existing_primary_ipv4_name = "REPLACE_WITH_EXISTING_PRIMARY_IPV4_NAME"
 primary_ipv4_address        = "192.0.2.10"
@@ -17,5 +20,9 @@ headscale_hostname   = "headscale.example.com"
 
 storage_box_name     = "survivability-production-backups"
 storage_box_location = "hel1"
+
+# Set true only for the short workstation key-enrollment bootstrap in the
+# Phase 7 runbook, then return it to false before production backup activation.
+storage_box_bootstrap_external_reachability = false
 
 project_slug = "survivability"

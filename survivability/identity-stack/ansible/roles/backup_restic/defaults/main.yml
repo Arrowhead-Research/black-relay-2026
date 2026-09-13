@@ -1,0 +1,84 @@
+---
+# Non-secret configuration only. Backup credentials are loaded from the
+# SOPS-encrypted secrets file referenced by backup_restic_secrets_file, and the
+# Storage Box connection details come from the operator's external inventory.
+backup_restic_secrets_file: >-
+  {{ playbook_dir }}/../inventory/production/group_vars/all/secrets.sops.yml
+
+backup_restic_packages:
+  - curl
+  - openssh-client
+  - restic
+  - sqlite3
+
+backup_restic_config_dir: /etc/survivability-backup
+backup_restic_env_file: /etc/survivability-backup/restic.env
+backup_restic_password_file: /etc/survivability-backup/repository-password
+backup_restic_ssh_config_file: /etc/survivability-backup/ssh_config
+backup_restic_state_dir: /var/lib/survivability-backup
+backup_restic_ssh_dir: /var/lib/survivability-backup/ssh
+backup_restic_ssh_key_file: /var/lib/survivability-backup/ssh/id_ed25519
+backup_restic_known_hosts_file: /var/lib/survivability-backup/ssh/known_hosts
+backup_restic_cache_dir: /var/cache/restic
+backup_restic_staging_dir: /var/backups/survivability
+backup_restic_helper_dir: /usr/local/lib/survivability
+backup_restic_freshness_helper: /usr/local/lib/survivability/check-restic-freshness.py
+backup_restic_script_path: /usr/local/sbin/survivability-backup
+
+# SFTP port 22 is always available on Storage Boxes. It avoids enabling the
+# optional interactive SSH service on port 23; its authorized key is RFC4716.
+backup_restic_sftp_port: 22
+backup_restic_repository_path: "./restic"
+backup_restic_repository: >-
+  sftp://{{ backup_restic_storage_box_subaccount_username }}@{{
+  backup_restic_storage_box_server }}:{{ backup_restic_sftp_port }}/{{
+  backup_restic_repository_path }}
+
+backup_restic_lock_retry: 15m
+
+backup_restic_backup_paths:
+  - /etc
+  - /root
+  - /srv
+  - /var/backups/survivability
+  - /var/lib/survivability-backup
+  - /var/lib/survivability-firewall
+backup_restic_exclude_patterns:
+  - /root/.cache
+backup_restic_sqlite_roots:
+  - /srv
+backup_restic_sqlite_globs:
+  - "*.sqlite"
+  - "*.sqlite3"
+  - "*.db"
+
+# Retention from the roadmap: 7 daily, 5 weekly, and 12 monthly snapshots.
+backup_restic_keep_daily: 7
+backup_restic_keep_weekly: 5
+backup_restic_keep_monthly: 12
+backup_restic_check_read_data_subset: 1/16
+backup_restic_stale_after_hours: 26
+
+backup_restic_backup_oncalendar: "*-*-* 02:00"
+backup_restic_backup_randomized_delay: 30min
+backup_restic_maintenance_oncalendar: "Mon *-*-* 03:30"
+backup_restic_maintenance_randomized_delay: 30min
+
+# Initializing an empty remote path creates a new repository and is therefore
+# opt-in with an exact operator confirmation. Normal convergence fails closed
+# if the configured repository disappears.
+backup_restic_init_repository: false
+backup_restic_init_confirmation: ""
+backup_restic_required_init_confirmation: >-
+  INITIALIZE_RESTIC_{{ inventory_hostname }}
+
+# Snapshot removal and prune are never scheduled. The operator must pass this
+# inventory-specific value to the wrapper for every destructive retention run.
+backup_restic_required_prune_confirmation: >-
+  PRUNE_RESTIC_{{ inventory_hostname }}
+
+backup_restic_healthchecks_url_pattern: '^https://[^/]+/[0-9a-fA-F-]+$'
+backup_restic_known_hosts_pattern: >-
+  ^(\[[^]]+\]:[0-9]+|[a-z0-9.-]+)
+  (ssh-[a-z0-9@.-]+|ecdsa-[a-z0-9@.-]+|rsa-[a-z0-9@.-]+|sk-[a-z0-9@.-]+)
+  [A-Za-z0-9+/=]+$

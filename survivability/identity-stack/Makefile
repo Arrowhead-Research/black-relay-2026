@@ -70,5 +70,7 @@ validate:
 	trap 'rm -rf "$$tofu_data_dir"' EXIT; \
 	TF_DATA_DIR="$$tofu_data_dir" tofu -chdir=tofu init -backend=false -input=false -lockfile=readonly; \
 	TF_DATA_DIR="$$tofu_data_dir" tofu -chdir=tofu validate
-	ANSIBLE_INVENTORY=$(SAFE_ANSIBLE_INVENTORY) ansible-playbook --syntax-check ansible/playbooks/site.yml
+	@for playbook in ansible/playbooks/*.yml; do \
+		ANSIBLE_INVENTORY=$(SAFE_ANSIBLE_INVENTORY) ansible-playbook --syntax-check "$$playbook"; \
+	done
 	python3 -m unittest discover -s tests

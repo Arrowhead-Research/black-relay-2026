@@ -1,0 +1,37 @@
+---
+# Non-secret shape only. Copy this file to the trusted operator workstation and
+# replace the four placeholders there. Never commit production host details or
+# private-key paths.
+all:
+  children:
+    identity_stack:
+      hosts:
+        identity_production:
+          ansible_host: "REPLACE_WITH_PRODUCTION_IPV4_OR_DNS_NAME"
+          ansible_port: 22
+          operator_access_user: "REPLACE_WITH_OPERATOR_USERNAME"
+
+          # The existing manual/FIDO2 identity remains an optional manual login
+          # key; Ansible does not use it as its connection identity.
+          operator_access_manual_ssh_private_key_file: >-
+            /ABSOLUTE/PATH/TO/REPLACE_WITH_CURRENT_OPERATOR_SSH_IDENTITY
+
+          # Both bootstrap and normal site.yml runs use this non-interactive key.
+          operator_access_ansible_ssh_private_key_file: &ansible_ssh_identity >-
+            /ABSOLUTE/PATH/TO/REPLACE_WITH_DEDICATED_ANSIBLE_SSH_IDENTITY
+
+          ansible_user: root
+          ansible_ssh_private_key_file: *ansible_ssh_identity
+          ansible_python_interpreter: /usr/bin/python3
+          ansible_ssh_common_args: >-
+            -o IdentitiesOnly=yes
+            -o PasswordAuthentication=no
+
+          # ssh-keyscan against the always-on Storage Box SFTP port 22, then
+          # verify the fingerprint against Hetzner's published host keys.
+          # See docs/runbooks/phase7-backup-foundation.md.
+          backup_restic_storage_box_server: "REPLACE_WITH_STORAGE_BOX_FQDN"
+          backup_restic_storage_box_subaccount_username: "REPLACE_WITH_SUBACCOUNT_USERNAME"
+          backup_restic_storage_box_known_hosts:
+            - >-
+              REPLACE_WITH_STORAGE_BOX_FQDN ssh-ed25519 REPLACE_WITH_HOST_KEY

@@ -1,0 +1,239 @@
+---
+- name: Validate host firewall settings
+  ansible.builtin.assert:
+    that:
+      - host_firewall_rollback_seconds | int >= 60
+      - host_firewall_rollback_seconds | int <= 600
+    fail_msg: "Host firewall rollback must be scheduled between 60 and 600 seconds."
+
+- name: Install nftables
+  ansible.builtin.apt:
+    name: nftables
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Read Docker daemon policy
+  ansible.builtin.slurp:
+    src: /etc/docker/daemon.json
+  register: host_firewall_docker_daemon
+
+- name: Require hardened Docker forwarding prerequisites
+  ansible.builtin.assert:
+    that:
+      - >-
+        not ((host_firewall_docker_daemon.content | b64decode | from_json).icc | bool)
+      - >-
+        not ((host_firewall_docker_daemon.content | b64decode |
+        from_json)['userland-proxy'] | bool)
+    fail_msg: >-
+      Docker must have icc=false and userland-proxy=false before the host
+      firewall is applied.
+
+- name: Create nftables policy directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - path: /etc/nftables.d
+      mode: "0755"
+    - path: /var/lib/survivability-firewall
+      mode: "0700"
+
+- name: Install nftables service entry point without flushing other tables
+  ansible.builtin.copy:
+    dest: /etc/nftables.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      #!/usr/sbin/nft -f
+      # Managed by Ansible. Docker owns separate runtime tables.
+      include "/etc/nftables.d/*.nft"
+
+- name: Install automatic firewall rollback helper
+  ansible.builtin.template:
+    src: rollback-host-firewall.sh.j2
+    dest: /usr/local/sbin/rollback-survivability-firewall
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Render candidate host firewall policy
+  ansible.builtin.template:
+    src: survivability.nft.j2
+    dest: /etc/nftables.survivability.candidate
+    owner: root
+    group: root
+    mode: "0600"
+  register: host_firewall_candidate
+
+- name: Inspect persistent host firewall policy
+  ansible.builtin.stat:
+    path: /etc/nftables.d/survivability.nft
+  register: host_firewall_active_file
+
+- name: Inspect nftables executable
+  ansible.builtin.stat:
+    path: /usr/sbin/nft
+  register: host_firewall_nft_binary
+  check_mode: false
+
+- name: Inspect active host firewall table
+  ansible.builtin.command: /usr/sbin/nft list table inet survivability_filter
+  register: host_firewall_runtime
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: host_firewall_nft_binary.stat.exists
+
+- name: Determine whether firewall activation is required
+  ansible.builtin.set_fact:
+    host_firewall_activation_required: >-
+      {{ host_firewall_candidate.changed or
+      not host_firewall_active_file.stat.exists or
+      (host_firewall_runtime.rc | default(1) != 0) }}
+    host_firewall_required_confirmation: >-
+      {{ 'APPLY_HOST_FIREWALL_' ~ inventory_hostname }}
+
+- name: Require resource-specific confirmation for firewall activation
+  ansible.builtin.assert:
+    that:
+      - >-
+        not host_firewall_activation_required or
+        host_firewall_apply_confirmation == host_firewall_required_confirmation
+    fail_msg: >-
+      Applying a new host firewall policy requires
+      host_firewall_apply_confirmation={{ host_firewall_required_confirmation }}.
+      The confirmation is needed only when policy activation is required.
+
+- name: Validate candidate nftables policy
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/nft
+      - --check
+      - --file
+      - /etc/nftables.survivability.candidate
+  changed_when: false
+  when:
+    - host_firewall_activation_required
+    - not ansible_check_mode
+
+- name: Preserve current policy as rollback state
+  ansible.builtin.copy:
+    src: /etc/nftables.d/survivability.nft
+    dest: /var/lib/survivability-firewall/last-known-good.nft
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+  when:
+    - host_firewall_activation_required
+    - host_firewall_active_file.stat.exists
+    - not ansible_check_mode
+
+- name: Remove stale rollback state before initial activation
+  ansible.builtin.file:
+    path: /var/lib/survivability-firewall/last-known-good.nft
+    state: absent
+  when:
+    - host_firewall_activation_required
+    - not host_firewall_active_file.stat.exists
+    - not ansible_check_mode
+
+- name: Activate host firewall with automatic rollback
+  when:
+    - host_firewall_activation_required
+    - not ansible_check_mode
+  block:
+    - name: Select unique rollback unit
+      ansible.builtin.set_fact:
+        host_firewall_rollback_unit: >-
+          {{ 'survivability-firewall-rollback-' ~ ansible_date_time.epoch }}
+
+    - name: Schedule automatic rollback before activation
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/systemd-run
+          - "{{ '--unit=' ~ host_firewall_rollback_unit }}"
+          - "{{ '--on-active=' ~ host_firewall_rollback_seconds ~ 's' }}"
+          - /usr/local/sbin/rollback-survivability-firewall
+      changed_when: true
+
+    - name: Apply candidate policy atomically
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/nft
+          - --file
+          - /etc/nftables.survivability.candidate
+      changed_when: true
+
+    - name: Close the existing SSH control connection
+      ansible.builtin.meta: reset_connection
+
+    - name: Prove fresh SSH and sudo access through the candidate policy
+      ansible.builtin.wait_for_connection:
+        connect_timeout: 5
+        sleep: 2
+        timeout: 45
+
+    - name: Verify candidate table is active
+      ansible.builtin.command: /usr/sbin/nft list table inet survivability_filter
+      changed_when: false
+
+    - name: Persist the verified policy
+      ansible.builtin.copy:
+        src: /etc/nftables.survivability.candidate
+        dest: /etc/nftables.d/survivability.nft
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Record verified policy as last known good
+      ansible.builtin.copy:
+        src: /etc/nftables.survivability.candidate
+        dest: /var/lib/survivability-firewall/last-known-good.nft
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Enable persistent nftables service
+      ansible.builtin.systemd_service:
+        name: nftables
+        enabled: true
+        state: started
+
+    - name: Cancel automatic rollback after fresh connection succeeds
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/systemctl
+          - stop
+          - "{{ host_firewall_rollback_unit }}.timer"
+      changed_when: true
+
+  rescue:
+    - name: Report scheduled firewall recovery
+      ansible.builtin.debug:
+        msg: >-
+          Firewall activation failed. Do not reboot. The scheduled rollback will
+          restore the last-known-good policy or remove the new host table within
+          {{ host_firewall_rollback_seconds }} seconds; the Hetzner firewall
+          remains attached.
+
+    - name: Stop after firewall activation failure
+      ansible.builtin.fail:
+        msg: "Host firewall activation failed; wait for automatic rollback."
+
+- name: Keep verified nftables policy enabled
+  ansible.builtin.systemd_service:
+    name: nftables
+    enabled: true
+    state: started
+  when:
+    - not host_firewall_activation_required
+    - not ansible_check_mode

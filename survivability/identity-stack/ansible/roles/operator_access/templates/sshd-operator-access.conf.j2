@@ -1,0 +1,12 @@
+# Managed by Ansible. Local edits will be overwritten.
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+UsePAM yes
+PermitEmptyPasswords no
+PermitRootLogin {{ 'prohibit-password' if operator_access_allow_root_ssh else 'no' }}
+AuthenticationMethods publickey
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding yes

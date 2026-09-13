@@ -1,0 +1,10 @@
+---
+# Both identities belong to the same named operator. The manual identity is the
+# existing Phase 5 bootstrap/FIDO2 key; the dedicated Ansible identity avoids an
+# interactive touch/PIN during normal convergence. Only public halves are sent
+# to the host.
+operator_access_user: ""
+operator_access_group: survivability-admins
+operator_access_manual_ssh_private_key_file: ""
+operator_access_ansible_ssh_private_key_file: ""
+operator_access_allow_root_ssh: false

@@ -85,13 +85,31 @@ third-party automation. Neither receives production authority.
 | Import, plan, and apply OpenTofu | Trusted operator workstation | Provider and state credentials |
 | Create or edit encrypted SOPS files | Trusted operator workstation | Operator's individual age key |
 | Rebuild the CPX32 | Trusted operator workstation | Hetzner authority plus explicit server-ID confirmation |
-| Check and deploy Ansible | Trusted operator workstation | SSH/MFA and required SOPS recipients |
+| Check and deploy Ansible | Trusted operator workstation | Operator SSH identity and required SOPS recipients |
 | Restore production or test backups | Trusted operator workstation | SSH, SOPS, and backup credentials |
+| Generate backup credentials and Healthchecks.io checks | Trusted operator workstation | Operator age key, trusted secret storage, and monitoring account |
 
 Never give Pi a production API token, B2 key, state-encryption key, age private
 key, SSH key or agent socket, TOTP seed, Docker socket, production environment
-file, or decrypted secret. Operators must not paste credentials into chat.
-Secret-bearing Ansible tasks use `no_log: true` and `diff: false`.
+file, production Ansible inventory, or decrypted secret. Operators must not
+paste credentials into chat. Secret-bearing Ansible tasks use `no_log: true` and
+`diff: false`.
+
+The committed Ansible inventory remains empty for credential-free validation. A
+trusted operator creates a mode-`0600` `production-hosts.yml` outside the
+repository from the committed placeholder example. It contains only the
+production host/address, one named operator, absolute paths to the operator's
+manual and dedicated Ansible SSH identities (never key content), the Python
+interpreter, and safe SSH options. The operator sets `ANSIBLE_INVENTORY` to that
+file. The dedicated key is the Ansible connection identity for both root
+bootstrap and normal convergence. Because the completed Phase 5 rebuild
+installed only the manual/FIDO2 key, the operator authorizes the dedicated
+public key for root once through an interactive trusted-workstation SSH command.
+The Phase 6 playbook then installs both public keys for the named operator,
+reconnects with the dedicated key, proves sudo automatically, and only then
+disables root SSH. Every later `site.yml` run selects the dedicated key and
+named operator without changing inventory. Future rebuilds inject the dedicated
+public key directly and do not need the compatibility step.
 
 GitHub Actions may publish the edge image but must receive no Hetzner,
 Cloudflare, B2, SOPS, SSH, or deployment credential. Production consumes only a
@@ -123,10 +141,11 @@ The generic image contains:
 - Basic SSH, logging, and operating-system hardening.
 - Cloud-init compatibility without operator-specific credentials.
 
-Ansible owns named users, authorized keys, SSH MFA policy, nftables, CrowdSec,
-Fluent Bit configuration, service configuration, and all environment-specific
-values. Ansible applies current security updates because snapshots age.
-Unattended security updates may run, but unattended reboots may not.
+Ansible owns named users, authorized keys, SSH access policy, nftables,
+CrowdSec, Fluent Bit configuration, service configuration, and all
+environment-specific values. Ansible applies current security updates because
+snapshots age. Unattended security updates may run, but unattended reboots may
+not.
 
 Image builds occur on a schedule and for critical base fixes. A disposable
 currently available server type validates a candidate in Helsinki before
@@ -167,15 +186,20 @@ not be enabled without equivalent policy and testing. nftables rules must be
 validated against Docker's packet handling so published container ports cannot
 bypass policy. Only Caddy publishes application HTTP ports.
 
-SSH uses named accounts with no shared human login, disabled root login, and no
-password-only authentication. Per-user policy supports either:
-
-- A software SSH key followed by PAM TOTP; or
-- A FIDO2 SSH key with enforced user verification such as PIN/touch.
-
-Initial MFA enrollment occurs through a controlled console/bootstrap sequence.
-At least two operators must remain able to perform CLI recovery. Public SSH is
-an independent break-glass path and is never restricted solely to Headscale.
+SSH initially uses one named, fully trusted operator account with two keys owned
+by that operator. The existing manual/FIDO2 identity remains a manual recovery
+path. A distinct dedicated Ed25519 key performs the Ansible root bootstrap and
+all normal convergence. The already-rebuilt server requires one interactive
+transfer of that dedicated public key through the currently authorized FIDO2
+connection; future rebuilds inject it directly. Normal `site.yml` runs select
+the dedicated identity, prove passwordless sudo, validate SSH configuration,
+and remove root access without manual enrollment or verification flags. Root
+login and password authentication are disabled. The dedicated
+private key remains mode `0600` on the trusted workstation and accepts local
+workstation protection in place of per-connection hardware user presence.
+Additional named operators can be added declaratively when actually needed; a
+second person is not a prerequisite for initial host configuration. Public SSH
+is an independent break-glass path and is never restricted solely to Headscale.
 All supported cloud and repository accounts use strong provider MFA and offline
 recovery codes.
 
@@ -271,7 +295,10 @@ Cloudflare DNS.
 OpenTofu provisions a protected BX11 Storage Box. The VPS accesses a dedicated
 least-privilege backup subaccount using its own SSH key. Restic uses a separate
 repository password and encrypts data client-side. Both are delivered through
-SOPS-backed Ansible variables and rendered root-only.
+SOPS-backed Ansible variables and rendered root-only. External Storage Box
+reachability is disabled after one short, reviewed workstation bootstrap for
+subaccount-key enrollment; production SFTP must then succeed only from the
+Hetzner network.
 
 Daily backups run around 02:00 UTC with randomized delay and overlap
 prevention. They capture consistent copies of all SQLite databases,
@@ -289,8 +316,14 @@ type in Helsinki. They do not use production DNS or clients. Tests restore the
 coordinated stack, validate data and health, record recovery time against the
 four-hour RTO, and destroy the temporary server afterward.
 
-Healthchecks.io receives job start/success/failure signals. A separate external
-service polls Pocket ID and Headscale HTTPS endpoints. Both send email alerts.
+Healthchecks.io receives job start/success/failure signals through separate
+daily backup and weekly verification checks; the daily check uses a one-day
+period with a two-hour grace period so a missing successful ping alerts at
+the 26-hour objective. The weekly verification job checks repository integrity
+with a partial data read and fails when the newest snapshot is older than the
+objective. Retention pruning remains an exact-confirmation operator action, not
+a scheduled task. A separate external service polls Pocket ID and Headscale
+HTTPS endpoints. Both paths send email alerts.
 Local journald and Caddy logs are bounded to approximately 7-14 days and must
 exclude authorization headers, cookies, LDAP credentials, OIDC tokens, and
 request bodies. Fluent Bit remains disabled until an external logging service,
@@ -390,6 +423,14 @@ Exit criteria:
 
 ### Phase 5: Explicit CPX32 rebuild
 
+Status: complete. A trusted operator ran the guarded in-place rebuild from the
+explicit promoted snapshot. The server object and independent Primary IPv4 were
+preserved, Debian 13 and emergency SSH access were verified, both provider
+protections were restored manually after a CLI/API compatibility error, and the
+post-rebuild OpenTofu plan converged with no changes. The restoration command
+and regression tests now send both enabled protection values as required by the
+current API.
+
 Operator-run sequence:
 
 1. Confirm imported resource state and protections.
@@ -410,25 +451,78 @@ Exit criteria:
 
 ### Phase 6: Host baseline and access
 
-- Manage named administrators, per-user SSH mode, MFA bootstrap, nftables,
-  updates, journald bounds, and CrowdSec.
-- Disable root and password-only SSH after both authentication modes and console
-  recovery are tested.
-- Surface pending reboot and disk-pressure conditions by email.
+Status: complete. A trusted operator completed and verified the declarative
+`operator_access`, `host_baseline`, and `host_firewall` roles in production.
+The named account retains the manual/FIDO2 recovery key and uses a distinct
+non-interactive Ansible key; root and password SSH are disabled. Safe package
+updates, unattended-update scheduling without automatic reboots, bounded
+persistent journald, sysctl hardening, and non-mutating reboot/disk-pressure
+reporting are active.
 
-Exit criteria:
+The guarded nftables policy was validated and activated with timed rollback and
+a fresh SSH proof before persistence. The operator reported TCP 22/80/443 plus
+required ICMP exposure, Docker-DNAT backend-port enforcement, and a final
+no-change `site.yml` run. The protected Hetzner Firewall remained attached and
+unchanged.
+
+CrowdSec installation and its SSH/Caddy log integration now belong to Phase 8,
+when the edge logging path exists. Email delivery for host status belongs to
+Phase 11 monitoring; Phase 6 already surfaces pending reboot and disk pressure
+in every Ansible run. Phase numbers are roadmap labels, while `site.yml`
+continues to compose semantic, idempotent roles.
+
+Exit criteria achieved:
 
 - Public exposure matches TCP 22/80/443 plus required ICMP.
-- Software-key/TOTP and FIDO2 operator paths work as configured.
+- The dedicated Ansible key works, the manual operator key remains
+  declaratively authorized, and root SSH is disabled.
 - Docker cannot bypass backend-port restrictions.
-- A second run is idempotent.
+- Normal `site.yml` convergence is idempotent.
 
 ### Phase 7: Backup foundation
+
+Status: next. The credential-free implementation, operator runbook, and tests
+are in place; a trusted operator must complete the sequence below and record
+completion.
 
 - Provision/protect BX11 and render root-only restic configuration.
 - Add consistent backup, retention, verification, and Healthchecks.io signals.
 - Enable optional Hetzner server backups.
 - Run an isolated initial restore before identity data becomes important.
+
+OpenTofu adds a home-scoped SFTP-only `hcloud_storage_box_subaccount` over
+the always-on port 22 and leaves optional interactive port-23 SSH disabled.
+External Storage Box reachability is disabled in steady state; the runbook uses
+a short, reviewed bootstrap window only to enroll the subaccount key and pin
+its host key. The `backup_restic` Ansible role renders root-only restic
+credentials from SOPS, stages consistent SQLite copies, schedules the guarded
+daily 02:00 UTC backup and weekly Monday verification timers, and signals
+separate Healthchecks.io checks for start/success/failure. The weekly timer
+verifies repository integrity and the 26-hour freshness guard. Retention is 7
+daily, 5 weekly, and 12 monthly snapshots, applied only by an
+operator-confirmed `forget --prune` command.
+
+Operator-run sequence:
+
+1. Generate the dedicated backup SSH key and create the two Healthchecks.io
+   checks (daily backup with a two-hour grace period; weekly verification).
+2. Create and commit the SOPS-encrypted backup secrets file.
+3. Enable `server_backups_enabled` and set the temporary
+   `storage_box_bootstrap_external_reachability=true` flag, then apply OpenTofu
+   with the subaccount password from trusted secret storage; review the
+   in-place-only plan.
+4. Authorize the RFC4716 backup public key on SFTP port 22 and pin the Storage
+   Box host key against Hetzner's published fingerprint.
+5. Set external reachability back to false and apply the narrow private-only
+   OpenTofu plan before deploying restic.
+6. Apply `site.yml` with the one-time exact repository-initialization
+   confirmation, then run the first backup manually.
+7. Review the retention dry run and apply confirmed `forget --prune` only in
+   an operator maintenance window.
+8. Test the failure signal and the Healthchecks.io staleness alert.
+9. Run the guarded isolated restore test on a disposable server and record
+   the duration against the four-hour objective.
+10. Rerun `site.yml` and require no changes.
 
 Exit criteria:
 
@@ -440,7 +534,8 @@ Exit criteria:
 
 - Build and publish the pinned Caddy/Coraza image with scan and SBOM evidence.
 - Deploy `/srv/edge`, public TLS, bounded safe logs, and proxy networking.
-- Integrate CrowdSec decisions.
+- Install pinned CrowdSec components and the host-firewall bouncer, consume SSH
+  and Caddy logs, and integrate CrowdSec decisions.
 - Exercise Coraza in detection mode before reviewed blocking rules are enabled.
 
 Exit criteria:
@@ -482,6 +577,8 @@ Exit criteria:
 - Reboot and restart services individually.
 - Verify authentication, synchronization, policy, enrollment, SSH recovery,
   firewall exposure, certificates, monitoring, and backups.
+- Deliver pending-reboot and disk-pressure status through the approved external
+  email/monitoring path.
 - Re-run OpenTofu and Ansible and require no unexpected changes.
 - Test application, host-image, and data-recovery runbooks.
 
@@ -517,8 +614,9 @@ Maintain concise operator runbooks for:
 - Resource import and protected planning.
 - Gold-image build, validation, promotion, and pruning.
 - CPX32 rebuild and console recovery.
-- Host and application deployment.
-- SSH MFA enrollment and recovery.
+- Production Ansible inventory bootstrap, host access, and application
+  deployment.
+- SSH operator bootstrap, key rotation, and recovery.
 - User onboarding, passkey recovery, and offboarding.
 - Backup, retention, verification, and quarterly restore.
 - Routine and emergency updates.
