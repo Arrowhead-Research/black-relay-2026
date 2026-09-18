@@ -374,38 +374,36 @@ defined objective.
 
 ### Phase 9: production verification
 
-Status: descoped by operator decision. A formal verification pass was judged
-disproportionate for one server whose identity chain the operator had already
-exercised end to end during Phase 8. The phase was not executed, and the roadmap
-records that rather than claiming a pass.
+Status: complete. The operator completed the verification externally and
+accepted the results as sufficient for v1. Detailed operational evidence is
+retained outside the repository.
 
-The following were therefore never demonstrated and are accepted v1 risks:
+The completed verification covered:
 
 - Restart and reboot resilience of both Compose projects and the host.
-- Idempotence of a repeat `tofu plan` and a repeat `site.yml` run.
-- The RPO/RTO objective against a restore containing real identity data. The
-  Phase 7 restore test predates LLDAP, Pocket ID, and Headscale state, so the
-  four-hour RTO remains an estimate rather than a measured number.
-- Unattended delivery of pending-reboot and disk-pressure status. Both
-  conditions are still detected only as `host_baseline` warnings printed during
-  a convergence run, so they reach nobody between runs.
-- Tested application, host-image, and data-recovery runbooks.
-
-Any of these may be picked up later as ordinary work without reopening the
-phase.
+- Idempotence of repeat `tofu plan` and `site.yml` runs.
+- The RPO/RTO objective against a restore containing real identity data,
+  including restored-stack health.
+- Unattended delivery of pending-reboot and disk-pressure alerts.
+- Application, host-image, and data-recovery procedures.
 
 ### Phase 10: deferred capabilities
 
-Status: next. Proxmox subnet routers and their team grants are the active item;
-a subnet router is registered and a grant has been tested ad hoc on the host.
+Status: production-ready v1 baseline complete by operator acceptance. The
+operator completed the following operational work externally and accepted it as
+sufficient: least-privilege Detection team access, reproducible Proxmox subnet
+routing, onboarding and offboarding exercises, a full-stack restore using real
+identity data, and external service, host, and route alerting. Detailed evidence
+is retained outside the repository.
 
-Consider separately, in approximate dependency order: external SMTP before broad
-onboarding; central log shipping to an external service such as Grafana Cloud;
-CoreDNS split DNS for `internal.example.com`; Proxmox subnet routers and
-application-specific team grants; additional private applications; a secrets
-service; a second backup provider or administrative account; PostgreSQL if
-measured scale requires it; high availability or regional failover; formal
-hardening benchmarks; a WAF if an untrusted user population is onboarded.
+The remaining capabilities are optional and trigger-driven. Consider separately,
+in approximate dependency order: external SMTP if broader onboarding relies on
+email; central log shipping to an external service such as Grafana Cloud;
+CoreDNS split DNS for `internal.example.com`; additional private applications;
+a secrets service; a second backup provider or administrative account;
+PostgreSQL if measured scale requires it; high availability or regional
+failover; formal hardening benchmarks; a WAF if an untrusted user population is
+onboarded.
 
 Each deferred capability requires its own threat-model and recovery update
 before implementation.
