@@ -8,3 +8,25 @@ operator_access_group: survivability-admins
 operator_access_manual_ssh_private_key_file: ""
 operator_access_ansible_ssh_private_key_file: ""
 operator_access_allow_root_ssh: false
+
+# Teammates who reach this host only over Tailscale SSH. Each account is
+# created with a locked password and no authorized_keys, and is deliberately
+# absent from the sshd AllowUsers list, so the public SSH path cannot
+# authenticate them at all: tailscaled authenticates them against the committed
+# Headscale policy instead, and that policy names which account each person may
+# land in. The break-glass operator above stays the only public SSH identity.
+#
+# Every entry states `sudo` explicitly rather than inheriting a default,
+# because sudo here is passwordless and therefore root-equivalent. Membership
+# is applied exactly, not appended, so flipping an entry to `sudo: false`
+# revokes it on the next convergence.
+#
+# The consequence to accept deliberately: if Headscale or tailscaled is down,
+# these accounts have no way in. Recovery is the break-glass operator's job.
+operator_access_tailnet_operators: []
+
+# Accounts to remove. Offboarding moves a name here rather than deleting the
+# entry, because a name simply dropped from the list above would leave a
+# sudo-capable account behind on the host with nothing managing it. Entries may
+# be pruned once a convergence has removed the account.
+operator_access_removed_users: []

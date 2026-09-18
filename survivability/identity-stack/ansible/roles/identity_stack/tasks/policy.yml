@@ -1,0 +1,25 @@
+---
+# Both files below are bind-mounted into the Headscale container from the host,
+# so rewriting either leaves Compose's own model unchanged and the running
+# container untouched. Headscale reads both only at startup, which is why each
+# notifies a restart rather than relying on the Compose convergence.
+- name: Install committed default-deny Headscale policy
+  ansible.builtin.copy:
+    src: headscale-policy.hujson
+    dest: "{{ identity_stack_headscale_policy_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart Headscale
+
+- name: Render Headscale configuration
+  ansible.builtin.template:
+    src: headscale-config.yml.j2
+    dest: "{{ identity_stack_headscale_config_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when: not identity_stack_bootstrap_only | bool
+  no_log: true
+  diff: false
+  notify: Restart Headscale

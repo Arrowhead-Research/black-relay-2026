@@ -70,11 +70,6 @@ variable "docker_compose_package_version" {
   description = "Exact docker-compose-plugin package version."
 }
 
-variable "fluent_bit_package_version" {
-  type        = string
-  description = "Exact fluent-bit package version. Fluent Bit is installed but disabled."
-}
-
 locals {
   snapshot_name = "${var.snapshot_prefix}-${var.snapshot_epoch}"
 }
@@ -127,13 +122,6 @@ build {
       "DOCKER_COMPOSE_PACKAGE_VERSION=${var.docker_compose_package_version}",
     ]
     script = "packer/scripts/20-docker.sh"
-  }
-
-  provisioner "shell" {
-    environment_vars = [
-      "FLUENT_BIT_PACKAGE_VERSION=${var.fluent_bit_package_version}",
-    ]
-    script = "packer/scripts/30-fluent-bit.sh"
   }
 
   provisioner "shell" {

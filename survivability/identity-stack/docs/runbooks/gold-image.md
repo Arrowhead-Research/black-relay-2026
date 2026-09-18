@@ -1,10 +1,18 @@
-# Phase 4: gold-image build, validation, promotion, and pruning
+# Gold image
+
+**Frozen.** The validated snapshot in `packer-output/promoted-snapshot-id` is the
+base image for disaster recovery. It is rebuilt only when the base image itself
+must change -- a new Debian point release, a kernel or Docker issue -- never on a
+schedule. Ansible owns every other change to the host, so an aging snapshot is
+converged forward rather than replaced.
+
+This procedure is therefore rare. Follow it end to end when you do run it.
 
 Run all commands from the repository root in one Bash shell on a **trusted
 operator workstation**. Never run them in Pi or GitHub Actions. Never paste the
 Hetzner token or SSH private key into chat, files, command-line arguments, or
-shell history. This phase must not rebuild or modify the production CPX32; that
-is a separately confirmed Phase 5 operation.
+shell history. This procedure must not rebuild or modify the production CPX32;
+that is the separately confirmed rebuild in `server-rebuild.md`.
 
 The committed operator scripts contain no credentials or fixed resource IDs.
 They read `HCLOUD_TOKEN` from the environment, require explicit confirmation,
@@ -30,12 +38,12 @@ test -f "${IDENTITY_FILE}"
 test -f "${IDENTITY_FILE}.pub"
 ssh-keygen -lf "${IDENTITY_FILE}.pub"
 
-# Avoid putting the token in shell history.
-read -rsp 'Hetzner API token: ' HCLOUD_TOKEN; printf '\n'
-export HCLOUD_TOKEN
-hcloud context active 2>/dev/null || printf '%s\n' 'No named context; HCLOUD_TOKEN supplies authentication'
+# The token comes from secrets/tooling.sops.env; it is never typed or exported.
 read -rp 'Expected production server name: ' PRODUCTION_SERVER_NAME
-hcloud server describe "${PRODUCTION_SERVER_NAME}"
+./scripts/operator/with-secrets.sh --tooling -- sh -c '
+  hcloud context active 2>/dev/null ||
+    printf "%s\n" "No named context; HCLOUD_TOKEN supplies authentication"
+  hcloud server describe "$0"' "${PRODUCTION_SERVER_NAME}"
 ```
 
 Stop unless the active context and harmless server metadata identify the
@@ -61,12 +69,13 @@ Run the committed discovery orchestrator:
 
 ```sh
 # trusted operator workstation only
-scripts/operator/discover-package-versions.sh \
-  --ssh-key "${HCLOUD_SSH_KEY}" \
-  --identity-file "${IDENTITY_FILE}" \
-  --server-type cx23 \
-  --owner "${OPERATOR_LABEL}" \
-  --output packer/package-versions.auto.pkrvars.hcl
+./scripts/operator/with-secrets.sh --tooling -- \
+  ./scripts/operator/discover-package-versions.sh \
+    --ssh-key "${HCLOUD_SSH_KEY}" \
+    --identity-file "${IDENTITY_FILE}" \
+    --server-type cx23 \
+    --owner "${OPERATOR_LABEL}" \
+    --output packer/package-versions.auto.pkrvars.hcl
 ```
 
 Before creating anything, the script verifies that `IDENTITY_FILE.pub` matches
@@ -95,7 +104,7 @@ hcloud server list --selector project=survivability,purpose=package-discovery
 ```
 
 The server list must be empty. Never bypass a failed fingerprint check. Record
-this server's cost for Step 5; its start and finish times are in the evidence
+its start and finish times are in the evidence
 file.
 
 ## 3. Build the candidate with the operator script
@@ -105,10 +114,11 @@ commands:
 
 ```sh
 # trusted operator workstation only
-scripts/operator/build-gold-image.sh \
-  --var-file packer/package-versions.auto.pkrvars.hcl \
-  --server-type cx23 \
-  --owner "${OPERATOR_LABEL}"
+./scripts/operator/with-secrets.sh --tooling -- \
+  ./scripts/operator/build-gold-image.sh \
+    --var-file packer/package-versions.auto.pkrvars.hcl \
+    --server-type cx23 \
+    --owner "${OPERATOR_LABEL}"
 ```
 
 The script will:
@@ -131,7 +141,7 @@ hcloud image describe "${SNAPSHOT_ID}"
 ```
 
 Stop unless it is the expected x86 candidate snapshot. Record the builder's
-elapsed time and cost for Step 5. Never select an image using `latest` or a name
+elapsed time. Never select an image using `latest` or a name
 prefix.
 
 ## 4. Validate with the operator script
@@ -140,12 +150,13 @@ Run the validation orchestrator using the exact numeric snapshot ID:
 
 ```sh
 # trusted operator workstation only
-scripts/operator/validate-gold-image.sh \
-  --snapshot-id "${SNAPSHOT_ID}" \
-  --ssh-key "${HCLOUD_SSH_KEY}" \
-  --identity-file "${IDENTITY_FILE}" \
-  --server-type cx23 \
-  --owner "${OPERATOR_LABEL}"
+./scripts/operator/with-secrets.sh --tooling -- \
+  ./scripts/operator/validate-gold-image.sh \
+    --snapshot-id "${SNAPSHOT_ID}" \
+    --ssh-key "${HCLOUD_SSH_KEY}" \
+    --identity-file "${IDENTITY_FILE}" \
+    --server-type cx23 \
+    --owner "${OPERATOR_LABEL}"
 ```
 
 Type the displayed snapshot ID when prompted. Expect multiple visible FIDO2
@@ -170,28 +181,19 @@ hcloud server list --selector project=survivability,purpose=gold-image-validatio
 
 The server list must be empty. Do not use production DNS, the production Primary
 IPv4, or production secrets during validation. Record validation elapsed time
-and cost for Step 5.
+for the evidence record.
 
-## 5. Record costs and promote with the operator script
-
-Consult current Hetzner pricing. Prepare four non-secret evidence strings for
-the actual discovery server, Packer builder, validation server, and ongoing
-snapshot storage costs. Then run:
+## 5. Promote with the operator script
 
 ```sh
 # trusted operator workstation only
-scripts/operator/promote-gold-image.sh \
-  --snapshot-id "${SNAPSHOT_ID}" \
-  --discovery-cost 'REPLACE_WITH_ACTUAL_AMOUNT_AND_CURRENCY' \
-  --builder-cost 'REPLACE_WITH_ACTUAL_AMOUNT_AND_CURRENCY' \
-  --validation-cost 'REPLACE_WITH_ACTUAL_AMOUNT_AND_CURRENCY' \
-  --snapshot-storage-cost 'REPLACE_WITH_ACTUAL_RATE_AND_CURRENCY'
+./scripts/operator/with-secrets.sh --tooling -- \
+  ./scripts/operator/promote-gold-image.sh --snapshot-id "${SNAPSHOT_ID}"
 ```
 
-Replace every placeholder before running it. The script refuses to continue
-without all four values and matching successful build/validation evidence. It
-shows the provider image and requires the exact snapshot ID as confirmation.
-It then:
+The script refuses to continue without matching successful build and validation
+evidence. It shows the provider image and requires the exact snapshot ID as
+confirmation. It then:
 
 - writes `packer-output/phase4-<run-id>.md`;
 - changes the snapshot's `status` label from `candidate` to `validated`;
@@ -210,10 +212,11 @@ hcloud image describe "${SNAPSHOT_ID}"
 That numeric ID is the only image reference to carry into Phase 5. The promotion
 script does not rebuild or modify production.
 
-## 6. Retain current and previous validated snapshots
+## 6. Keep the previous snapshot as a rollback
 
-List validated snapshots and identify the new current snapshot and exactly one
-previous validated rollback snapshot:
+After a rebuild, keep the snapshot you just replaced so you can roll back to it.
+There is no scheduled pruning; delete an older snapshot only when you have a
+reason to:
 
 ```sh
 # trusted operator workstation only
@@ -246,9 +249,12 @@ referenced by a pending rebuild, rollback record, or recovery exercise.
 
 ```sh
 # trusted operator workstation only
-hcloud server list --selector project=survivability
-unset HCLOUD_TOKEN HCLOUD_SSH_KEY
+./scripts/operator/with-secrets.sh --tooling -- \
+  hcloud server list --selector project=survivability
+unset HCLOUD_SSH_KEY
 ```
+
+`HCLOUD_TOKEN` was never exported into this shell, so there is nothing to clear.
 
 Confirm there are no package-discovery, gold-image-builder, or image-validation
 servers left. The production CPX32, Primary IPv4, firewall, and BX11 must remain

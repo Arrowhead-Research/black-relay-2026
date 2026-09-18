@@ -1,45 +1,21 @@
 # Survivability Identity Stack
 
 Infrastructure as code for the Survivability research project's cloud identity
-and private-access platform:
+and private-access platform, running on one Helsinki CPX32 for roughly 30-50
+research users:
 
 - LLDAP provides users and groups.
 - Pocket ID synchronizes LDAP identities and provides passkey-based OIDC.
 - Headscale authenticates through Pocket ID and coordinates private access.
-- Caddy with Coraza provides the public HTTPS edge.
+- Caddy provides the public HTTPS edge.
 
-The repository owns the lifecycle of an existing empty Helsinki CPX32 and its
-Primary IPv4. Packer will build a Debian 13 gold image, OpenTofu will adopt and
-manage protected infrastructure, and Ansible will harden the host and deploy the
-services. See [`ARCHITECTURE_ROADMAP.md`](ARCHITECTURE_ROADMAP.md) for the
-complete architecture, accepted risks, phases, and recovery objectives.
+OpenTofu adopts and manages the protected infrastructure, a frozen Packer
+snapshot provides the base image for disaster recovery, and Ansible owns host
+configuration and service deployment.
 
-## Current status
-
-Phases 1 through 6 are complete. The obsolete migration workflow is gone, the
-pinned credential-free toolchain passed trusted-host and GitHub Actions checks,
-and a trusted operator completed protected OpenTofu adoption. A generic Debian
-13 x86 gold image was built and validated, and the existing CPX32 was rebuilt in
-place without losing its protected Primary IPv4.
-
-The operator completed Phase 6 production verification: dedicated-key named
-access and sudo work, the manual FIDO2 recovery key remains authorized, root and
-password SSH are disabled, and the declarative host baseline and guarded
-nftables policy are active. TCP 22/80/443 plus required ICMP exposure,
-Docker-DNAT enforcement, timed rollback safety, fresh SSH, and final no-change
-`site.yml` convergence were confirmed.
-
-Phase 7, backup foundation, is implemented and awaits trusted-operator
-execution per
-[`docs/runbooks/phase7-backup-foundation.md`](docs/runbooks/phase7-backup-foundation.md):
-restic over SFTP to a home-scoped Storage Box subaccount with external
-reachability disabled after reviewed key bootstrap, root-only
-credentials rendered from SOPS, guarded daily backup and weekly verification
-timers with separate Healthchecks.io signals, exact operator confirmations for
-repository initialization and retention pruning, and an isolated disposable-
-server restore test. CrowdSec moves to Phase 8 edge/log integration, while
-email delivery for host status moves to Phase 11 monitoring. No application
-deployment is available yet.
+See [`ARCHITECTURE_ROADMAP.md`](ARCHITECTURE_ROADMAP.md) for the architecture,
+accepted risks, phase status, and recovery objectives. It is the single source
+of truth for what is done and what is next.
 
 ## Trust boundary
 
@@ -54,10 +30,6 @@ The Pi development container has no production authority. It must not receive:
 Pi may edit code, documentation, tests, safe examples, and public recipient
 configuration. Privileged Packer, OpenTofu, SOPS, Ansible, backup, restore, and
 rebuild commands run only from a trusted operator workstation.
-
-GitHub Actions may run credential-free checks and publish the Caddy/Coraza image
-using repository-scoped GHCR permission. It receives no provider, state, SSH,
-SOPS, or deployment credentials.
 
 Read [`AGENTS.md`](AGENTS.md) before making changes.
 
@@ -75,77 +47,152 @@ make dev-status
 Open <http://127.0.0.1:8504>. Configure only the AI-provider authentication
 needed by Pi through `/login`.
 
-A useful first prompt is:
-
-```text
-Read AGENTS.md and ARCHITECTURE_ROADMAP.md. Summarize the current phase and
-propose the smallest next change without accessing production or requesting
-credentials.
-```
-
 ## Credential-free development commands
 
 ```bash
-make lint       # Packer/OpenTofu formatting plus YAML, shell, JSON, and Ansible linting
-make validate   # Compose, Packer, OpenTofu, Ansible, and safety validation
+make lint       # Formatting plus YAML, shell, JSON, and Ansible linting
+make validate   # Compose, Packer, OpenTofu, Ansible, and executable safety checks
 ```
 
-These commands may run inside Pi. The `make dev-*` commands below run on the
-host because Pi has no Docker socket:
-
-```bash
-make dev-build
-make dev-up
-make dev-status
-make dev-logs
-make dev-doctor
-make dev-shell
-make dev-restart
-make dev-down
-```
+These may run inside Pi. The `make dev-*` commands run on the host because Pi
+has no Docker socket: `dev-build`, `dev-up`, `dev-status`, `dev-logs`,
+`dev-doctor`, `dev-shell`, `dev-restart`, `dev-down`.
 
 No default Make target contacts production or performs infrastructure changes.
-Future authoritative commands must be clearly labeled as operator-only and
-protected according to the roadmap.
+
+## Runbooks
+
+Operator procedures live in [`docs/runbooks/`](docs/runbooks/). Every command is
+labeled with where it runs.
+
+| Runbook | Covers |
+| --- | --- |
+| [`operator-access.md`](docs/runbooks/operator-access.md) | SSH operator bootstrap, key rotation, recovery |
+| [`host-configuration.md`](docs/runbooks/host-configuration.md) | Host baseline and guarded nftables activation |
+| [`backups.md`](docs/runbooks/backups.md) | Backup setup, retention, verification, restore test |
+| [`opentofu-adoption.md`](docs/runbooks/opentofu-adoption.md) | B2 backend, resource import, protected planning |
+| [`server-rebuild.md`](docs/runbooks/server-rebuild.md) | Guarded CPX32 rebuild and console recovery |
+| [`gold-image.md`](docs/runbooks/gold-image.md) | Frozen base image; rebuild only when the base changes |
+| [`secrets.md`](docs/runbooks/secrets.md) | age identities, SOPS files, teammate onboarding, rotation |
+| [`service-deployment.md`](docs/runbooks/service-deployment.md) | Caddy, CrowdSec, LLDAP, Pocket ID, Headscale deployment |
+| [`user-lifecycle.md`](docs/runbooks/user-lifecycle.md) | user onboarding, denial checks, offboarding, passkey recovery |
+
+## Targeted convergence
+
+`ansible/playbooks/site.yml` converges every role and is the documented way to
+apply a change. A full run installs packages, patches the host, pulls images,
+reproves the identity chain, and takes on the order of fifteen minutes, which is
+more than a routine edit needs. Tags narrow a run to the roles and tasks a
+change can actually have affected.
+
+Run the whole playbook with no `--tags` whenever you are unsure, after a
+rebuild, or before recording that a change is deployed.
+
+### Selection tags
+
+| Tag | Converges |
+| --- | --- |
+| `access` | `operator_access`: the named account, its keys, sudo, and SSH policy |
+| `baseline` | `host_baseline`: packages, journald, sysctl, unattended upgrades |
+| `firewall` | `host_firewall`: the guarded nftables policy |
+| `backup` | `backup_restic`: restic configuration, wrapper, timers |
+| `edge` | `edge`: Caddy, CrowdSec, the bouncer, and the shared networks |
+| `identity` | `identity_stack` in full |
+| `identity-config` | Identity directories, rendered credentials, Headscale policy and configuration, the Compose project, and the service convergence — everything except the LLDAP directory bootstrap |
+| `identity-policy` | The Headscale policy and configuration only: install, validate with `configtest`, then restart Headscale |
+| `identity-lldap` | The LLDAP groups, bind user, and group memberships, the read-only proof, and the service convergence |
+| `tailnet` | `tailnet_node`: the pinned Tailscale client, its declared preferences, and the proof that this host is enrolled under its tag |
+
+Every identity selection first decrypts the SOPS store and revalidates the
+configuration, and the host and elevation gates in `site.yml` run under every
+selection. Tags compose, so `--tags edge,identity` converges both.
+
+### Skip tags
+
+These two narrow a run without changing which roles it covers. They only ever
+remove work, so use them with `--skip-tags`.
+
+| Tag | Removes |
+| --- | --- |
+| `verify` | The proof tasks: the Headscale `configtest`, the LLDAP read-only `ldapsearch`/`ldapmodify` probes, the Headscale health check, and the restic repository check |
+| `baseline-updates` | `apt upgrade`, normally the longest single task in a run |
+
+### Examples
+
+All of these run from a trusted operator workstation, through the secrets
+wrapper described in [`secrets.md`](docs/runbooks/secrets.md).
+
+```bash
+# Full convergence. The default, and what the runbooks mean by "apply".
+./scripts/operator/with-secrets.sh --age -- \
+  ansible-playbook -i "$ANSIBLE_INVENTORY" ansible/playbooks/site.yml
+
+# Apply an edited ansible/roles/identity_stack/files/headscale-policy.hujson.
+./scripts/operator/with-secrets.sh --age -- \
+  ansible-playbook -i "$ANSIBLE_INVENTORY" --tags identity-policy \
+  ansible/playbooks/site.yml
+
+# Add or change LLDAP groups and memberships.
+./scripts/operator/with-secrets.sh --age -- \
+  ansible-playbook -i "$ANSIBLE_INVENTORY" --tags identity-lldap \
+  ansible/playbooks/site.yml
+
+# Redeploy the services after a Caddyfile or Compose change.
+./scripts/operator/with-secrets.sh --age -- \
+  ansible-playbook -i "$ANSIBLE_INVENTORY" --tags edge,identity-config \
+  ansible/playbooks/site.yml
+
+# Iterate quickly: skip package patching and the proof tasks.
+./scripts/operator/with-secrets.sh --age -- \
+  ansible-playbook -i "$ANSIBLE_INVENTORY" \
+  --skip-tags verify,baseline-updates ansible/playbooks/site.yml
+```
+
+Preview any selection without contacting the host, from Pi or a workstation:
+
+```bash
+ansible-playbook -i "$ANSIBLE_INVENTORY" --list-tags ansible/playbooks/site.yml
+ansible-playbook -i "$ANSIBLE_INVENTORY" --list-tasks --tags identity-policy \
+  ansible/playbooks/site.yml
+```
+
+### What tags do not do
+
+- **They assume a converged host.** A selection skips the roles that create the
+  Docker networks, the operator account, and the firewall, so it is only valid
+  once a full run has succeeded. After a rebuild, run `site.yml` untagged.
+- **`verify` is skip-only.** Running `--tags verify` alone fails: the proof
+  tasks consume values registered by the tasks they verify.
+- **Skipping `verify` weakens the exit-criteria evidence.** A run recorded
+  against `ARCHITECTURE_ROADMAP.md` or a runbook should not skip it.
+- **A policy change restarts Headscale.** The policy and configuration files are
+  bind-mounted and Headscale reads them only at startup, so `identity-policy`
+  ends by restarting the service. Established tunnels are unaffected; node
+  registration and reauthentication pause until it is healthy again.
 
 ## Safe repository inputs
 
 `ansible/inventory/production/hosts.yml` intentionally contains no production
-host details and is only for credential-free Pi/CI checks. Before production
-Ansible, an operator copies
-`ansible/inventory/production/hosts.example.yml` to a mode-`0600` file such as
-`~/.config/survivability/production-hosts.yml` and replaces the access
-placeholders: the host, named operator, existing manual/FIDO2 key path, and
-dedicated Ansible key path. Phase 7 adds three non-secret backup
-placeholders in the same file: the Storage Box endpoint and subaccount
-username from `tofu output`, plus the pinned port 22 known_hosts entry. Ansible
-reads the two adjacent `.pub` files, so public-key content is
-not copied into variables. Only local paths—not key content—belong in the
-inventory. After the dedicated public key is authorized for the existing root
-account, the one-time bootstrap uses it for both root and named-operator
-connections. See
-[`docs/runbooks/phase6-access-bootstrap.md`](docs/runbooks/phase6-access-bootstrap.md)
-for the concise operator procedure. Routine host configuration is documented in
-[`docs/runbooks/phase6-host-baseline.md`](docs/runbooks/phase6-host-baseline.md),
-and guarded nftables activation is documented in
-[`docs/runbooks/phase6-host-firewall.md`](docs/runbooks/phase6-host-firewall.md).
+host details and exists only for credential-free Pi and CI checks. Before
+running production Ansible, an operator copies
+`ansible/inventory/production/hosts.example.yml` to a mode-`0600` file outside
+the repository, such as `~/.config/survivability/production-hosts.yml`, and
+replaces the placeholders. Only local paths — never key content — belong in the
+inventory; Ansible reads the adjacent `.pub` files itself.
 
 `secrets.example.yml` files contain variable names and placeholder values only.
-Operators create and edit encrypted `*.sops.yml` files from trusted workstations;
-plaintext values are never committed or sent to Pi. The Phase 7 backup secrets
-are created from
-`ansible/inventory/production/group_vars/all/secrets.example.yml`; the
-committed `secrets.sops.yml` file stays SOPS-encrypted and is rendered
-root-only by the `backup_restic` role.
+Operators create and edit encrypted `*.sops.yml` files from trusted
+workstations; plaintext values are never committed or sent to Pi.
+
+SOPS with age is the authoritative secrets system. Git stores only ciphertext
+and the public age recipients in `.sops.yaml`; every operator has an individual
+age identity, and 1Password, if used at all, protects only that personal key.
+`secrets/tooling.env.example` documents the infrastructure credential names with
+empty values — never populate that tracked file. The real values live encrypted
+in `secrets/tooling.sops.env`, and `scripts/operator/with-secrets.sh` injects
+them into a single child process. See
+[`docs/runbooks/secrets.md`](docs/runbooks/secrets.md).
 
 OpenTofu state uses a manually bootstrapped, versioned Backblaze B2 bucket with
 enforced client-side encryption. The design deliberately accepts no dependable
-distributed lock, so only one operator may run OpenTofu at a time. See
-[`docs/runbooks/phase3-opentofu-adoption.md`](docs/runbooks/phase3-opentofu-adoption.md)
-for the trusted-workstation procedure. The separately confirmed rebuild is
-specified in
-[`docs/runbooks/phase5-cpx32-rebuild.md`](docs/runbooks/phase5-cpx32-rebuild.md).
-
-`operator.env.example` documents trusted-workstation variable names with empty
-values. Never populate that tracked file; copy it outside the repository and
-restrict its permissions before entering credentials.
+distributed lock, so only one operator may run OpenTofu at a time.

@@ -1,23 +1,19 @@
 #!/usr/bin/env bash
 # Trusted operator workstation only. Labels a validated snapshot; never rebuilds production.
+#
+# Frozen: the gold image is rebuilt only when the base image itself must change,
+# not on a schedule. Ansible owns all host drift.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SNAPSHOT_ID=''
-DISCOVERY_COST=''
-BUILDER_COST=''
-VALIDATION_COST=''
-SNAPSHOT_COST=''
 
 usage() {
   cat <<'EOF'
-Usage: promote-gold-image.sh --snapshot-id ID \
-  --discovery-cost TEXT --builder-cost TEXT --validation-cost TEXT \
-  --snapshot-storage-cost TEXT
+Usage: promote-gold-image.sh --snapshot-id ID
 
-Costs are evidence strings based on current Hetzner pricing, for example
-"EUR 0.01". Requires matching successful build and validation JSON files in
-packer-output/ and HCLOUD_TOKEN in the environment.
+Requires matching successful build and validation JSON files in packer-output/
+and HCLOUD_TOKEN, supplied by scripts/operator/with-secrets.sh --tooling.
 EOF
 }
 
@@ -25,22 +21,6 @@ while (($#)); do
   case "$1" in
     --snapshot-id)
       SNAPSHOT_ID="${2:?--snapshot-id requires an ID}"
-      shift 2
-      ;;
-    --discovery-cost)
-      DISCOVERY_COST="${2:?--discovery-cost requires text}"
-      shift 2
-      ;;
-    --builder-cost)
-      BUILDER_COST="${2:?--builder-cost requires text}"
-      shift 2
-      ;;
-    --validation-cost)
-      VALIDATION_COST="${2:?--validation-cost requires text}"
-      shift 2
-      ;;
-    --snapshot-storage-cost)
-      SNAPSHOT_COST="${2:?--snapshot-storage-cost requires text}"
       shift 2
       ;;
     -h|--help)
@@ -55,12 +35,8 @@ while (($#)); do
   esac
 done
 
-: "${HCLOUD_TOKEN:?Set HCLOUD_TOKEN from trusted secret storage first}"
+: "${HCLOUD_TOKEN:?Run through scripts/operator/with-secrets.sh --tooling}"
 [[ "${SNAPSHOT_ID}" =~ ^[0-9]+$ ]] || { printf 'snapshot ID must be numeric\n' >&2; exit 2; }
-for value_name in DISCOVERY_COST BUILDER_COST VALIDATION_COST SNAPSHOT_COST; do
-  [[ -n "${!value_name}" ]] || { printf 'all four cost arguments are required\n' >&2; exit 2; }
-  [[ "${!value_name}" != *REPLACE_WITH* ]] || { printf 'replace all cost placeholders before promotion\n' >&2; exit 2; }
-done
 for command_name in hcloud jq date; do
   command -v "${command_name}" >/dev/null || { printf 'missing command: %s\n' "${command_name}" >&2; exit 1; }
 done
@@ -129,10 +105,6 @@ cat >"${evidence}" <<EOF
 - Architecture: x86
 - Validation server type: ${server_type}
 - Package-pin file used: ${var_file}
-- Discovery server cost: ${DISCOVERY_COST}
-- Packer builder cost: ${BUILDER_COST}
-- Validation server cost: ${VALIDATION_COST}
-- Snapshot storage cost: ${SNAPSHOT_COST}
 - Validation result: PASS
 EOF
 
@@ -145,7 +117,7 @@ printf '%s\n' "${SNAPSHOT_ID}" >packer-output/promoted-snapshot-id
 
 printf '\nPromoted explicit snapshot ID: %s\n' "${SNAPSHOT_ID}"
 printf 'Operator evidence: %s/%s\n' "${ROOT}" "${evidence}"
-printf '\nRetain this snapshot and one previous validated snapshot:\n'
+printf '\nValidated snapshots:\n'
 hcloud image list \
   --type snapshot \
   --selector project=survivability,role=identity-stack-base,status=validated \

@@ -40,9 +40,6 @@ check 'password SSH authentication is disabled' grep -R '^PasswordAuthentication
 check 'Docker is installed' docker --version
 check 'Compose plugin is installed' docker compose version
 check 'Docker service is enabled' systemctl is-enabled docker
-check 'Fluent Bit is installed' dpkg-query -W fluent-bit
-check 'Fluent Bit is disabled' service_is_disabled fluent-bit
-check 'Fluent Bit is not running' service_is_inactive fluent-bit
 check 'IPv6 is disabled by sysctl config' grep -R '^net.ipv6.conf.all.disable_ipv6 = 1$' /etc/sysctl.d
 check 'journald has bounded persistent retention' grep -R '^SystemMaxUse=512M$' /etc/systemd/journald.conf.d
 check 'unattended upgrades will not reboot automatically' grep -R 'Automatic-Reboot "false"' /etc/apt/apt.conf.d

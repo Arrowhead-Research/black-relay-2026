@@ -1,0 +1,63 @@
+---
+- name: Create isolated Headscale validation state
+  ansible.builtin.file:
+    path: "{{ identity_stack_headscale_validation_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  changed_when: false
+  when:
+    - not identity_stack_bootstrap_only | bool
+    - not ansible_check_mode
+
+- name: Validate Headscale configuration with its pinned image
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/docker
+      - run
+      - --rm
+      - --read-only
+      - --network
+      - "{{ identity_stack_proxy_network }}"
+      - --add-host
+      - "{{ pocket_id_domain }}:{{ identity_stack_caddy_proxy_address }}"
+      - --volume
+      - "{{ identity_stack_headscale_config_dir }}:/etc/headscale:ro"
+      - --volume
+      - "{{ identity_stack_headscale_validation_dir }}:/var/lib/headscale"
+      - --volume
+      - >-
+        {{ identity_stack_headscale_oidc_secret_file }}:/run/secrets/headscale-oidc-client-secret:ro
+      - --tmpfs
+      - /var/run/headscale:size=16m,mode=0755
+      - "{{ identity_stack_headscale_image }}"
+      - configtest
+  register: identity_stack_headscale_configtest
+  changed_when: false
+  failed_when: false
+  when:
+    - not identity_stack_bootstrap_only | bool
+    - not ansible_check_mode
+  no_log: true
+
+- name: Remove isolated Headscale validation state
+  ansible.builtin.file:
+    path: "{{ identity_stack_headscale_validation_dir }}"
+    state: absent
+  changed_when: false
+  when:
+    - not identity_stack_bootstrap_only | bool
+    - not ansible_check_mode
+
+- name: Require valid Headscale configuration and OIDC discovery
+  ansible.builtin.assert:
+    that:
+      - identity_stack_headscale_configtest.rc == 0
+    fail_msg: >-
+      Headscale configtest failed. Verify the rendered configuration, Pocket ID
+      discovery endpoint, and confidential client before deployment.
+  when:
+    - not identity_stack_bootstrap_only | bool
+    - not ansible_check_mode
+  no_log: true

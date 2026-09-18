@@ -1,0 +1,123 @@
+---
+identity_stack_root: /srv/identity-stack
+identity_stack_compose_file: /srv/identity-stack/compose.yml
+identity_stack_env_file: /srv/identity-stack/identity.env
+identity_stack_secrets_dir: /srv/identity-stack/secrets
+identity_stack_lldap_data_dir: /srv/identity-stack/lldap
+identity_stack_pocket_id_data_dir: /srv/identity-stack/pocket-id
+identity_stack_headscale_data_dir: /srv/identity-stack/headscale
+identity_stack_headscale_config_dir: /srv/identity-stack/headscale-config
+identity_stack_headscale_config_file: /srv/identity-stack/headscale-config/config.yaml
+identity_stack_headscale_policy_file: /srv/identity-stack/headscale-config/policy.hujson
+identity_stack_headscale_validation_dir: /srv/identity-stack/.headscale-validation
+identity_stack_bind_password_file: /srv/identity-stack/secrets/lldap-pocket-id-bind-password
+identity_stack_headscale_oidc_secret_file: /srv/identity-stack/secrets/headscale-oidc-client-secret
+identity_stack_readonly_probe_file: /srv/identity-stack/.readonly-probe.ldif
+identity_stack_secrets_file: >-
+  {{ playbook_dir }}/../inventory/production/group_vars/all/secrets.sops.yml
+
+# The initial passkey and Pocket ID OIDC client must be created interactively.
+# The runbook enables this only for the first convergence; normal runs are full.
+identity_stack_bootstrap_only: false
+
+identity_stack_proxy_network: identity_proxy
+identity_stack_pocket_id_proxy_address: 172.29.0.3
+identity_stack_headscale_proxy_address: 172.29.0.4
+identity_stack_backend_network: identity_backend
+identity_stack_lldap_backend_address: 172.29.1.3
+identity_stack_pocket_id_backend_address: 172.29.1.4
+identity_stack_caddy_proxy_address: 172.29.0.2
+identity_stack_trusted_caddy_address: 172.29.0.2/32
+identity_stack_lldap_loopback_url: http://127.0.0.1:17170
+
+# Reviewed multi-architecture manifest digests.
+identity_stack_lldap_image: >-
+  docker.io/lldap/lldap:v0.6.3@sha256:2a8454b668c1aba7157e832eab0e242e1e7eb5fb7591d7e7774ba05286511ca8
+identity_stack_pocket_id_image: >-
+  ghcr.io/pocket-id/pocket-id:v2.14.0@sha256:01540977dcf4c7b41b1159f34d68e4632f2658d62790e460ca65a42722b13c4a
+identity_stack_headscale_image: >-
+  ghcr.io/juanfont/headscale:v0.29.3@sha256:0e7f1c6e4ce6c2a2a001103ecd3fa645a045adf30ac8a5234fe037b43000cd72
+
+identity_stack_lldap_uid: 1000
+identity_stack_lldap_gid: 1000
+identity_stack_pocket_id_uid: 1001
+identity_stack_pocket_id_gid: 1001
+identity_stack_lldap_memory_limit: 512M
+identity_stack_lldap_cpu_limit: "0.50"
+identity_stack_pocket_id_memory_limit: 1G
+identity_stack_pocket_id_cpu_limit: "1.00"
+identity_stack_headscale_memory_limit: 512M
+identity_stack_headscale_cpu_limit: "0.50"
+
+# Three kinds of group, deliberately kept distinct.
+#
+# The membership tier is the outermost gate: it is the admission filter for the
+# Pocket ID LDAP sync, so a user outside it is never imported and can reach
+# nothing downstream. Capability groups grant a specific power. Team groups
+# grant nothing on their own; they synchronize into Pocket ID and appear in the
+# OIDC groups claim so Headscale grants and future OIDC clients can authorize
+# on them. Every human belongs to the membership tier plus exactly one team.
+identity_stack_membership_group: black-relay
+identity_stack_capability_groups:
+  - pocketid-admins
+  - headscale-users
+identity_stack_team_groups:
+  - survivability
+  - tak
+  - detection
+  - fabrication
+identity_stack_required_groups:
+  - black-relay
+  - pocketid-admins
+  - headscale-users
+  - survivability
+  - tak
+  - detection
+  - fabrication
+identity_stack_admin_memberships:
+  - lldap_admin
+  - black-relay
+  - pocketid-admins
+  - headscale-users
+  - survivability
+identity_stack_bind_memberships:
+  - lldap_strict_readonly
+identity_stack_pocket_id_bind_username: pocket-id-bind
+identity_stack_pocket_id_bind_email: pocket-id-bind@invalid.example
+identity_stack_pocket_id_admin_group: pocketid-admins
+# Shown on the Pocket ID sign-in page as "Sign in to <name>".
+identity_stack_pocket_id_app_name: Black Relay 2026 Identity
+
+# Outbound relay for Pocket ID one-time access codes. Disabled by default so
+# that bootstrap converges before an SMTP2GO account exists, and so that a
+# deployment which never wants outbound mail stays mute. Enable it in the
+# external inventory once the credentials are in SOPS.
+#
+# SMTP2GO publishes STARTTLS on 25, 80, 587, 2525 and 8025, and implicit TLS on
+# 443, 465 and 8465. Port 587 is the conventional submission port; 2525 is the
+# documented fallback for networks that block it upstream, and takes
+# identity_stack_pocket_id_smtp_tls: starttls unchanged.
+identity_stack_pocket_id_smtp_enabled: false
+identity_stack_pocket_id_smtp_host: mail.smtp2go.com
+identity_stack_pocket_id_smtp_port: 587
+identity_stack_pocket_id_smtp_tls: starttls
+# Mails the user when a new device signs in as them. This is the only standing
+# signal that a passkey has been exercised by someone else, and it costs one
+# message per new device rather than one per login.
+identity_stack_pocket_id_email_login_notification: true
+identity_stack_headscale_allowed_group: headscale-users
+identity_stack_node_expiry: 24h
+identity_stack_tailnet_ipv4_prefix: 100.64.0.0/10
+
+# ldapmodify exits with the LDAP result code. Only these prove the write was
+# refused by an authorization decision: 50 is insufficientAccessRights, and 53
+# is unwillingToPerform, which LLDAP returns for modifications it declines
+# outright. Deliberately excluded are 0 (the account is writable), 49 (the
+# account could not bind, so nothing was proven), and process-level failures
+# such as 127 or 255, which mean the probe never reached the directory.
+identity_stack_readonly_refusal_codes:
+  - 50
+  - 53
+
+identity_stack_packages:
+  - ldap-utils

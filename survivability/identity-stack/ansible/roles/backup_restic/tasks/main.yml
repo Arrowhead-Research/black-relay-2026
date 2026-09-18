@@ -17,11 +17,11 @@
       - backup_restic_storage_box_known_hosts is not string
       - backup_restic_storage_box_known_hosts | length > 0
       - backup_restic_repository_password | length >= 20
-      - backup_restic_repository_password is not search('REPLACE_WITH')
+      - backup_restic_repository_password is not search('REPLACE_WITH|CHANGE_ME')
       - >-
         backup_restic_ssh_private_key is
         match('^-----BEGIN OPENSSH PRIVATE KEY-----')
-      - backup_restic_ssh_private_key is not search('REPLACE_WITH')
+      - backup_restic_ssh_private_key is not search('REPLACE_WITH|CHANGE_ME')
       - >-
         backup_restic_healthchecks_backup_url is
         match(backup_restic_healthchecks_url_pattern)
@@ -30,8 +30,6 @@
         match(backup_restic_healthchecks_url_pattern)
       - backup_restic_manage_schedule is boolean
       - backup_restic_init_repository is boolean
-      - backup_restic_init_confirmation is string
-      - backup_restic_required_init_confirmation is string
       - backup_restic_required_prune_confirmation is string
       - backup_restic_sftp_port | int == 22
       - backup_restic_keep_daily | int > 0
@@ -41,7 +39,7 @@
     fail_msg: >-
       Backup configuration is incomplete or still contains placeholders. Fill
       the external inventory placeholders and create the SOPS-encrypted
-      secrets file first; see docs/runbooks/phase7-backup-foundation.md.
+      secrets file first; see docs/runbooks/backups.md.
 
 - name: Validate Storage Box known_hosts entries
   ansible.builtin.assert:
@@ -95,6 +93,15 @@
   no_log: true
   diff: false
 
+- name: Validate the deployed backup private key
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/ssh-keygen
+      - -y
+      - -f
+      - "{{ backup_restic_ssh_key_file }}"
+  changed_when: false
+
 - name: Install pinned Storage Box host keys
   ansible.builtin.copy:
     content: "{{ backup_restic_storage_box_known_hosts | join('\n') }}\n"
@@ -145,19 +152,11 @@
     group: root
     mode: "0700"
 
-- name: Require exact confirmation before repository initialization
-  ansible.builtin.assert:
-    that:
-      - >-
-        backup_restic_init_confirmation ==
-        backup_restic_required_init_confirmation
-    fail_msg: >-
-      Initializing a new restic repository requires
-      backup_restic_init_confirmation={{ backup_restic_required_init_confirmation }}.
-      Normal convergence fails closed if the repository is missing.
-  when: backup_restic_init_repository | bool
-
-- name: Initialize the restic repository with confirmed intent
+# Creating a repository destroys nothing: `init-if-needed` returns early when a
+# repository is already present, and restic refuses to initialize over one. The
+# opt-in flag is the gate; normal convergence leaves it false and the following
+# task fails closed if the configured repository has disappeared.
+- name: Initialize the restic repository when explicitly requested
   ansible.builtin.command:
     argv:
       - "{{ backup_restic_script_path }}"
@@ -167,6 +166,9 @@
   changed_when: "'repository initialized' in backup_restic_repository_init.stdout"
   failed_when: backup_restic_repository_init.rc != 0
 
+# This reaches the Storage Box over SFTP, so it is the one slow task in this
+# role. Nothing below consumes its result, so an iteration run may skip it with
+# --skip-tags verify; a run with no tag selection still proves the repository.
 - name: Require the configured restic repository to exist
   ansible.builtin.command:
     argv:
@@ -175,6 +177,7 @@
   register: backup_restic_repository_present
   changed_when: false
   failed_when: backup_restic_repository_present.rc != 0
+  tags: verify
 
 - name: Install backup systemd services and timers
   ansible.builtin.template:
@@ -190,6 +193,10 @@
     - survivability-backup-maintenance.timer.j2
   when: backup_restic_manage_schedule | bool
 
+# On the first check-mode run the template task above reports that it would
+# create these units but does not write them, so systemd cannot resolve their
+# names yet. The real convergence run installs, reloads, enables, and starts
+# them; subsequent verification is done explicitly in the runbook.
 - name: Enable the backup and verification timers
   ansible.builtin.systemd_service:
     name: "{{ item }}"
@@ -199,4 +206,6 @@
   loop:
     - survivability-backup.timer
     - survivability-backup-maintenance.timer
-  when: backup_restic_manage_schedule | bool
+  when:
+    - backup_restic_manage_schedule | bool
+    - not ansible_check_mode

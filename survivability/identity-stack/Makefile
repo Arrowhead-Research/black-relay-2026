@@ -1,6 +1,12 @@
 COMPOSE := docker compose -f dev/compose.yml
 SAFE_ANSIBLE_INVENTORY := ansible/inventory/production/hosts.yml
 
+# Shell that ships to the host. Role templates containing no Jinja are lintable
+# exactly as committed; templates that interpolate are rendered and linted by
+# tests/test_rendered_templates.py instead.
+SHELL_SOURCES := dev/*.sh packer/scripts/*.sh scripts/operator/*.sh \
+	ansible/roles/host_firewall/templates/rollback-host-firewall.sh.j2
+
 .PHONY: help
 help:
 	@printf '%s\n' \
@@ -15,7 +21,7 @@ help:
 		'  make dev-shell    Open a shell in the running container' \
 		'  make dev-doctor   Verify tools and credential isolation' \
 		'  make lint         Run formatting, YAML, shell, JSON, and Ansible linting' \
-		'  make validate     Validate Compose, Packer, OpenTofu, Ansible, and tests'
+		'  make validate     Validate Compose, Packer, OpenTofu, Ansible, and run tests'
 
 .PHONY: dev-build
 dev-build:
@@ -55,8 +61,8 @@ lint:
 	packer fmt -check -recursive packer
 	tofu fmt -check -recursive tofu
 	yamllint -c .yamllint.yml .
-	shellcheck dev/*.sh packer/scripts/*.sh scripts/operator/*.sh
-	@for script in dev/*.sh packer/scripts/*.sh scripts/operator/*.sh; do bash -n "$$script"; done
+	shellcheck $(SHELL_SOURCES)
+	@for script in $(SHELL_SOURCES); do bash -n "$$script"; done
 	python3 -m json.tool dev/pi-web-config.json >/dev/null
 	python3 -m json.tool renovate.json >/dev/null
 	ANSIBLE_INVENTORY=$(SAFE_ANSIBLE_INVENTORY) ansible-lint ansible

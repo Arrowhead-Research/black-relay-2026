@@ -1,0 +1,12 @@
+---
+source: journalctl
+journalctl_filter:
+  - _SYSTEMD_UNIT=ssh.service
+labels:
+  type: syslog
+---
+source: file
+filenames:
+  - {{ edge_caddy_log_dir }}/access.json
+labels:
+  type: caddy

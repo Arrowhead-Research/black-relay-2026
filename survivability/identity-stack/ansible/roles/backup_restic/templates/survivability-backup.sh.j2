@@ -90,13 +90,17 @@ cmd_backup() {
     hc_ping "${SURVIVABILITY_HC_BACKUP_URL}/fail"
     return 1
   fi
-  if restic_cmd --retry-lock "${LOCK_RETRY}" backup --one-file-system \
-    "${EXCLUDE_ARGS[@]}" "${BACKUP_PATHS[@]}"; then
+  # Capture restic's status directly. Reading $? after an `if` block yields the
+  # status of the compound command, not of the failed command inside it, which
+  # silently reported failed backups as successful units.
+  local rc=0
+  restic_cmd --retry-lock "${LOCK_RETRY}" backup --one-file-system \
+    "${EXCLUDE_ARGS[@]}" "${BACKUP_PATHS[@]}" || rc=$?
+  if [ "${rc}" -eq 0 ]; then
     hc_ping "${SURVIVABILITY_HC_BACKUP_URL}"
-    return 0
+  else
+    hc_ping "${SURVIVABILITY_HC_BACKUP_URL}/fail"
   fi
-  local rc=$?
-  hc_ping "${SURVIVABILITY_HC_BACKUP_URL}/fail"
   return "${rc}"
 }
 
@@ -127,8 +131,8 @@ cmd_prune() {
 }
 
 cmd_init() {
-  local rc=0
-  restic_cmd snapshots >/dev/null 2>&1 || rc=$?
+  local rc=0 output
+  output="$(restic_cmd snapshots 2>&1)" || rc=$?
   if [ "${rc}" -eq 0 ]; then
     echo "survivability-backup: repository already present"
     return 0
@@ -138,6 +142,10 @@ cmd_init() {
     echo "survivability-backup: repository initialized"
     return 0
   fi
+  # A missing repository is expected above; any other error is an SSH,
+  # authentication, password, or configuration failure that the operator needs
+  # to see. Avoid suppressing the only useful diagnostic.
+  printf '%s\n' "${output}" >&2
   return "${rc}"
 }
 

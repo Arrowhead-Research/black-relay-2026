@@ -1,0 +1,33 @@
+---
+- name: Restart CrowdSec
+  ansible.builtin.systemd_service:
+    name: crowdsec
+    state: restarted
+  when: not ansible_check_mode
+
+- name: Restart CrowdSec firewall bouncer
+  ansible.builtin.systemd_service:
+    name: crowdsec-firewall-bouncer
+    state: restarted
+  when: not ansible_check_mode
+
+- name: Reload Caddy
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/docker
+      - compose
+      - --project-directory
+      - "{{ edge_root }}"
+      - --file
+      - "{{ edge_compose_file }}"
+      - exec
+      - --no-TTY
+      - caddy
+      - caddy
+      - reload
+      - --config
+      - /etc/caddy/Caddyfile
+      - --adapter
+      - caddyfile
+  changed_when: true
+  when: not ansible_check_mode

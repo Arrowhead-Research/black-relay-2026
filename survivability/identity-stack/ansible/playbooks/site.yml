@@ -9,6 +9,9 @@
     ansible_user: "{{ operator_access_user }}"
     ansible_ssh_private_key_file: "{{ operator_access_ansible_ssh_private_key_file }}"
     operator_access_allow_root_ssh: false
+  # These gates establish that Ansible is talking to the expected host as a
+  # root-equivalent named operator. A tag selection narrows what is converged,
+  # never whether that is true, so they are tagged `always`.
   pre_tasks:
     - name: Require the rebuilt Debian 13 host
       ansible.builtin.assert:
@@ -17,6 +20,7 @@
           - ansible_facts.distribution_major_version == '13'
           - ansible_facts.architecture == 'x86_64'
         fail_msg: "Host convergence requires the validated Debian 13 x86 host."
+      tags: always
 
     - name: Prove named-operator passwordless elevation
       ansible.builtin.command: /usr/bin/id -u
@@ -24,14 +28,31 @@
       check_mode: false
       register: operator_access_elevated_identity
       changed_when: false
+      tags: always
 
     - name: Require root-equivalent Ansible execution
       ansible.builtin.assert:
         that:
           - operator_access_elevated_identity.stdout == '0'
         fail_msg: "The named operator could not elevate for host convergence."
+      tags: always
+  # Running with no tag selection converges every role, which stays the
+  # documented way to apply a change. The tags exist so a routine edit can be
+  # applied without re-running roles it cannot have affected; see the
+  # "Targeted convergence" section of README.md for the supported selections.
   roles:
     - role: operator_access
+      tags: [access]
     - role: host_baseline
+      tags: [baseline]
     - role: host_firewall
+      tags: [firewall]
     - role: backup_restic
+      tags: [backup]
+    - role: edge
+      tags: [edge]
+    - role: identity_stack
+      tags: [identity]
+    # Last: the client enrolls against the Headscale the role above converges.
+    - role: tailnet_node
+      tags: [tailnet]

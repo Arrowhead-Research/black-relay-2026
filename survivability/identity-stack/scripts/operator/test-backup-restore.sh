@@ -25,11 +25,12 @@ Usage: test-backup-restore.sh --snapshot-id ID --ssh-key NAME_OR_ID
                              --identity-file PATH
                              [--server-type TYPE] [--owner LABEL]
 
-Requires HCLOUD_TOKEN, SOPS_AGE_KEY_FILE, and ANSIBLE_INVENTORY pointing at
-the protected production-hosts.yml (for the Storage Box placeholders). The
-identity file is the dedicated non-interactive Ansible key; its public half is
-injected through cloud-init, so no FIDO2 touch is needed. SOPS_AGE_KEY_FILE
-must decrypt the committed backup secrets.
+Run through scripts/operator/with-secrets.sh --tooling --age: this is the one
+script needing both provider credentials and an age identity. Also requires
+ANSIBLE_INVENTORY pointing at the protected production-hosts.yml (for the
+Storage Box placeholders). The identity file is the dedicated non-interactive
+Ansible key; its public half is injected through cloud-init, so no FIDO2 touch
+is needed. The age identity must decrypt the committed backup secrets.
 EOF
 }
 
@@ -82,8 +83,13 @@ while (($#)); do
   esac
 done
 
-: "${HCLOUD_TOKEN:?Set HCLOUD_TOKEN from trusted secret storage first}"
-: "${SOPS_AGE_KEY_FILE:?Set SOPS_AGE_KEY_FILE to the operator age key first}"
+: "${HCLOUD_TOKEN:?Run through scripts/operator/with-secrets.sh --tooling --age}"
+# Either age discovery mechanism is fine: a key file on disk, or key material
+# resolved from 1Password by with-secrets.sh.
+[[ -n "${SOPS_AGE_KEY_FILE:-}" || -n "${SOPS_AGE_KEY:-}" ]] || {
+  printf 'no age identity; run through scripts/operator/with-secrets.sh --age\n' >&2
+  exit 1
+}
 : "${ANSIBLE_INVENTORY:?Set ANSIBLE_INVENTORY to the protected production-hosts.yml first}"
 [[ "${SNAPSHOT_ID}" =~ ^[0-9]+$ ]] || { printf 'snapshot ID must be numeric\n' >&2; exit 2; }
 [[ -n "${SSH_KEY}" ]] || { printf '%s\n' '--ssh-key is required' >&2; exit 2; }
@@ -103,7 +109,7 @@ for command_name in hcloud jq ssh ssh-keygen ansible-playbook sops python3 date;
 done
 python3 -c 'import yaml' 2>/dev/null || { printf 'python3 needs PyYAML\n' >&2; exit 1; }
 sops -d ansible/inventory/production/group_vars/all/secrets.sops.yml >/dev/null || {
-  printf 'the committed backup secrets file must decrypt with SOPS_AGE_KEY_FILE\n' >&2
+  printf 'the committed backup secrets file must decrypt with your age identity\n' >&2
   exit 1
 }
 
@@ -128,7 +134,7 @@ started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 mkdir -p operator-output
 KNOWN_HOSTS="${ROOT}/operator-output/known-hosts-restore-test-${RUN_ID}"
 USER_DATA="${ROOT}/operator-output/restore-test-user-data-${RUN_ID}.yml"
-TEST_INVENTORY="${ROOT}/operator-output/phase7-restore-test-inventory-${RUN_ID}.yml"
+TEST_INVENTORY="${ROOT}/operator-output/restore-test-inventory-${RUN_ID}.yml"
 
 printf '#cloud-config\nssh_pwauth: false\ndisable_root: false\nssh_authorized_keys:\n  - %s\n' \
   "$(cat "${IDENTITY_FILE}.pub")" >"${USER_DATA}"
@@ -218,8 +224,7 @@ PYEOF
 
 ansible-playbook \
   -i "${TEST_INVENTORY}" \
-  --extra-vars "backup_restore_test_confirmation=CONFIRM_RESTORE_TEST_${TEST_HOST_NAME}" \
-  ansible/playbooks/phase7-restore-test.yml
+  ansible/playbooks/restore-test.yml
 
 finished_epoch="$(date -u +%s)"
 finished="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -232,7 +237,7 @@ jq -n \
   --arg finished "${finished}" \
   --argjson duration_seconds "$((finished_epoch - started_epoch))" \
   '{run_id: $run_id, snapshot_id: $snapshot_id, test_server_id: $test_server_id, server_type: $server_type, started: $started, finished: $finished, duration_seconds: $duration_seconds, result: "PASS"}' \
-  >operator-output/phase7-restore-test.json
+  >operator-output/restore-test.json
 
 printf '\nRestore test passed in %s seconds.\n' "$((finished_epoch - started_epoch))"
-printf 'Restore evidence: %s\n' "${ROOT}/operator-output/phase7-restore-test.json"
+printf 'Restore evidence: %s\n' "${ROOT}/operator-output/restore-test.json"

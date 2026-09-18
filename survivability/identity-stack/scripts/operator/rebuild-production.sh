@@ -19,7 +19,8 @@ Usage: rebuild-production.sh --expected-server-id ID \
   --expected-primary-ipv4-id ID --expected-primary-ipv4 ADDRESS \
   --snapshot-id ID --identity-file PATH [--evidence-dir PATH]
 
-Trusted operator workstation only. Requires HCLOUD_TOKEN and the exact
+Trusted operator workstation only. Run through with-secrets.sh --tooling for
+HCLOUD_TOKEN. Requires the exact
 CONFIRM_REBUILD=<expected-server-id> environment value. The identity file must
 be the private-key stub whose .pub key will be supplied through one-time
 cloud-init user data. The script never reads the private key itself.
@@ -99,7 +100,7 @@ while (($#)); do
   esac
 done
 
-: "${HCLOUD_TOKEN:?Set HCLOUD_TOKEN from trusted secret storage first}"
+: "${HCLOUD_TOKEN:?Run through scripts/operator/with-secrets.sh --tooling}"
 for value_name in EXPECTED_SERVER_ID EXPECTED_PRIMARY_IPV4_ID SNAPSHOT_ID; do
   [[ "${!value_name}" =~ ^[1-9][0-9]*$ ]] || {
     printf '%s must be a positive numeric ID\n' "${value_name}" >&2
@@ -261,7 +262,7 @@ current_image_json="$(hcloud image describe "${SNAPSHOT_ID}" -o json)"
 
 run_id="$(date -u +%Y%m%d%H%M%S)"
 started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-evidence_file="${EVIDENCE_DIR}/phase5-${run_id}.json"
+evidence_file="${EVIDENCE_DIR}/rebuild-${run_id}.json"
 jq -n \
   --arg run_id "${run_id}" \
   --arg started "${started}" \
@@ -273,8 +274,8 @@ jq -n \
   '{run_id: $run_id, started: $started, server_id: $server_id, primary_ipv4_id: $primary_ipv4_id, primary_ipv4: $primary_ipv4, snapshot_id: $snapshot_id, bootstrap_key_fingerprint: $key_fingerprint, result: "PREFLIGHT_PASS"}' \
   >"${evidence_file}"
 
-USER_DATA="$(mktemp "${TMPDIR:-/tmp}/phase5-cloud-init.XXXXXX")"
-KNOWN_HOSTS="$(mktemp "${TMPDIR:-/tmp}/phase5-known-hosts.XXXXXX")"
+USER_DATA="$(mktemp "${TMPDIR:-/tmp}/rebuild-cloud-init.XXXXXX")"
+KNOWN_HOSTS="$(mktemp "${TMPDIR:-/tmp}/rebuild-known-hosts.XXXXXX")"
 chmod 0600 "${USER_DATA}" "${KNOWN_HOSTS}"
 cat >"${USER_DATA}" <<EOF
 #cloud-config

@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Trusted operator workstation only. Creates and always removes a test server.
+#
+# Frozen: the gold image is rebuilt only when the base image itself must change,
+# not on a schedule. Ansible owns all host drift.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -17,7 +20,7 @@ Usage: validate-gold-image.sh --snapshot-id ID --ssh-key NAME_OR_ID
                               --identity-file PATH
                               [--server-type TYPE] [--owner LABEL]
 
-Requires HCLOUD_TOKEN and the private-key stub matching the registered Hetzner
+Run through scripts/operator/with-secrets.sh --tooling. Also needs the private-key stub matching the registered Hetzner
 public key. FIDO2 keys visibly request PIN and touch during SSH operations.
 EOF
 }
@@ -71,7 +74,7 @@ while (($#)); do
   esac
 done
 
-: "${HCLOUD_TOKEN:?Set HCLOUD_TOKEN from trusted secret storage first}"
+: "${HCLOUD_TOKEN:?Run through scripts/operator/with-secrets.sh --tooling}"
 [[ "${SNAPSHOT_ID}" =~ ^[0-9]+$ ]] || { printf 'snapshot ID must be numeric\n' >&2; exit 2; }
 [[ -n "${SSH_KEY}" ]] || { printf '%s\n' '--ssh-key is required' >&2; exit 2; }
 [[ -n "${IDENTITY_FILE}" ]] || { printf '%s\n' '--identity-file is required' >&2; exit 2; }

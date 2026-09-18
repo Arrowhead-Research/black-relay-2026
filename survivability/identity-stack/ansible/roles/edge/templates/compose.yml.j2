@@ -1,0 +1,55 @@
+---
+name: edge
+services:
+  caddy:
+    image: "{{ edge_caddy_image }}"
+    container_name: survivability-caddy
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    ports:
+      - "0.0.0.0:80:80/tcp"
+      - "0.0.0.0:443:443/tcp"
+      - "127.0.0.1:{{ edge_lldap_loopback_port }}:{{ edge_lldap_loopback_port }}/tcp"
+    volumes:
+      - "{{ edge_caddyfile }}:/etc/caddy/Caddyfile:ro"
+      - "{{ edge_caddy_data_dir }}:/data"
+      - "{{ edge_caddy_config_dir }}:/config"
+      - "{{ edge_caddy_log_dir }}:/var/log/caddy"
+    networks:
+      identity_proxy:
+        ipv4_address: "{{ edge_caddy_proxy_address }}"
+      identity_backend:
+        ipv4_address: "{{ edge_caddy_backend_address }}"
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --quiet
+        - --tries=1
+        - --spider
+        - http://127.0.0.1:2019/config/
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: "{{ edge_caddy_memory_limit }}"
+          cpus: "{{ edge_caddy_cpu_limit }}"
+
+networks:
+  identity_proxy:
+    external: true
+    name: "{{ edge_proxy_network }}"
+  identity_backend:
+    external: true
+    name: "{{ edge_backend_network }}"

@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Trusted operator workstation only. Creates and always removes a discovery server.
+#
+# Frozen: the gold image is rebuilt only when the base image itself must change,
+# not on a schedule. Ansible owns all host drift.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -18,7 +21,7 @@ Usage: discover-package-versions.sh --ssh-key NAME_OR_ID --identity-file PATH
                                     [--server-type TYPE] [--owner LABEL]
                                     [--output PATH.pkrvars.hcl]
 
-Requires HCLOUD_TOKEN and the private-key stub matching the registered Hetzner
+Run through scripts/operator/with-secrets.sh --tooling. Also needs the private-key stub matching the registered Hetzner
 public key. FIDO2 keys visibly request PIN and touch during SSH operations.
 Creates a disposable Debian 13 server and writes exact package pins locally.
 EOF
@@ -72,7 +75,7 @@ while (($#)); do
   esac
 done
 
-: "${HCLOUD_TOKEN:?Set HCLOUD_TOKEN from trusted secret storage first}"
+: "${HCLOUD_TOKEN:?Run through scripts/operator/with-secrets.sh --tooling}"
 [[ -n "${SSH_KEY}" ]] || { printf '%s\n' '--ssh-key is required' >&2; exit 2; }
 [[ -n "${IDENTITY_FILE}" ]] || { printf '%s\n' '--identity-file is required' >&2; exit 2; }
 [[ "${IDENTITY_FILE}" = /* ]] || { printf '%s\n' 'identity-file path must be absolute; expand the home-directory path first' >&2; exit 2; }
@@ -177,8 +180,7 @@ for variable_name in \
   docker_cli_package_version \
   containerd_package_version \
   docker_buildx_package_version \
-  docker_compose_package_version \
-  fluent_bit_package_version; do
+  docker_compose_package_version; do
   grep -Eq "^${variable_name} = \"[^\"]+\"$" "${TEMP_OUTPUT}" || {
     printf 'discovery output is missing %s\n' "${variable_name}" >&2
     exit 1

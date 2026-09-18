@@ -1,0 +1,51 @@
+---
+# The VPS joins its own tailnet as a tagged node. The tag is the owner: a key
+# created with `--tags` and no `--user` produces a node Headscale lists under
+# TaggedDevices, so no person owns it and offboarding a human cannot take it
+# down. The tag must already be declared in the committed Headscale policy,
+# which owns what the node may reach.
+tailnet_node_hostname: blackrelay-vps
+tailnet_node_tag: tag:blackrelay-vps
+
+# Pinned to the newest client branch this Headscale release actually knows.
+# Headscale 0.29.3 supports the last ten Tailscale minor versions and its
+# capability table stops at v1.98; a newer client negotiates a capability
+# version it has never seen. Move this pin when the deployed Headscale gains
+# the newer branch, not when Tailscale publishes one.
+tailnet_node_package_version: 1.98.10
+tailnet_node_repository_url: https://pkgs.tailscale.com/stable/debian
+tailnet_node_repository_suite: trixie
+tailnet_node_repository_architecture: amd64
+tailnet_node_repository_list_file: /etc/apt/sources.list.d/tailscale.list
+
+# The published archive key, pinned by content rather than trusted on sight.
+# It carries fingerprint 2596A99EAAB33821893C0A79458CA832957F5868, "Tailscale
+# Inc. (Package repository signing key)". A rotated upstream key changes this
+# digest and fails convergence until the new key is reviewed and the digest
+# updated deliberately, which is the same gate the container image digests use.
+tailnet_node_keyring_url: https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg
+tailnet_node_keyring_path: /usr/share/keyrings/tailscale-archive-keyring.gpg
+tailnet_node_keyring_sha256: 3e03dacf222698c60b8e2f990b809ca1b3e104de127767864284e6c228f1fb39
+
+# Tailscale SSH terminates in tailscaled rather than sshd. It is an additional
+# path, never the only one: public break-glass SSH stays open and unrestricted
+# by Headscale.
+tailnet_node_ssh: true
+
+# MagicDNS is deliberately refused on this host. Accepting it would repoint
+# /etc/resolv.conf at 100.100.100.100, making ACME renewal, backups, and apt
+# depend on tailscaled being healthy. The VPS publishes names; it does not
+# need to resolve them.
+tailnet_node_accept_dns: false
+
+# The Proxmox subnet router advertises routes this host has no reason to carry.
+tailnet_node_accept_routes: false
+
+# BackendState values that mean the node has not completed registration. The
+# role installs and configures the client either way; enrollment itself is a
+# deliberate operator step, because the preauthorized key is short-lived,
+# single-use, and generated just in time.
+tailnet_node_unregistered_states:
+  - NoState
+  - NeedsLogin
+  - NeedsMachineAuth

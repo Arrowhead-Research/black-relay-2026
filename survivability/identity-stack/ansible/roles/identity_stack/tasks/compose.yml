@@ -1,0 +1,32 @@
+---
+- name: Render the identity Compose project
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ identity_stack_compose_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Pull immutable identity service images
+  community.docker.docker_image:
+    name: "{{ item }}"
+    source: pull
+  loop: >-
+    {{ [identity_stack_lldap_image, identity_stack_pocket_id_image]
+    + ([identity_stack_headscale_image]
+    if not identity_stack_bootstrap_only | bool else []) }}
+
+- name: Validate the identity Compose model without exposing its environment
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/docker
+      - compose
+      - --project-directory
+      - "{{ identity_stack_root }}"
+      - --file
+      - "{{ identity_stack_compose_file }}"
+      - config
+      - --quiet
+  changed_when: false
+  when: not ansible_check_mode
+  no_log: true

@@ -96,20 +96,12 @@
       {{ host_firewall_candidate.changed or
       not host_firewall_active_file.stat.exists or
       (host_firewall_runtime.rc | default(1) != 0) }}
-    host_firewall_required_confirmation: >-
-      {{ 'APPLY_HOST_FIREWALL_' ~ inventory_hostname }}
 
-- name: Require resource-specific confirmation for firewall activation
-  ansible.builtin.assert:
-    that:
-      - >-
-        not host_firewall_activation_required or
-        host_firewall_apply_confirmation == host_firewall_required_confirmation
-    fail_msg: >-
-      Applying a new host firewall policy requires
-      host_firewall_apply_confirmation={{ host_firewall_required_confirmation }}.
-      The confirmation is needed only when policy activation is required.
-
+# Activation is guarded structurally rather than by a typed confirmation: the
+# candidate is validated with `nft --check`, a timed rollback is scheduled
+# before the policy is applied, and a fresh SSH connection must succeed before
+# the policy is persisted. A bad policy therefore self-heals instead of
+# requiring an operator to be present with the right value.
 - name: Validate candidate nftables policy
   ansible.builtin.command:
     argv:

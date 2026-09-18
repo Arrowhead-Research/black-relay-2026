@@ -64,13 +64,14 @@ backup_restic_backup_randomized_delay: 30min
 backup_restic_maintenance_oncalendar: "Mon *-*-* 03:30"
 backup_restic_maintenance_randomized_delay: 30min
 
-# Initializing an empty remote path creates a new repository and is therefore
-# opt-in with an exact operator confirmation. Normal convergence fails closed
-# if the configured repository disappears.
+# Production installs and enables both timers. The isolated restore test
+# overrides this to false so it can use the role without scheduling backups.
+backup_restic_manage_schedule: true
+
+# Creating a repository is opt-in but not destructive: restic refuses to
+# initialize over an existing repository. Normal convergence leaves this false
+# and fails closed if the configured repository disappears.
 backup_restic_init_repository: false
-backup_restic_init_confirmation: ""
-backup_restic_required_init_confirmation: >-
-  INITIALIZE_RESTIC_{{ inventory_hostname }}
 
 # Snapshot removal and prune are never scheduled. The operator must pass this
 # inventory-specific value to the wrapper for every destructive retention run.

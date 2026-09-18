@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Trusted operator workstation only. Creates a temporary builder and snapshot.
+#
+# Frozen: the gold image is rebuilt only when the base image itself must change,
+# not on a schedule. Ansible owns all host drift.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -11,7 +14,8 @@ usage() {
   cat <<'EOF'
 Usage: build-gold-image.sh [--var-file PATH] [--server-type TYPE] [--owner LABEL]
 
-Requires HCLOUD_TOKEN in the environment. The token is never read from a file.
+Run through scripts/operator/with-secrets.sh --tooling, which supplies
+HCLOUD_TOKEN from secrets/tooling.sops.env for this process only.
 EOF
 }
 
@@ -41,7 +45,7 @@ while (($#)); do
   esac
 done
 
-: "${HCLOUD_TOKEN:?Set HCLOUD_TOKEN from trusted secret storage first}"
+: "${HCLOUD_TOKEN:?Run through scripts/operator/with-secrets.sh --tooling}"
 [[ ${#OWNER} -le 63 && "${OWNER}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || {
   printf 'owner must be a lowercase alphanumeric/hyphen Hetzner label value\n' >&2
   exit 2

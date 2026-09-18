@@ -1,4 +1,21 @@
 ---
+# Public age recipients only. Private age keys are never committed and never
+# enter the Pi development container. Add a teammate by appending a recipient
+# here, then running `sops updatekeys` on every encrypted file; see
+# docs/runbooks/secrets.md.
+keys:
+  - &operator_robbie age1mgzajc9u3ld9w82e9u8e6n2y9ahuf8s266es86cee4hlzcf6zups9fctrr
+  # - &operator_<name> age1...    # one line per teammate
+  # - &recovery_offline age1...   # private key stored offline, never on a workstation
+
 creation_rules:
+  # Application and deployment secrets. Ansible decrypts these on the controller.
   - path_regex: ansible/inventory/production/group_vars/all/secrets\.sops\.yml$
-    age: age1mgzajc9u3ld9w82e9u8e6n2y9ahuf8s266es86cee4hlzcf6zups9fctrr
+    key_groups:
+      - age:
+          - *operator_robbie
+  # Infrastructure tooling credentials. Injected by scripts/operator/with-secrets.sh.
+  - path_regex: secrets/tooling\.sops\.env$
+    key_groups:
+      - age:
+          - *operator_robbie

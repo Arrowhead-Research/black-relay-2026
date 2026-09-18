@@ -1,0 +1,88 @@
+---
+- name: Install identity verification packages
+  ansible.builtin.apt:
+    name: "{{ identity_stack_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create identity deployment root
+  ansible.builtin.file:
+    path: "{{ identity_stack_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create service data and configuration directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "{{ identity_stack_secrets_dir }}"
+      owner: root
+      group: root
+      mode: "0700"
+    - path: "{{ identity_stack_lldap_data_dir }}"
+      owner: "{{ identity_stack_lldap_uid }}"
+      group: "{{ identity_stack_lldap_gid }}"
+      mode: "0700"
+    - path: "{{ identity_stack_pocket_id_data_dir }}"
+      owner: "{{ identity_stack_pocket_id_uid }}"
+      group: "{{ identity_stack_pocket_id_gid }}"
+      mode: "0700"
+    - path: "{{ identity_stack_headscale_data_dir }}"
+      owner: root
+      group: root
+      mode: "0700"
+    - path: "{{ identity_stack_headscale_config_dir }}"
+      owner: root
+      group: root
+      mode: "0700"
+
+- name: Render root-only LLDAP environment
+  ansible.builtin.template:
+    src: lldap.env.j2
+    dest: "{{ identity_stack_root }}/lldap.env"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+
+- name: Render root-only Pocket ID environment
+  ansible.builtin.template:
+    src: pocket-id.env.j2
+    dest: "{{ identity_stack_root }}/pocket-id.env"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+
+# No trailing newline: ldapsearch and ldapmodify use the complete contents of a
+# -y file as the password, so a newline here would be bound as part of the
+# password and every verification below would fail as invalid credentials.
+- name: Render root-only LDAP bind password for verification
+  ansible.builtin.copy:
+    content: "{{ lldap_pocket_id_bind_password }}"
+    dest: "{{ identity_stack_bind_password_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+
+- name: Render root-only Headscale OIDC client secret
+  ansible.builtin.copy:
+    content: "{{ headscale_oidc_client_secret | trim }}\n"
+    dest: "{{ identity_stack_headscale_oidc_secret_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when: not identity_stack_bootstrap_only | bool
+  no_log: true
+  diff: false

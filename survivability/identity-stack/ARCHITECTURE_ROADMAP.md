@@ -4,26 +4,15 @@
 
 Build a reproducible, reviewable, and secure identity and private-access stack
 for the Survivability research project. The repository owns the complete
-lifecycle of one production Hetzner Cloud server:
-
-1. Packer builds a generic Debian 13 gold image.
-2. OpenTofu adopts and manages the protected Hetzner infrastructure.
-3. Ansible hardens the host, deploys the services, and applies in-place updates.
-4. Operator-run verification and recovery procedures prove the deployment.
+lifecycle of one production Hetzner Cloud server.
 
 The identity flow is LLDAP -> Pocket ID -> Headscale. LLDAP is authoritative for
 users and groups, Pocket ID synchronizes LDAP identities and provides
 passkey-based OIDC, and Headscale authenticates users through Pocket ID.
 
-The existing Helsinki CPX32 and its assigned Primary IPv4 are valuable
-allocations but contain no data or services that need migration. The placeholder
-Ubuntu installation will be destructively rebuilt from the validated Debian 13
-snapshot without deleting or replacing the server object.
-
 ## Scope and objectives
 
-The initial deployment supports approximately 30-50 research-project users and
-has these objectives:
+The deployment supports approximately 30-50 research-project users:
 
 - One production VPS, with no permanent staging environment.
 - Disposable, short-lived test infrastructure in the same Hetzner project.
@@ -35,10 +24,19 @@ has these objectives:
 - Reproducible rebuilding rather than high availability or automatic failover.
 
 The accepted v1 risks are a single compute node, one Hetzner control-plane
-account, one Hetzner-hosted backup target, no regional failover, manual recovery,
-and fully trusted Survivability operators. Backblaze B2 state storage does not
-provide a proven distributed-lock implementation for this design, so OpenTofu
-is strictly single-operator.
+account, one Hetzner-hosted backup target, no regional failover, manual
+recovery, and fully trusted Survivability operators. Backblaze B2 state storage
+does not provide a proven distributed-lock implementation for this design, so
+OpenTofu is strictly single-operator.
+
+### Proportion
+
+This is one server for a small research project. Guard rails must earn their
+keep. Cheap machinery that prevents irreversible loss is welcome; machinery that
+only restates intent is not. Concretely: no per-phase test modules, no per-phase
+runbooks, no typed confirmations on reversible operations, and no status prose
+duplicated across documents. This file is the single source of truth for phase
+status.
 
 ## Decisions
 
@@ -46,74 +44,58 @@ is strictly single-operator.
 |---|---|
 | Production location | Existing CPX32 in Helsinki (`hel1`) |
 | Public addressing | Existing protected Primary IPv4; IPv6 disabled |
-| Base OS | Debian 13 gold image built with Packer |
-| Image use | Initial provisioning and disaster recovery; Ansible performs routine in-place updates |
-| Infrastructure | OpenTofu manages adopted server/IP, firewall, BX11, DNS, and disposable tests |
+| Base OS | Debian 13 gold image built with Packer, then frozen |
+| Image use | Disaster recovery only; Ansible owns all routine change and drift |
+| Infrastructure | OpenTofu manages adopted server/IP, firewall, BX11, DNS |
 | State | Client-side-encrypted OpenTofu state in a versioned Backblaze B2 bucket |
 | State concurrency | No distributed lock; one operator may run OpenTofu at a time |
 | Host configuration | Small, idempotent Ansible roles and explicit playbooks |
 | Runtime | Separate Docker Compose projects for edge and identity services |
-| Edge | Caddy with Coraza; pinned custom image built in GitHub Actions |
-| Host security | Pragmatic Debian hardening, nftables, CrowdSec, and Hetzner Firewall |
+| Edge | Official Caddy image pinned by digest. No WAF |
+| Host security | Pragmatic Debian hardening, nftables, CrowdSec, Hetzner Firewall |
 | Identity flow | LLDAP -> Pocket ID -> Headscale |
 | Databases | SQLite for LLDAP, Pocket ID, and Headscale |
-| Public DNS | Cloudflare DNS-only records with a moderate TTL such as 300 seconds |
-| Public names | Role-based names such as `id.example.com` and `headscale.example.com` |
+| Public DNS | Cloudflare DNS-only records with a 300-second TTL |
 | Private DNS | Headscale MagicDNS initially; CoreDNS split DNS deferred |
-| Secrets | SOPS with individual age recipients and an offline recovery recipient |
+| Secrets | SOPS with individual age recipients and an offline recovery recipient; both application secrets and infrastructure tooling credentials |
 | Backups | Daily restic over SFTP to protected BX11 plus Hetzner server backups |
-| Monitoring | External HTTPS polling, Healthchecks.io job monitoring, and email alerts |
-| Central logging | Fluent Bit installed but disabled until an external destination is selected |
+| Monitoring | External HTTPS polling, Healthchecks.io job monitoring, email alerts |
 | Operations | Privileged commands run manually from trusted operator workstations |
 
 Actual domain names, resource IDs, recipients, and other environment-specific
-values belong in documented variables or operator-controlled files, not in this
-roadmap.
+values belong in documented variables or operator-controlled files, not here.
+
+### Why no WAF
+
+Coraza and a custom-built Caddy image were considered and rejected for v1. For
+30-50 known users behind passkey-only authentication, a WAF in front of Pocket
+ID adds a GitHub Actions build pipeline, image scanning, SBOM generation, digest
+promotion, a detection-mode rollout, and ongoing CRS exclusion tuning against
+Headscale protocol traffic -- in exchange for protection that passkeys and a
+three-port attack surface already largely provide. CrowdSec covers the credible
+threat: automated scanning and brute force against SSH and the edge. Revisit if
+a genuinely untrusted user population is ever onboarded.
 
 ## Trust and credential boundaries
 
 The Pi environment is long-running and network-connected, and GitHub Actions is
 third-party automation. Neither receives production authority.
 
-| Action | Execution location | Credential access |
+| Action | Location | Credentials |
 |---|---|---|
-| Write code, documentation, tests, and safe examples | Pi development container | None |
-| Format, lint, policy-check, and render test templates | Pi or GitHub Actions | None |
-| Build, scan, create an SBOM for, and publish Caddy/Coraza | GitHub Actions | Repository-scoped GHCR package permission only |
-| Create the B2 state bucket and application key | Trusted operator workstation | B2 credentials and state-encryption material |
-| Build Packer snapshots and disposable Hetzner tests | Trusted operator workstation | Hetzner project token and operator SSH material |
-| Import, plan, and apply OpenTofu | Trusted operator workstation | Provider and state credentials |
-| Create or edit encrypted SOPS files | Trusted operator workstation | Operator's individual age key |
-| Rebuild the CPX32 | Trusted operator workstation | Hetzner authority plus explicit server-ID confirmation |
-| Check and deploy Ansible | Trusted operator workstation | Operator SSH identity and required SOPS recipients |
-| Restore production or test backups | Trusted operator workstation | SSH, SOPS, and backup credentials |
-| Generate backup credentials and Healthchecks.io checks | Trusted operator workstation | Operator age key, trusted secret storage, and monitoring account |
+| Write code, docs, tests, and safe examples; lint and render | Pi or GitHub Actions | None |
+| Provision, import, plan, and apply infrastructure | Trusted operator workstation | Provider and state credentials |
+| Create or edit encrypted SOPS files; deploy Ansible | Trusted operator workstation | Operator age key and SSH identity |
+| Rebuild the server; back up, restore, or prune | Trusted operator workstation | Hetzner authority plus exact confirmation |
 
-Never give Pi a production API token, B2 key, state-encryption key, age private
-key, SSH key or agent socket, TOTP seed, Docker socket, production environment
-file, production Ansible inventory, or decrypted secret. Operators must not
-paste credentials into chat. Secret-bearing Ansible tasks use `no_log: true` and
-`diff: false`.
+`AGENTS.md` states the complete boundary and the full list of operator-only
+operations; it and this section must not drift.
 
 The committed Ansible inventory remains empty for credential-free validation. A
-trusted operator creates a mode-`0600` `production-hosts.yml` outside the
-repository from the committed placeholder example. It contains only the
-production host/address, one named operator, absolute paths to the operator's
-manual and dedicated Ansible SSH identities (never key content), the Python
-interpreter, and safe SSH options. The operator sets `ANSIBLE_INVENTORY` to that
-file. The dedicated key is the Ansible connection identity for both root
-bootstrap and normal convergence. Because the completed Phase 5 rebuild
-installed only the manual/FIDO2 key, the operator authorizes the dedicated
-public key for root once through an interactive trusted-workstation SSH command.
-The Phase 6 playbook then installs both public keys for the named operator,
-reconnects with the dedicated key, proves sudo automatically, and only then
-disables root SSH. Every later `site.yml` run selects the dedicated key and
-named operator without changing inventory. Future rebuilds inject the dedicated
-public key directly and do not need the compatibility step.
-
-GitHub Actions may publish the edge image but must receive no Hetzner,
-Cloudflare, B2, SOPS, SSH, or deployment credential. Production consumes only a
-reviewed immutable image digest.
+trusted operator creates a mode-`0600` inventory outside the repository from the
+committed example, containing only the production host, one named operator,
+absolute paths to the operator's manual and dedicated Ansible SSH identities
+(never key content), the Python interpreter, and safe SSH options.
 
 ## Infrastructure architecture
 
@@ -125,170 +107,155 @@ rebuild protection where applicable, `prevent_destroy`, and an IPv4 lifecycle
 that does not automatically delete the address with the server.
 
 The one-time rebuild is separate from normal `apply` and requires a typed value
-containing the exact expected server ID. The operation verifies the server type,
-location, and Primary IPv4, temporarily disables rebuild protection, rebuilds
-without deleting the server object, and restores protection immediately.
-Ordinary OpenTofu commands must not be capable of replacing the CPX32.
+containing the exact expected server ID. Ordinary OpenTofu commands must not be
+capable of replacing the CPX32.
 
 ### Gold image
 
-The generic image contains:
-
-- A minimal, patched Debian 13 base.
-- Required base packages and time synchronization.
-- Docker Engine and Compose from verified, pinned sources.
-- A pinned Fluent Bit installation, disabled by default.
-- Basic SSH, logging, and operating-system hardening.
-- Cloud-init compatibility without operator-specific credentials.
+The frozen image contains a minimal patched Debian 13 base, required base
+packages and time synchronization, Docker Engine and Compose from verified
+pinned sources, basic SSH and OS hardening, and cloud-init compatibility without
+operator-specific credentials.
 
 Ansible owns named users, authorized keys, SSH access policy, nftables,
-CrowdSec, Fluent Bit configuration, service configuration, and all
-environment-specific values. Ansible applies current security updates because
-snapshots age. Unattended security updates may run, but unattended reboots may
-not.
+CrowdSec, service configuration, and all environment-specific values. Ansible
+applies current security updates because snapshots age. Unattended security
+updates may run, but unattended reboots may not.
 
-Image builds occur on a schedule and for critical base fixes. A disposable
-currently available server type validates a candidate in Helsinki before
-promotion. Retain the current and one previous validated gold-image snapshot.
-Production never consumes an implicit `latest` snapshot.
+The image is rebuilt only when the base itself must change, not on a schedule.
+Production references an explicit snapshot ID, never `latest`. Keep the snapshot
+you replace as a rollback.
 
 ### Disposable testing
 
 Disposable tests use an explicit name prefix, owner/expiry labels, a short
-default lifetime such as four hours, and a documented teardown command. They
-may create short-lived DNS records under a delegated test namespace for HTTPS
-and OIDC validation. GitHub Actions may report expired resources using
-credential-free committed metadata but has no deletion authority.
+default lifetime such as four hours, and a documented teardown command.
 
 ### State
 
 The operator manually creates a dedicated versioned B2 bucket and a
 bucket-scoped application key. OpenTofu encrypts state client-side; operators
 supply B2 credentials and encryption material at runtime from trusted secret
-storage. The state-encryption key also has an offline recovery copy.
+storage, and the state-encryption key has an offline recovery copy.
 
 B2 conditional-write locking is not relied upon. Only one operator may run
-OpenTofu against an environment at a time, and the runbook requires manual
-coordination. Version history is retained for interrupted-run recovery. State,
-plans, and credentials are never committed.
+OpenTofu against an environment at a time. State, plans, and credentials are
+never committed.
 
 ## Network and host security
 
-The initial Hetzner and host-firewall ingress policy permits:
+Ingress permits TCP 22, 80, and 443 from the Internet plus required ICMP. TCP 22
+is open because administrator addresses are dynamic; public SSH is an
+independent break-glass path and is never restricted solely to Headscale. There
+are no public UDP services. Outbound traffic is initially allowed. IPv6 is
+disabled deliberately and must not be enabled without equivalent policy and
+testing.
 
-- TCP 22 from the Internet because administrator addresses are dynamic.
-- TCP 80 and 443 from the Internet.
-- Required ICMP.
-- No public UDP services and no other inbound traffic.
+Two layers enforce this. The Hetzner Firewall sits outside the host and cannot
+be self-inflicted into a lockout. The nftables layer additionally constrains
+Docker's packet handling so a published container port cannot bypass host input
+policy. That second layer is defence in depth behind a Compose convention:
+**only Caddy publishes ports, and it publishes only 80 and 443**; everything
+else stays on an internal network.
 
-Outbound traffic is initially allowed. IPv6 is disabled deliberately and must
-not be enabled without equivalent policy and testing. nftables rules must be
-validated against Docker's packet handling so published container ports cannot
-bypass policy. Only Caddy publishes application HTTP ports.
+Host firewall activation is guarded structurally rather than by a typed
+confirmation. Ansible validates the candidate policy, schedules a timed
+rollback, applies the policy, and proves a fresh SSH connection before
+persisting it and cancelling the rollback. A bad policy self-heals.
 
-SSH initially uses one named, fully trusted operator account with two keys owned
-by that operator. The existing manual/FIDO2 identity remains a manual recovery
-path. A distinct dedicated Ed25519 key performs the Ansible root bootstrap and
-all normal convergence. The already-rebuilt server requires one interactive
-transfer of that dedicated public key through the currently authorized FIDO2
-connection; future rebuilds inject it directly. Normal `site.yml` runs select
-the dedicated identity, prove passwordless sudo, validate SSH configuration,
-and remove root access without manual enrollment or verification flags. Root
-login and password authentication are disabled. The dedicated
-private key remains mode `0600` on the trusted workstation and accepts local
-workstation protection in place of per-connection hardware user presence.
-Additional named operators can be added declaratively when actually needed; a
-second person is not a prerequisite for initial host configuration. Public SSH
-is an independent break-glass path and is never restricted solely to Headscale.
+SSH uses one named, fully trusted operator account with two keys. The manual
+FIDO2 identity is a manual recovery path; a distinct dedicated Ed25519 key
+performs all normal convergence. Root login and password authentication are
+disabled. That account is the only identity the public SSH port admits, and
+`AllowUsers` names it explicitly.
+
+Other operators hold tailnet-only accounts: a Unix account with a locked
+password and no `authorized_keys`, reachable solely through Tailscale SSH, which
+authenticates in `tailscaled` against the committed policy. The policy carries
+one `ssh` rule per person naming only that person's own account, so an account
+is never shared and `autogroup:nonroot` never appears against a tagged host.
+Sudo is passwordless and therefore root-equivalent, so each account states it
+deliberately. The accepted consequence is that these operators depend on
+Headscale being up; break-glass recovery belongs to the named operator alone.
 All supported cloud and repository accounts use strong provider MFA and offline
 recovery codes.
 
 CrowdSec runs on the host, consumes SSH and Caddy logs, and enforces decisions
-through a host firewall bouncer. Coraza initially observes Pocket ID in
-detection mode. Blocking is enabled only after representative registration,
-login, passkey, synchronization, recovery, and logout flows have been reviewed
-and tested. Generic OWASP CRS inspection is not applied indiscriminately to
-Headscale protocol traffic.
+through a host firewall bouncer.
 
 Caddy obtains public certificates using normal ACME HTTP/TLS challenges, so no
 Cloudflare API token is stored on the VPS. Embedded DERP and public UDP 3478 are
-deferred until measurements demonstrate a need; clients initially use public
-DERP infrastructure.
+deferred until measurements demonstrate a need.
 
 ## Container and service architecture
 
-Use these production roots:
-
-- `/srv/edge` for Caddy/Coraza.
-- `/srv/identity-stack` for LLDAP, Pocket ID, and Headscale.
-
-Use an external `identity_proxy` Docker network and a private internal
-`identity_backend` network. Caddy, Pocket ID, and Headscale attach only where
-needed; Pocket ID and LLDAP communicate over the backend network. LDAP is never
-published publicly. The LLDAP administration UI binds to host loopback and is
-accessed through an SSH tunnel.
+Production roots are `/srv/edge` for Caddy and `/srv/identity-stack` for LLDAP,
+Pocket ID, and Headscale. Use an external `identity_proxy` network and a private
+internal `identity_backend` network. Caddy, Pocket ID, and Headscale attach only
+where needed; Pocket ID and LLDAP communicate over the backend network. LDAP is
+never published publicly. The LLDAP administration UI binds to host loopback and
+is accessed through an SSH tunnel.
 
 Containers use immutable image digests, health checks, restart policies,
-resource limits, dropped capabilities, read-only filesystems, and non-root
-users where upstream support permits. Automated tools may propose dependency
-updates, but Watchtower and unattended production image updates are prohibited.
+resource limits, dropped capabilities, read-only filesystems, and non-root users
+where upstream support permits. Automated tools may propose dependency updates,
+but Watchtower and unattended production image updates are prohibited.
 
-The VPS may join its own Headscale-managed tailnet for private-service access,
-but that route is never the only recovery mechanism. Tailscale SSH is deferred
-for this VPS.
+The VPS joins its own Headscale-managed tailnet as the tagged node
+`blackrelay-vps`, which is what makes Tailscale SSH available to Survivability
+operators. That route is never the only recovery mechanism: public break-glass
+SSH stays open and is never restricted to Headscale.
 
 ## Identity and authorization
 
 ### LLDAP and Pocket ID
 
-Bootstrap only:
-
-- One named human administrator.
-- One noninteractive, read-only Pocket ID LDAP bind account.
-- `pocketid-admins`.
-- `headscale-users`.
-- `survivability`.
+Bootstrap only: one named human administrator, one noninteractive read-only
+Pocket ID LDAP bind account, and the groups `pocketid-admins`,
+`headscale-users`, and `survivability`.
 
 LLDAP is authoritative for usernames, verified email attributes, group
 membership, disablement, and deletion. Pocket ID synchronizes using the
 read-only account. Membership in `pocketid-admins` maps to Pocket ID
-administration; ordinary synchronized users receive no administrative role.
-The initial Pocket ID bootstrap mechanism is removed or reduced to documented
-recovery scaffolding after synchronized administration is verified.
+administration; ordinary synchronized users receive no administrative role. The
+initial Pocket ID bootstrap mechanism is reduced to documented recovery
+scaffolding after synchronized administration is verified.
 
 A user who loses their only passkey requires administrator-assisted CLI
-recovery. This is accepted for the research project. At least two separate
-operators must retain the ability to perform that recovery.
+recovery. At least two separate operators must retain the ability to perform it.
 
-SMTP is not required for technical bootstrap. A small external relay is
-required before broader onboarding if recovery or notification workflows need
-email. Credentials are entered directly into SOPS by an operator and are never
-sent to Pi.
+SMTP is not required for technical bootstrap. A small external relay is required
+before broader onboarding if recovery or notification workflows need email.
 
 ### Headscale
 
 Headscale uses Pocket ID as a confidential OIDC provider with PKCE S256 and
 requests `openid`, `profile`, `email`, and `groups`. The `headscale-users` group
-controls admission. Removing or disabling a user blocks future authentication;
-a documented offboarding command immediately expires or deletes existing nodes.
-Node expiry/reauthentication limits residual access to no more than 24 hours.
+controls admission. Removing or disabling a user blocks future authentication; a
+documented offboarding command immediately expires or deletes existing nodes.
+Node expiry limits residual access to no more than 24 hours.
 
-Network authorization uses a committed Headscale policy with Grants. An
-explicit empty Grants list is the default-deny starting point. OIDC groups are
-not assumed to be policy principals. The policy declares its own groups and is
-maintained manually in v1.
+That expiry bounds people, not machines. Headscale exempts tagged nodes from
+`node.expiry`, and a tagged node is owned by its tag rather than by a user, so
+neither the 24-hour ceiling nor a user's offboarding revokes an infrastructure
+node. Revoking one means deleting the node or changing the committed policy.
+This is the intended trade: infrastructure does not silently fall off the
+tailnet, and in exchange its removal must be deliberate.
+
+Network authorization uses a committed Headscale policy with Grants. The Grants
+list is always present and always explicit, because omitting it is allow-all. It
+began empty, and every flow added since is reviewable in the repository history.
+OIDC groups are not assumed to be policy principals; the policy declares its own
+groups and is maintained manually in v1.
 
 Every permitted tag is explicit and follows a convention such as
-`tag:<team>-<role>`. Survivability owns every declared tag; application teams
-own only their own scoped tags. Infrastructure tags such as
-`tag:proxmox-router` remain Survivability-only. Noninteractive infrastructure
-nodes enroll with short-lived, single-use, preauthorized keys generated just in
-time and never committed or baked into images.
+`tag:<team>-<role>`. Survivability owns every declared tag; application teams own
+only their own scoped tags. Noninteractive infrastructure nodes enroll with
+short-lived, single-use, preauthorized keys generated just in time and never
+committed or baked into images.
 
-Headscale MagicDNS is sufficient for v1. When the first private application
-requires `internal.example.com`, add a tailnet-only CoreDNS authority and later
-a second on-prem resolver. No private addresses are published through public
-Cloudflare DNS.
+Headscale MagicDNS is sufficient for v1. No private addresses are published
+through public Cloudflare DNS.
 
 ## Backups, recovery, and monitoring
 
@@ -296,332 +263,167 @@ OpenTofu provisions a protected BX11 Storage Box. The VPS accesses a dedicated
 least-privilege backup subaccount using its own SSH key. Restic uses a separate
 repository password and encrypts data client-side. Both are delivered through
 SOPS-backed Ansible variables and rendered root-only. External Storage Box
-reachability is disabled after one short, reviewed workstation bootstrap for
-subaccount-key enrollment; production SFTP must then succeed only from the
-Hetzner network.
+reachability is disabled in steady state.
 
-Daily backups run around 02:00 UTC with randomized delay and overlap
-prevention. They capture consistent copies of all SQLite databases,
-cryptographic material, Headscale policy, configuration, and deployment files.
-Use online application/SQLite backup methods where safe; otherwise permit a
-brief coordinated pause. Retention begins at 7 daily, 5 weekly, and 12 monthly
-snapshots. Alert if no successful snapshot exists within 26 hours.
+Daily backups run around 02:00 UTC with randomized delay and overlap prevention.
+They capture consistent copies of all SQLite databases, cryptographic material,
+Headscale policy, configuration, and deployment files. Retention is 7 daily, 5
+weekly, and 12 monthly snapshots. Alert if no successful snapshot exists within
+26 hours.
 
 Hetzner server backups provide a convenient secondary rollback but do not
 replace restic. The accepted v1 limitation is that the server, native backups,
-and BX11 share a Hetzner account/provider boundary.
+and BX11 share a Hetzner account boundary.
 
-Quarterly restore tests create an isolated temporary server of an available
-type in Helsinki. They do not use production DNS or clients. Tests restore the
-coordinated stack, validate data and health, record recovery time against the
-four-hour RTO, and destroy the temporary server afterward.
+Quarterly restore tests create an isolated temporary server in Helsinki. They do
+not use production DNS or clients. The restore playbook refuses to run against a
+host that already has a converged firewall policy, so it cannot target
+production. Tests restore the coordinated stack, validate data and health,
+record recovery time against the four-hour RTO, and destroy the server
+afterward.
 
 Healthchecks.io receives job start/success/failure signals through separate
-daily backup and weekly verification checks; the daily check uses a one-day
-period with a two-hour grace period so a missing successful ping alerts at
-the 26-hour objective. The weekly verification job checks repository integrity
-with a partial data read and fails when the newest snapshot is older than the
-objective. Retention pruning remains an exact-confirmation operator action, not
-a scheduled task. A separate external service polls Pocket ID and Headscale
-HTTPS endpoints. Both paths send email alerts.
-Local journald and Caddy logs are bounded to approximately 7-14 days and must
-exclude authorization headers, cookies, LDAP credentials, OIDC tokens, and
-request bodies. Fluent Bit remains disabled until an external logging service,
-initially expected to be evaluated against Grafana Cloud, is approved.
+daily backup and weekly verification checks. A separate external service polls
+Pocket ID and Headscale HTTPS endpoints. Both paths send email alerts. Local
+journald and Caddy logs are bounded to 7-14 days and must exclude authorization
+headers, cookies, LDAP credentials, OIDC tokens, and request bodies.
 
 ## Destructive-operation policy
 
-Normal commands fail closed. Separate exact confirmation values are required
-for:
+Normal commands fail closed. Two operations destroy something unrecoverable and
+require an exact typed value:
 
-- Rebuilding or destroying a server.
-- Replacing firewall policy in a way that risks SSH access.
-- Deleting the protected Primary IPv4 or BX11.
-- Pruning backup generations.
-- Restoring over production.
-- Resetting an identity database.
+- Rebuilding the server requires `CONFIRM_REBUILD=<expected-server-id>`.
+- Pruning backup generations requires `PRUNE_RESTIC_<inventory hostname>`.
 
-The CPX32 rebuild specifically requires `CONFIRM_REBUILD=<expected-server-id>`.
-Operator checks must verify resource identity and console recovery immediately
-before execution.
+Everything else is protected structurally: `prevent_destroy` and provider-side
+protection on adopted resources, timed rollback and a fresh SSH proof on
+firewall activation, and a converged-host check on the restore test. Operator
+checks must verify resource identity and console recovery immediately before a
+rebuild.
 
 ## Implementation phases
 
-### Phase 1: Architecture and workspace reset
+Phases are a schedule, not an architecture. Files are named for what they do.
 
-Status: complete. The obsolete audit and migration workflow has been removed;
-credential-free validation passes.
+### Phases 1-6: complete
 
-- Replace obsolete personal-account migration assumptions with this greenfield
-  architecture.
-- Update agent instructions and trust boundaries.
-- Identify obsolete audit/migration code and documentation for later removal or
-  repurposing.
-- Preserve safe example variables; do not create or request credentials.
+1. **Architecture and workspace reset** -- obsolete migration workflow removed;
+   credential-free validation passes.
+2. **Reproducible tooling foundation** -- pinned toolchain, Pi development
+   image, `make lint` and `make validate`, credential-free GitHub Actions.
+3. **Protected OpenTofu adoption** -- encrypted B2 backend bootstrapped; the
+   existing CPX32 and independent Primary IPv4 imported and protected.
+   Runbook: `docs/runbooks/opentofu-adoption.md`.
+4. **Debian 13 gold image** -- generic image built, validated on a disposable
+   server, and promoted by explicit snapshot ID. Now frozen.
+   Runbook: `docs/runbooks/gold-image.md`.
+5. **Explicit CPX32 rebuild** -- guarded in-place rebuild from the promoted
+   snapshot; server object and Primary IPv4 preserved.
+   Runbook: `docs/runbooks/server-rebuild.md`.
+6. **Host baseline and access** -- `operator_access`, `host_baseline`, and
+   `host_firewall` converged in production. Named-operator access with a
+   dedicated Ansible key, root and password SSH disabled, TCP 22/80/443 plus
+   ICMP, Docker-DNAT boundary enforced.
+   Runbooks: `docs/runbooks/operator-access.md`,
+   `docs/runbooks/host-configuration.md`.
 
-Exit criteria:
+### Phase 7: backup foundation
 
-- Roadmap and repository instructions agree on the greenfield lifecycle.
-- Credential-free `make lint` and `make validate` pass.
-- No existing target or default command can access or mutate production.
+Status: complete. The backup, alert, retention, and isolated restore procedures
+have been executed and tested per `docs/runbooks/backups.md`.
 
-### Phase 2: Reproducible tooling foundation
-
-Status: complete. The trusted-host development image, `make dev-doctor`, and
-GitHub Actions credential-free checks were operator-verified.
-
-- Pin Packer, OpenTofu, Ansible, collections, providers, and linters.
-- Add credential-free formatting, validation, policy, and template tests.
-- Add GitHub Actions without production secrets.
-- Document trusted-workstation environment variables without values.
-
-Exit criteria:
-
-- Local and CI checks use consistent versions.
-- Build and production credentials remain outside Pi and CI.
-
-### Phase 3: Protected OpenTofu adoption
-
-Status: complete. A trusted operator bootstrapped the encrypted B2 backend,
-imported only the existing CPX32 and independent Primary IPv4, removed the
-unneeded IPv6 allocation through the reviewed procedure, applied the protected
-resources, and verified convergence without replacement or deletion of the
-adopted resources.
-
-- Define the CPX32, independent Primary IPv4, firewall, Cloudflare records, and
-  BX11 with deletion safeguards.
-- Document manual B2 backend bootstrap and single-operator coordination.
-- Import only the existing CPX32 and Primary IPv4.
-- Require the operator to review a plan containing no replacement or deletion.
-
-Exit criteria:
-
-- The protected imported resources show no destructive plan.
-- The IPv4 survives server lifecycle changes.
-- No ordinary apply can delete the CPX32, IPv4, or BX11.
-
-### Phase 4: Debian 13 gold image
-
-Status: complete. A trusted operator discovered exact Debian 13 package pins,
-built the generic image on a disposable CX23, validated the resulting x86
-snapshot before and after reboot, promoted its explicit numeric ID, and verified
-that all disposable servers were removed. This is the first validated snapshot,
-so there is no previous validated snapshot to retain until the next successful
-image cycle.
-
-- Build the generic image on a temporary server.
-- Pin and verify Docker, Compose, and Fluent Bit sources.
-- Add pragmatic baseline hardening without credentials.
-- Validate boot, cloud-init, SSH bootstrap, package state, and architecture.
-- Retain current and previous validated snapshots.
-
-Exit criteria:
-
-- A disposable server passes image validation.
-- The builder is removed and costs are accounted for.
-- Production references an explicit snapshot ID, never `latest`.
-
-### Phase 5: Explicit CPX32 rebuild
-
-Status: complete. A trusted operator ran the guarded in-place rebuild from the
-explicit promoted snapshot. The server object and independent Primary IPv4 were
-preserved, Debian 13 and emergency SSH access were verified, both provider
-protections were restored manually after a CLI/API compatibility error, and the
-post-rebuild OpenTofu plan converged with no changes. The restoration command
-and regression tests now send both enabled protection values as required by the
-current API.
-
-Operator-run sequence:
-
-1. Confirm imported resource state and protections.
-2. Confirm the selected snapshot passed disposable testing.
-3. Verify Hetzner console recovery.
-4. Record harmless current resource metadata; no application archive is needed.
-5. Validate the expected server ID, CPX32 type, `hel1` location, and Primary IPv4.
-6. Temporarily disable rebuild protection.
-7. Rebuild from the Debian 13 snapshot without deleting the server object.
-8. Re-enable protections immediately.
-9. Verify boot and emergency access.
-
-Exit criteria:
-
-- CPX32 allocation and Primary IPv4 are unchanged.
-- Debian 13 boots from the validated image.
-- Protection and console recovery are verified.
-
-### Phase 6: Host baseline and access
-
-Status: complete. A trusted operator completed and verified the declarative
-`operator_access`, `host_baseline`, and `host_firewall` roles in production.
-The named account retains the manual/FIDO2 recovery key and uses a distinct
-non-interactive Ansible key; root and password SSH are disabled. Safe package
-updates, unattended-update scheduling without automatic reboots, bounded
-persistent journald, sysctl hardening, and non-mutating reboot/disk-pressure
-reporting are active.
-
-The guarded nftables policy was validated and activated with timed rollback and
-a fresh SSH proof before persistence. The operator reported TCP 22/80/443 plus
-required ICMP exposure, Docker-DNAT backend-port enforcement, and a final
-no-change `site.yml` run. The protected Hetzner Firewall remained attached and
-unchanged.
-
-CrowdSec installation and its SSH/Caddy log integration now belong to Phase 8,
-when the edge logging path exists. Email delivery for host status belongs to
-Phase 11 monitoring; Phase 6 already surfaces pending reboot and disk pressure
-in every Ansible run. Phase numbers are roadmap labels, while `site.yml`
-continues to compose semantic, idempotent roles.
-
-Exit criteria achieved:
-
-- Public exposure matches TCP 22/80/443 plus required ICMP.
-- The dedicated Ansible key works, the manual operator key remains
-  declaratively authorized, and root SSH is disabled.
-- Docker cannot bypass backend-port restrictions.
-- Normal `site.yml` convergence is idempotent.
-
-### Phase 7: Backup foundation
-
-Status: next. The credential-free implementation, operator runbook, and tests
-are in place; a trusted operator must complete the sequence below and record
-completion.
-
-- Provision/protect BX11 and render root-only restic configuration.
-- Add consistent backup, retention, verification, and Healthchecks.io signals.
+- Provision the home-scoped SFTP-only BX11 subaccount and render root-only
+  restic configuration from SOPS.
+- Schedule the guarded daily backup and weekly verification timers with separate
+  Healthchecks.io signals.
 - Enable optional Hetzner server backups.
-- Run an isolated initial restore before identity data becomes important.
+- Run an isolated restore test before identity data becomes important.
 
-OpenTofu adds a home-scoped SFTP-only `hcloud_storage_box_subaccount` over
-the always-on port 22 and leaves optional interactive port-23 SSH disabled.
-External Storage Box reachability is disabled in steady state; the runbook uses
-a short, reviewed bootstrap window only to enroll the subaccount key and pin
-its host key. The `backup_restic` Ansible role renders root-only restic
-credentials from SOPS, stages consistent SQLite copies, schedules the guarded
-daily 02:00 UTC backup and weekly Monday verification timers, and signals
-separate Healthchecks.io checks for start/success/failure. The weekly timer
-verifies repository integrity and the 26-hour freshness guard. Retention is 7
-daily, 5 weekly, and 12 monthly snapshots, applied only by an
-operator-confirmed `forget --prune` command.
+Exit criteria: a daily encrypted backup succeeds without plaintext leakage;
+failure and staleness alerts are tested; a full restore completes within four
+hours.
 
-Operator-run sequence:
+### Phase 8: services
 
-1. Generate the dedicated backup SSH key and create the two Healthchecks.io
-   checks (daily backup with a two-hour grace period; weekly verification).
-2. Create and commit the SOPS-encrypted backup secrets file.
-3. Enable `server_backups_enabled` and set the temporary
-   `storage_box_bootstrap_external_reachability=true` flag, then apply OpenTofu
-   with the subaccount password from trusted secret storage; review the
-   in-place-only plan.
-4. Authorize the RFC4716 backup public key on SFTP port 22 and pin the Storage
-   Box host key against Hetzner's published fingerprint.
-5. Set external reachability back to false and apply the narrow private-only
-   OpenTofu plan before deploying restic.
-6. Apply `site.yml` with the one-time exact repository-initialization
-   confirmation, then run the first backup manually.
-7. Review the retention dry run and apply confirmed `forget --prune` only in
-   an operator maintenance window.
-8. Test the failure signal and the Healthchecks.io staleness alert.
-9. Run the guarded isolated restore test on a disposable server and record
-   the duration against the four-hour objective.
-10. Rerun `site.yml` and require no changes.
+Status: complete. Converged in production and exercised by the operator per
+`docs/runbooks/service-deployment.md` and `docs/runbooks/user-lifecycle.md`.
+LLDAP, Pocket ID, and Headscale run behind Caddy; passkey login, LDAP
+synchronization, and OIDC-gated node enrollment are working.
 
-Exit criteria:
+Deploy the whole stack in one phase. The identity chain cannot be validated
+piecemeal -- LLDAP alone does nothing, Pocket ID needs LLDAP, Headscale needs
+Pocket ID, and all three need Caddy for TLS.
 
-- Daily encrypted backup succeeds without plaintext leakage.
-- Failure and staleness alerts are tested.
-- A full restore completes within four hours.
+- `edge` role -> `/srv/edge`: official Caddy image by digest, Caddyfile, bounded
+  safe logs, and the proxy network. Install pinned CrowdSec and the host-firewall
+  bouncer, consuming SSH and Caddy logs.
+- `identity_stack` role -> `/srv/identity-stack`: LLDAP, Pocket ID, and
+  Headscale by digest on the proxy and backend networks.
+- Bootstrap the minimum LLDAP users and groups; deploy Pocket ID with read-only
+  LDAP synchronization; verify stable identity attributes, group mappings,
+  disablement, and passkey login.
+- Deploy Headscale with a confidential Pocket ID OIDC client and a committed
+  default-deny Grants policy.
 
-### Phase 8: Edge deployment
+Exit criteria: Caddy validates before reload and only 80/443 are published; LLDAP
+remains authoritative and bind credentials cannot modify the directory;
+authorized users enroll and reauthenticate through Pocket ID; unauthorized users
+and undeclared flows are denied; offboarding revokes active access within the
+defined objective.
 
-- Build and publish the pinned Caddy/Coraza image with scan and SBOM evidence.
-- Deploy `/srv/edge`, public TLS, bounded safe logs, and proxy networking.
-- Install pinned CrowdSec components and the host-firewall bouncer, consume SSH
-  and Caddy logs, and integrate CrowdSec decisions.
-- Exercise Coraza in detection mode before reviewed blocking rules are enabled.
+### Phase 9: production verification
 
-Exit criteria:
+Status: descoped by operator decision. A formal verification pass was judged
+disproportionate for one server whose identity chain the operator had already
+exercised end to end during Phase 8. The phase was not executed, and the roadmap
+records that rather than claiming a pass.
 
-- Caddy validates before reload.
-- Only intended edge ports are public.
-- Existing test routes and Headscale protocol behavior survive WAF testing.
+The following were therefore never demonstrated and are accepted v1 risks:
 
-### Phase 9: LLDAP and Pocket ID
+- Restart and reboot resilience of both Compose projects and the host.
+- Idempotence of a repeat `tofu plan` and a repeat `site.yml` run.
+- The RPO/RTO objective against a restore containing real identity data. The
+  Phase 7 restore test predates LLDAP, Pocket ID, and Headscale state, so the
+  four-hour RTO remains an estimate rather than a measured number.
+- Unattended delivery of pending-reboot and disk-pressure status. Both
+  conditions are still detected only as `host_baseline` warnings printed during
+  a convergence run, so they reach nobody between runs.
+- Tested application, host-image, and data-recovery runbooks.
 
-- Deploy LLDAP and bootstrap the minimum users/groups.
-- Deploy Pocket ID with read-only LDAP synchronization.
-- Verify stable identity attributes, group mappings, disablement, and passkey
-  login.
-- Establish synchronized administration and reduce bootstrap access.
+Any of these may be picked up later as ordinary work without reopening the
+phase.
 
-Exit criteria:
+### Phase 10: deferred capabilities
 
-- LLDAP remains authoritative.
-- Bind credentials cannot modify the directory or log in interactively.
-- A synchronized administrator can authenticate and perform recovery.
+Status: next. Proxmox subnet routers and their team grants are the active item;
+a subnet router is registered and a grant has been tested ad hoc on the host.
 
-### Phase 10: Headscale and policy
+Consider separately, in approximate dependency order: external SMTP before broad
+onboarding; central log shipping to an external service such as Grafana Cloud;
+CoreDNS split DNS for `internal.example.com`; Proxmox subnet routers and
+application-specific team grants; additional private applications; a secrets
+service; a second backup provider or administrative account; PostgreSQL if
+measured scale requires it; high availability or regional failover; formal
+hardening benchmarks; a WAF if an untrusted user population is onboarded.
 
-- Deploy a fresh Headscale instance and confidential Pocket ID OIDC client.
-- Apply a committed default-deny Grants policy.
-- Verify group admission, explicit tags, node expiry, offboarding, and
-  short-lived infrastructure enrollment.
-- Test Headscale control traffic through Caddy without generic CRS interference.
+Each deferred capability requires its own threat-model and recovery update
+before implementation.
 
-Exit criteria:
+## Runbooks
 
-- Authorized users enroll and reauthenticate through Pocket ID.
-- Unauthorized users and undeclared flows are denied.
-- Offboarding revokes active access within the defined objective.
+Maintain these six, in `docs/runbooks/`:
 
-### Phase 11: Production verification
-
-- Reboot and restart services individually.
-- Verify authentication, synchronization, policy, enrollment, SSH recovery,
-  firewall exposure, certificates, monitoring, and backups.
-- Deliver pending-reboot and disk-pressure status through the approved external
-  email/monitoring path.
-- Re-run OpenTofu and Ansible and require no unexpected changes.
-- Test application, host-image, and data-recovery runbooks.
-
-Exit criteria:
-
-- Functional, security, restart, recovery, and idempotence checks pass.
-- External uptime and job-failure email alerts work.
-- The accepted RPO/RTO are demonstrated.
-
-### Phase 12: Deferred capabilities
-
-Consider separately, in this approximate dependency order:
-
-1. External SMTP before broad user onboarding.
-2. Fluent Bit activation and external log storage such as Grafana Cloud.
-3. CoreDNS split DNS for `internal.example.com`.
-4. Proxmox subnet routers and application-specific team grants.
-5. Additional private applications.
-6. Infisical Cloud evaluation and eventual self-hosted secrets service.
-7. A second backup provider or administrative account.
-8. PostgreSQL if measured scale or recovery requirements justify it.
-9. High availability or regional failover.
-10. Lynis automation or formal hardening benchmarks.
-
-Each deferred capability requires its own threat-model and recovery update before
-implementation.
-
-## Required runbooks
-
-Maintain concise operator runbooks for:
-
-- Workstation and B2 bootstrap.
-- Resource import and protected planning.
-- Gold-image build, validation, promotion, and pruning.
-- CPX32 rebuild and console recovery.
-- Production Ansible inventory bootstrap, host access, and application
-  deployment.
-- SSH operator bootstrap, key rotation, and recovery.
-- User onboarding, passkey recovery, and offboarding.
-- Backup, retention, verification, and quarterly restore.
-- Routine and emergency updates.
-- Disposable test creation and teardown.
-- Application, image, and data rollback.
+| Runbook | Covers |
+|---|---|
+| `operator-access.md` | SSH operator bootstrap, key rotation, recovery |
+| `host-configuration.md` | Host baseline and guarded nftables activation |
+| `backups.md` | Backup setup, retention, verification, restore test |
+| `opentofu-adoption.md` | B2 backend, resource import, protected planning |
+| `server-rebuild.md` | Guarded rebuild and console recovery |
+| `gold-image.md` | Frozen base image; rebuild only when the base changes |
+| `service-deployment.md` | Caddy, CrowdSec, and identity-service deployment |
+| `user-lifecycle.md` | User onboarding, denial tests, offboarding, passkey recovery |
 
 Every command must identify whether it runs in credential-free Pi, GitHub
 Actions, or a trusted operator workstation. Destructive commands must not be
