@@ -1,0 +1,60 @@
+---
+# Convergence is split into statically imported task files so that a routine
+# change can be applied without re-running the parts of the role it cannot have
+# affected. Tags are attached here rather than inside each file so that the
+# whole selection model is readable in one place; README.md documents the
+# supported selections under "Targeted convergence".
+#
+# A run with no tag selection still executes every import in this order, which
+# remains the documented way to apply a change.
+#
+# preflight decrypts the SOPS store and validates configuration, so every other
+# import depends on it having run. It therefore carries each of their tags.
+- name: Load and validate identity configuration
+  ansible.builtin.import_tasks: preflight.yml
+  tags:
+    - identity-config
+    - identity-policy
+    - identity-lldap
+
+- name: Provision identity directories and rendered credentials
+  ansible.builtin.import_tasks: config.yml
+  tags:
+    - identity-config
+
+- name: Install the Headscale policy and configuration
+  ansible.builtin.import_tasks: policy.yml
+  tags:
+    - identity-config
+    - identity-policy
+
+- name: Render, pull, and validate the identity Compose project
+  ansible.builtin.import_tasks: compose.yml
+  tags:
+    - identity-config
+
+# This runs in the policy selection too: it is the only check standing between
+# an edited policy file and a Headscale restart that would read it.
+- name: Validate the Headscale configuration before deployment
+  ansible.builtin.import_tasks: verify-headscale-config.yml
+  tags:
+    - identity-config
+    - identity-policy
+    - verify
+
+- name: Bootstrap LLDAP groups, users, and memberships
+  ansible.builtin.import_tasks: lldap.yml
+  tags:
+    - identity-lldap
+
+- name: Prove the Pocket ID bind account is strictly read-only
+  ansible.builtin.import_tasks: verify-lldap.yml
+  tags:
+    - identity-lldap
+    - verify
+
+- name: Converge the identity Compose services
+  ansible.builtin.import_tasks: converge.yml
+  tags:
+    - identity-config
+    - identity-lldap

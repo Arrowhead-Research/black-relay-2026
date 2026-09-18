@@ -1,0 +1,126 @@
+---
+- name: Validate host baseline settings
+  ansible.builtin.assert:
+    that:
+      - host_baseline_packages is sequence
+      - host_baseline_packages is not string
+      - host_baseline_packages | length > 0
+      - host_baseline_apply_package_updates is boolean
+      - host_baseline_disk_free_warning_percent | int >= 1
+      - host_baseline_disk_free_warning_percent | int <= 99
+    fail_msg: "Host baseline variables are invalid."
+
+- name: Install host baseline packages
+  ansible.builtin.apt:
+    name: "{{ host_baseline_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create persistent journal storage
+  ansible.builtin.file:
+    path: /var/log/journal
+    state: directory
+    owner: root
+    group: systemd-journal
+    mode: "2755"
+  notify: Restart systemd-journald
+
+- name: Configure bounded journal retention
+  ansible.builtin.template:
+    src: journald-bounds.conf.j2
+    dest: /etc/systemd/journald.conf.d/10-bounds.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart systemd-journald
+
+- name: Configure automatic security updates without reboots
+  ansible.builtin.template:
+    src: unattended-upgrades.conf.j2
+    dest: /etc/apt/apt.conf.d/51survivability-unattended-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Enable daily unattended-upgrade scheduling
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+- name: Enable apt maintenance timers
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop:
+    - apt-daily.timer
+    - apt-daily-upgrade.timer
+
+- name: Install managed kernel and network hardening
+  ansible.builtin.template:
+    src: sysctl.conf.j2
+    dest: /etc/sysctl.d/99-survivability.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Apply host sysctl settings
+
+- name: Remove superseded gold-image sysctl file
+  ansible.builtin.file:
+    path: /etc/sysctl.d/99-survivability-gold.conf
+    state: absent
+  notify: Apply host sysctl settings
+
+# Unbounded: this is normally the longest single task in a convergence run, and
+# it is unrelated to any service change. The tag exists so an iteration run can
+# pass --skip-tags baseline-updates. The default is unchanged, so a run with no
+# tag selection still patches the host.
+- name: Apply current Debian package updates
+  ansible.builtin.apt:
+    upgrade: safe
+    update_cache: true
+    cache_valid_time: 3600
+    dpkg_options: force-confdef,force-confold
+  when: host_baseline_apply_package_updates | bool
+  tags: baseline-updates
+
+- name: Check whether the host requires a reboot
+  ansible.builtin.stat:
+    path: /run/reboot-required
+  register: host_baseline_reboot_required
+
+- name: Report pending reboot without performing one
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: package updates require a deliberate operator-scheduled reboot;
+      Ansible will never reboot this host automatically.
+  when: host_baseline_reboot_required.stat.exists
+
+- name: Select root filesystem facts
+  ansible.builtin.set_fact:
+    host_baseline_root_mount: >-
+      {{ ansible_facts.mounts
+      | selectattr('mount', 'equalto', '/')
+      | list
+      | first
+      | default({}) }}
+
+- name: Report root filesystem pressure
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: root filesystem free space is
+      {{ ((host_baseline_root_mount.size_available | float /
+      host_baseline_root_mount.size_total | float) * 100) | round(1) }}%, below
+      the configured {{ host_baseline_disk_free_warning_percent }}% threshold.
+  when:
+    - host_baseline_root_mount.size_total | default(0) | int > 0
+    - >-
+      ((host_baseline_root_mount.size_available | float /
+      host_baseline_root_mount.size_total | float) * 100) <
+      (host_baseline_disk_free_warning_percent | int)

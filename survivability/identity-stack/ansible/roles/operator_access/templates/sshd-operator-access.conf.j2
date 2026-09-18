@@ -1,0 +1,18 @@
+# Managed by Ansible. Local edits will be overwritten.
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+UsePAM yes
+PermitEmptyPasswords no
+PermitRootLogin {{ 'prohibit-password' if operator_access_allow_root_ssh else 'no' }}
+AuthenticationMethods publickey
+# The public port is the break-glass path and belongs to the named operator
+# alone. Tailnet-only teammates are deliberately absent: they hold no
+# authorized_keys, and naming the allowed accounts here means adding one to
+# their home directory still does not open this path. Root appears only during
+# the one-time bootstrap, while operator_access_allow_root_ssh is true.
+AllowUsers {{ ([operator_access_user] + (['root'] if operator_access_allow_root_ssh else [])) | join(' ') }}
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding yes

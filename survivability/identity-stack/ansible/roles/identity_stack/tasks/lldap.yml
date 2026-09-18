@@ -1,0 +1,297 @@
+---
+- name: Start LLDAP before declarative bootstrap
+  community.docker.docker_compose_v2:
+    project_src: "{{ identity_stack_root }}"
+    files:
+      - "{{ identity_stack_compose_file | basename }}"
+    services:
+      - lldap
+    dependencies: false
+    state: present
+    pull: missing
+    wait: true
+    wait_timeout: 120
+  when: not ansible_check_mode
+
+- name: Authenticate to the loopback-only LLDAP API
+  ansible.builtin.uri:
+    url: "{{ identity_stack_lldap_loopback_url }}/auth/simple/login"
+    method: POST
+    body_format: json
+    body:
+      username: "{{ lldap_admin_username }}"
+      password: "{{ lldap_admin_password }}"
+    status_code: 200
+    return_content: true
+  register: identity_stack_lldap_login
+  when: not ansible_check_mode
+  no_log: true
+  diff: false
+
+- name: Read LLDAP bootstrap state
+  ansible.builtin.uri:
+    url: "{{ identity_stack_lldap_loopback_url }}/api/graphql"
+    method: POST
+    body_format: json
+    headers:
+      Authorization: "Bearer {{ identity_stack_lldap_login.json.token }}"
+    body:
+      operationName: BootstrapState
+      query: >-
+        query BootstrapState { groups { id displayName } users {
+        id email displayName groups { id displayName } } }
+    status_code: 200
+    return_content: true
+  register: identity_stack_lldap_state
+  when: not ansible_check_mode
+  no_log: true
+  diff: false
+
+- name: Require the named administrator to be LLDAP's bootstrap admin
+  ansible.builtin.assert:
+    that:
+      - >-
+        lldap_admin_username in
+        (identity_stack_lldap_state.json.data.users | map(attribute='id') | list)
+    fail_msg: >-
+      The configured named LLDAP administrator is absent. Changing the bootstrap
+      username after first startup requires an explicit migration.
+  when: not ansible_check_mode
+
+- name: Create required LLDAP groups
+  ansible.builtin.uri:
+    url: "{{ identity_stack_lldap_loopback_url }}/api/graphql"
+    method: POST
+    body_format: json
+    headers:
+      Authorization: "Bearer {{ identity_stack_lldap_login.json.token }}"
+    body:
+      operationName: CreateGroup
+      query: >-
+        mutation CreateGroup($name: String!) { createGroup(name: $name) {
+        id displayName } }
+      variables:
+        name: "{{ item }}"
+    status_code: 200
+    return_content: true
+  loop: "{{ identity_stack_required_groups }}"
+  when:
+    - not ansible_check_mode
+    - >-
+      item not in
+      (identity_stack_lldap_state.json.data.groups
+      | map(attribute='displayName') | list)
+  register: identity_stack_created_groups
+  changed_when: true
+  failed_when: >-
+    identity_stack_created_groups.json.errors is defined and
+    identity_stack_created_groups.json.errors | length > 0
+  no_log: true
+  diff: false
+
+- name: Refresh LLDAP state after group creation
+  ansible.builtin.uri:
+    url: "{{ identity_stack_lldap_loopback_url }}/api/graphql"
+    method: POST
+    body_format: json
+    headers:
+      Authorization: "Bearer {{ identity_stack_lldap_login.json.token }}"
+    body:
+      operationName: BootstrapState
+      query: >-
+        query BootstrapState { groups { id displayName } users {
+        id email displayName groups { id displayName } } }
+    status_code: 200
+    return_content: true
+  register: identity_stack_lldap_state_after_groups
+  when: not ansible_check_mode
+  no_log: true
+  diff: false
+
+- name: Create the noninteractive Pocket ID LDAP bind user
+  ansible.builtin.uri:
+    url: "{{ identity_stack_lldap_loopback_url }}/api/graphql"
+    method: POST
+    body_format: json
+    headers:
+      Authorization: "Bearer {{ identity_stack_lldap_login.json.token }}"
+    body:
+      operationName: CreateUser
+      query: >-
+        mutation CreateUser($user: CreateUserInput!) { createUser(user: $user) {
+        id creationDate } }
+      variables:
+        user:
+          id: "{{ identity_stack_pocket_id_bind_username }}"
+          email: "{{ identity_stack_pocket_id_bind_email }}"
+          displayName: Pocket ID LDAP bind
+          firstName: Pocket ID
+          lastName: Bind
+    status_code: 200
+    return_content: true
+  when:
+    - not ansible_check_mode
+    - >-
+      identity_stack_pocket_id_bind_username not in
+      (identity_stack_lldap_state_after_groups.json.data.users
+      | map(attribute='id') | list)
+  register: identity_stack_created_bind_user
+  changed_when: true
+  failed_when: >-
+    identity_stack_created_bind_user.json.errors is defined and
+    identity_stack_created_bind_user.json.errors | length > 0
+  no_log: true
+  diff: false
+
+- name: Refresh LLDAP state before group membership convergence
+  ansible.builtin.uri:
+    url: "{{ identity_stack_lldap_loopback_url }}/api/graphql"
+    method: POST
+    body_format: json
+    headers:
+      Authorization: "Bearer {{ identity_stack_lldap_login.json.token }}"
+    body:
+      operationName: BootstrapState
+      query: >-
+        query BootstrapState { groups { id displayName } users {
+        id email displayName groups { id displayName } } }
+    status_code: 200
+    return_content: true
+  register: identity_stack_lldap_current
+  when: not ansible_check_mode
+  no_log: true
+  diff: false
+
+- name: Select current bootstrap account group memberships
+  ansible.builtin.set_fact:
+    identity_stack_admin_current_groups: >-
+      {{ (identity_stack_lldap_current.json.data.users
+      | selectattr('id', 'equalto', lldap_admin_username) | first).groups
+      | map(attribute='displayName') | list }}
+    identity_stack_bind_current_groups: >-
+      {{ (identity_stack_lldap_current.json.data.users
+      | selectattr('id', 'equalto', identity_stack_pocket_id_bind_username)
+      | first).groups | map(attribute='displayName') | list }}
+  when: not ansible_check_mode
+  no_log: true
+
+- name: Add the named administrator to required identity groups
+  ansible.builtin.uri:
+    url: "{{ identity_stack_lldap_loopback_url }}/api/graphql"
+    method: POST
+    body_format: json
+    headers:
+      Authorization: "Bearer {{ identity_stack_lldap_login.json.token }}"
+    body:
+      operationName: AddUserToGroup
+      query: >-
+        mutation AddUserToGroup($user: String!, $group: Int!) {
+        addUserToGroup(userId: $user, groupId: $group) { ok } }
+      variables:
+        user: "{{ lldap_admin_username }}"
+        group: >-
+          {{ (identity_stack_lldap_current.json.data.groups
+          | selectattr('displayName', 'equalto', item) | first).id | int }}
+    status_code: 200
+    return_content: true
+  loop: "{{ identity_stack_admin_memberships }}"
+  when:
+    - not ansible_check_mode
+    - item not in identity_stack_admin_current_groups
+  register: identity_stack_admin_membership_result
+  changed_when: true
+  failed_when: >-
+    identity_stack_admin_membership_result.json.errors is defined and
+    identity_stack_admin_membership_result.json.errors | length > 0
+  no_log: true
+  diff: false
+
+- name: Restrict the Pocket ID bind user to strict read-only LDAP
+  ansible.builtin.uri:
+    url: "{{ identity_stack_lldap_loopback_url }}/api/graphql"
+    method: POST
+    body_format: json
+    headers:
+      Authorization: "Bearer {{ identity_stack_lldap_login.json.token }}"
+    body:
+      operationName: AddUserToGroup
+      query: >-
+        mutation AddUserToGroup($user: String!, $group: Int!) {
+        addUserToGroup(userId: $user, groupId: $group) { ok } }
+      variables:
+        user: "{{ identity_stack_pocket_id_bind_username }}"
+        group: >-
+          {{ (identity_stack_lldap_current.json.data.groups
+          | selectattr('displayName', 'equalto', item) | first).id | int }}
+    status_code: 200
+    return_content: true
+  loop: "{{ identity_stack_bind_memberships }}"
+  when:
+    - not ansible_check_mode
+    - item not in identity_stack_bind_current_groups
+  register: identity_stack_bind_membership_result
+  changed_when: true
+  failed_when: >-
+    identity_stack_bind_membership_result.json.errors is defined and
+    identity_stack_bind_membership_result.json.errors | length > 0
+  no_log: true
+  diff: false
+
+- name: Remove every non-read-only group from the Pocket ID bind user
+  ansible.builtin.uri:
+    url: "{{ identity_stack_lldap_loopback_url }}/api/graphql"
+    method: POST
+    body_format: json
+    headers:
+      Authorization: "Bearer {{ identity_stack_lldap_login.json.token }}"
+    body:
+      operationName: RemoveUserFromGroup
+      query: >-
+        mutation RemoveUserFromGroup($user: String!, $group: Int!) {
+        removeUserFromGroup(userId: $user, groupId: $group) { ok } }
+      variables:
+        user: "{{ identity_stack_pocket_id_bind_username }}"
+        group: >-
+          {{ (identity_stack_lldap_current.json.data.groups
+          | selectattr('displayName', 'equalto', item) | first).id | int }}
+    status_code: 200
+    return_content: true
+  loop: >-
+    {{ identity_stack_bind_current_groups
+    | difference(identity_stack_bind_memberships) }}
+  when: not ansible_check_mode
+  register: identity_stack_removed_bind_membership_result
+  changed_when: true
+  failed_when: >-
+    identity_stack_removed_bind_membership_result.json.errors is defined and
+    identity_stack_removed_bind_membership_result.json.errors | length > 0
+  no_log: true
+  diff: false
+
+- name: Converge the Pocket ID bind password
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/docker
+      - compose
+      - --project-directory
+      - "{{ identity_stack_root }}"
+      - --file
+      - "{{ identity_stack_compose_file }}"
+      - exec
+      - --no-TTY
+      - --env
+      - LLDAP_USER_PASSWORD
+      - lldap
+      - /app/lldap_set_password
+      - --base-url
+      - http://127.0.0.1:17170
+      - --token
+      - "{{ identity_stack_lldap_login.json.token }}"
+      - --username
+      - "{{ identity_stack_pocket_id_bind_username }}"
+  environment:
+    LLDAP_USER_PASSWORD: "{{ lldap_pocket_id_bind_password }}"
+  changed_when: false
+  when: not ansible_check_mode
+  no_log: true
+  diff: false

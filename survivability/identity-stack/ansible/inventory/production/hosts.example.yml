@@ -1,0 +1,72 @@
+---
+# Non-secret shape only. Copy this file to the trusted operator workstation and
+# replace every placeholder there. Never commit production host details or
+# private-key paths.
+all:
+  children:
+    identity_stack:
+      hosts:
+        identity_production:
+          ansible_host: "REPLACE_WITH_PRODUCTION_IPV4_OR_DNS_NAME"
+          ansible_port: 22
+          operator_access_user: "REPLACE_WITH_OPERATOR_USERNAME"
+
+          # The existing manual/FIDO2 identity remains an optional manual login
+          # key; Ansible does not use it as its connection identity.
+          operator_access_manual_ssh_private_key_file: >-
+            /ABSOLUTE/PATH/TO/REPLACE_WITH_CURRENT_OPERATOR_SSH_IDENTITY
+
+          # Both bootstrap and normal site.yml runs use this non-interactive key.
+          operator_access_ansible_ssh_private_key_file: &ansible_ssh_identity >-
+            /ABSOLUTE/PATH/TO/REPLACE_WITH_DEDICATED_ANSIBLE_SSH_IDENTITY
+
+          # Teammates who reach this host only over Tailscale SSH. They hold no
+          # SSH key here and cannot use the public port at all; the committed
+          # Headscale policy names which account each of them may land in, so
+          # a name added here needs a matching `ssh` rule in
+          # ansible/roles/identity_stack/files/headscale-policy.hujson.
+          # `sudo: true` is passwordless and therefore root-equivalent.
+          operator_access_tailnet_operators:
+            - name: "REPLACE_WITH_TEAMMATE_UNIX_NAME"
+              sudo: true
+
+          # Offboarding moves a name here rather than deleting it above, so the
+          # account and its home directory are actually removed from the host.
+          operator_access_removed_users: []
+
+          ansible_user: root
+          ansible_ssh_private_key_file: *ansible_ssh_identity
+          ansible_python_interpreter: /usr/bin/python3
+          ansible_ssh_common_args: >-
+            -o IdentitiesOnly=yes
+            -o PasswordAuthentication=no
+
+          # ssh-keyscan against the always-on Storage Box SFTP port 22, then
+          # verify the fingerprint against Hetzner's published host keys.
+          # See docs/runbooks/backups.md.
+          backup_restic_storage_box_server: "REPLACE_WITH_STORAGE_BOX_FQDN"
+          backup_restic_storage_box_subaccount_username: "REPLACE_WITH_SUBACCOUNT_USERNAME"
+          backup_restic_storage_box_known_hosts:
+            - >-
+              REPLACE_WITH_STORAGE_BOX_FQDN REPLACE_WITH_KEY_TYPE REPLACE_WITH_HOST_KEY
+
+          # Public service names must already be DNS-only Cloudflare A records
+          # managed by OpenTofu. MagicDNS uses a different private suffix.
+          edge_acme_email: "REPLACE_WITH_ACME_CONTACT_EMAIL"
+          pocket_id_domain: "REPLACE_WITH_POCKET_ID_FQDN"
+          headscale_domain: "REPLACE_WITH_HEADSCALE_FQDN"
+          headscale_magic_dns_domain: "REPLACE_WITH_PRIVATE_MAGIC_DNS_SUFFIX"
+
+          # LLDAP identity bootstrap. The username is the one named human
+          # administrator; passwords and cryptographic values stay in SOPS.
+          lldap_base_dn: "dc=REPLACE,dc=EXAMPLE"
+          lldap_admin_username: "REPLACE_WITH_NAMED_LLDAP_ADMIN"
+          lldap_admin_email: "REPLACE_WITH_VERIFIED_ADMIN_EMAIL"
+
+          # Pocket ID outbound mail, used only to deliver admin-issued one-time
+          # access codes and new-device login notices. Leave disabled until an
+          # SMTP user exists in SMTP2GO and its credentials are in SOPS. The
+          # sender must be an address on a domain verified in SMTP2GO, or the
+          # relay rejects the message. See docs/runbooks/service-deployment.md.
+          identity_stack_pocket_id_smtp_enabled: false
+          pocket_id_smtp_from: "REPLACE_WITH_VERIFIED_SENDER_ADDRESS"

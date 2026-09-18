@@ -1,0 +1,8 @@
+---
+profile: basic
+exclude_paths:
+  - .ansible/
+  - collections/
+  # SOPS ciphertext is opaque: long base64 lines with no document start. Its
+  # shape is checked by tests/test_safety_invariants.py instead.
+  - ansible/inventory/production/group_vars/all/secrets.sops.yml

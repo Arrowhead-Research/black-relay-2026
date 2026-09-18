@@ -1,0 +1,20 @@
+# Non-secret example for the OpenTofu S3 backend on Backblaze B2.
+# Copy to backend.hcl (ignored by Git) on a trusted operator workstation and
+# replace placeholders. Credentials remain in AWS_ACCESS_KEY_ID and
+# AWS_SECRET_ACCESS_KEY; do not put them in this file.
+
+bucket = "REPLACE_WITH_DEDICATED_B2_BUCKET"
+key    = "production/identity-stack.tfstate"
+region = "REPLACE_WITH_B2_REGION"
+
+endpoints = {
+  s3 = "https://s3.REPLACE_WITH_B2_REGION.backblazeb2.com"
+}
+
+use_path_style               = true
+skip_credentials_validation  = true
+skip_region_validation       = true
+skip_metadata_api_check      = true
+skip_requesting_account_id   = true
+skip_s3_checksum             = true
+use_lockfile                 = false

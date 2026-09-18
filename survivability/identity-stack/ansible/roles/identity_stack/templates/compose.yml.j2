@@ -1,0 +1,137 @@
+---
+name: identity-stack
+services:
+  lldap:
+    image: "{{ identity_stack_lldap_image }}"
+    container_name: survivability-lldap
+    restart: unless-stopped
+    env_file:
+      - path: ./lldap.env
+        format: raw
+    volumes:
+      - "{{ identity_stack_lldap_data_dir }}:/data"
+    networks:
+      identity_backend:
+        ipv4_address: "{{ identity_stack_lldap_backend_address }}"
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    healthcheck:
+      test:
+        - CMD
+        - /app/lldap
+        - healthcheck
+        - --config-file
+        - /data/lldap_config.toml
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: "{{ identity_stack_lldap_memory_limit }}"
+          cpus: "{{ identity_stack_lldap_cpu_limit }}"
+
+  pocket-id:
+    image: "{{ identity_stack_pocket_id_image }}"
+    container_name: survivability-pocket-id
+    restart: unless-stopped
+    env_file:
+      - path: ./pocket-id.env
+        format: raw
+    volumes:
+      - "{{ identity_stack_pocket_id_data_dir }}:/app/data"
+    networks:
+      identity_proxy:
+        ipv4_address: "{{ identity_stack_pocket_id_proxy_address }}"
+      identity_backend:
+        ipv4_address: "{{ identity_stack_pocket_id_backend_address }}"
+    depends_on:
+      lldap:
+        condition: service_healthy
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    healthcheck:
+      test:
+        - CMD
+        - /app/pocket-id
+        - healthcheck
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: "{{ identity_stack_pocket_id_memory_limit }}"
+          cpus: "{{ identity_stack_pocket_id_cpu_limit }}"
+{% if not identity_stack_bootstrap_only %}
+
+  headscale:
+    image: "{{ identity_stack_headscale_image }}"
+    container_name: survivability-headscale
+    restart: unless-stopped
+    command:
+      - serve
+    read_only: true
+    volumes:
+      - "{{ identity_stack_headscale_config_dir }}:/etc/headscale:ro"
+      - "{{ identity_stack_headscale_data_dir }}:/var/lib/headscale"
+      - >-
+        {{ identity_stack_headscale_oidc_secret_file }}:/run/secrets/headscale-oidc-client-secret:ro
+    networks:
+      identity_proxy:
+        ipv4_address: "{{ identity_stack_headscale_proxy_address }}"
+    depends_on:
+      pocket-id:
+        condition: service_healthy
+    extra_hosts:
+      - "{{ pocket_id_domain }}:{{ identity_stack_caddy_proxy_address }}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /var/run/headscale:size=16m,mode=0755
+    healthcheck:
+      test:
+        - CMD
+        - headscale
+        - health
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: "{{ identity_stack_headscale_memory_limit }}"
+          cpus: "{{ identity_stack_headscale_cpu_limit }}"
+{% endif %}
+
+networks:
+  identity_proxy:
+    external: true
+    name: "{{ identity_stack_proxy_network }}"
+  identity_backend:
+    external: true
+    name: "{{ identity_stack_backend_network }}"

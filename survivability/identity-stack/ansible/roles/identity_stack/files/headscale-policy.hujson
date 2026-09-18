@@ -1,0 +1,112 @@
+{
+  // Survivability network authorization.
+  //
+  // Default-deny: every flow below is explicit and anything unlisted is
+  // refused. Headscale validates this file during convergence -- the role runs
+  // `configtest` against the pinned image with this policy mounted, and a
+  // policy naming an unknown user, an undeclared tag, or a malformed prefix
+  // fails the run before anything is deployed.
+  //
+  // Identities are the verified email addresses Pocket ID issues. Confirm the
+  // exact strings with `headscale users list` before converging. Membership
+  // here grants no admission on its own: the LLDAP `headscale-users` group
+  // still decides who may authenticate at all.
+
+  "groups": {
+    "group:survivability": [
+      "robert@litts.me",
+      "jake.blackrelay@arrowheadresearch.org",
+      "marcel.blackrelay@arrowheadresearch.org"
+    ]
+  },
+
+  "hosts": {
+    // The RFC1918 range the Proxmox subnet router advertises.
+    "proxmox-lan": "10.73.66.0/24"
+  },
+
+  "tagOwners": {
+    // Survivability owns every declared tag. Application teams receive their
+    // own scoped `tag:<team>-<role>` tags only when added deliberately.
+    "tag:proxmox-subnet-router": ["group:survivability"],
+
+    // The VPS itself, enrolled as blackrelay-vps with a short-lived
+    // preauthorized key carrying this tag and no owning user. The tag owns the
+    // node, so no person's offboarding can take it down -- and, because
+    // Headscale exempts tagged nodes from `node.expiry`, this node does not
+    // expire on the 24-hour cycle a human's node does. Revoking its access
+    // means deleting the node or changing this policy, never waiting it out.
+    "tag:blackrelay-vps": ["group:survivability"]
+  },
+
+  "autoApprovers": {
+    // The advertised route is approved by policy rather than by a manual
+    // approval stored only in Headscale's database, so a rebuilt or restored
+    // subnet router does not need its route re-approving by hand.
+    "routes": {
+      "10.73.66.0/24": ["tag:proxmox-subnet-router"]
+    }
+  },
+
+  "grants": [
+    // Each member reaches their own devices. Members deliberately cannot reach
+    // each other's personal devices; shared infrastructure is the common
+    // ground for joint testing.
+    {
+      "src": ["group:survivability"],
+      "dst": ["autogroup:self"],
+      "ip": ["*"]
+    },
+
+    // The Proxmox subnet behind the subnet router.
+    {
+      "src": ["group:survivability"],
+      "dst": ["proxmox-lan"],
+      "ip": ["*"]
+    },
+
+    // Tailscale SSH needs both this transport grant and the `ssh` rule below;
+    // a rule without a matching grant refuses the connection.
+    {
+      "src": ["group:survivability"],
+      "dst": ["tag:blackrelay-vps"],
+      "ip": ["tcp:22"]
+    }
+  ],
+
+  "ssh": [
+    // Tailscale SSH terminates in tailscaled rather than sshd, so it is a
+    // distinct path from the public break-glass SSH the host keeps open. Root
+    // is excluded here exactly as sshd excludes it.
+    //
+    // One rule per person, each naming only that person's own account. This is
+    // deliberately not a single rule over group:survivability with
+    // `autogroup:nonroot`: against a tagged host, that phrasing lets every
+    // member log in as every other non-root account, including the break-glass
+    // operator, whose passwordless sudo makes it root-equivalent. Tailscale's
+    // own documentation warns about exactly that combination. It would also
+    // silently cover any account added later.
+    //
+    // Each account is created by the operator_access role. Tailscale never
+    // creates accounts: a rule naming an account that does not exist on the
+    // host simply refuses the session.
+    {
+      "action": "accept",
+      "src": ["robert@litts.me"],
+      "dst": ["tag:blackrelay-vps"],
+      "users": ["robbie"]
+    },
+    {
+      "action": "accept",
+      "src": ["jake.blackrelay@arrowheadresearch.org"],
+      "dst": ["tag:blackrelay-vps"],
+      "users": ["jake"]
+    },
+    {
+      "action": "accept",
+      "src": ["marcel.blackrelay@arrowheadresearch.org"],
+      "dst": ["tag:blackrelay-vps"],
+      "users": ["marcel"]
+    }
+  ]
+}

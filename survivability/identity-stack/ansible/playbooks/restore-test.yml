@@ -1,0 +1,147 @@
+---
+# Trusted operator workstation only. Isolated restore test on a disposable
+# server created by scripts/operator/test-backup-restore.sh. Files restore only
+# into a temporary directory and never overwrite production paths.
+- name: Verify the disposable restore-test target
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    backup_restore_test_target: /var/tmp/survivability-restore-test
+  pre_tasks:
+    - name: Require the disposable Debian 13 target
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == 'Debian'
+          - ansible_facts.distribution_major_version == '13'
+          - ansible_facts.architecture == 'x86_64'
+        fail_msg: "The restore test requires the validated Debian 13 x86 image."
+
+    # The target is a bare gold image. A converged host carries the persisted
+    # host firewall policy, so its presence proves this is not a disposable
+    # server. Checking the property directly is stronger than a typed value,
+    # which an operator can supply for the wrong host.
+    - name: Look for evidence of a converged host
+      ansible.builtin.stat:
+        path: /etc/nftables.d/survivability.nft
+      register: backup_restore_test_converged_marker
+
+    - name: Refuse to run against anything but a disposable server
+      ansible.builtin.assert:
+        that:
+          - not backup_restore_test_converged_marker.stat.exists
+        fail_msg: >-
+          This host has a converged host firewall policy, so it is not the
+          disposable server created by
+          scripts/operator/test-backup-restore.sh. The restore test must never
+          run against production.
+
+  roles:
+    - role: backup_restic
+      backup_restic_manage_schedule: false
+      backup_restic_init_repository: false
+
+  tasks:
+    - name: Record the restore start time
+      ansible.builtin.command: /usr/bin/date +%s
+      register: backup_restore_test_started
+      changed_when: false
+      check_mode: false
+
+    - name: Restore the latest snapshot into the temporary directory
+      ansible.builtin.command:
+        argv:
+          - /usr/local/sbin/survivability-backup
+          - run
+          - restore
+          - --target
+          - "{{ backup_restore_test_target }}"
+          - latest
+      register: backup_restore_test_restore
+      changed_when: true
+
+    - name: Verify restored host configuration and cryptographic material
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: backup_restore_test_critical_files
+      loop:
+        - "{{ backup_restore_test_target }}/etc/ssh/sshd_config"
+        - "{{ backup_restore_test_target }}/etc/survivability-backup/repository-password"
+        - "{{ backup_restore_test_target }}/var/lib/survivability-backup/ssh/id_ed25519"
+
+    - name: Require restored configuration and cryptographic material
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+        fail_msg: >-
+          The restore did not produce the expected file {{ item.item }}.
+      loop: "{{ backup_restore_test_critical_files.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Inspect restored SQLite staging directory
+      ansible.builtin.stat:
+        path: "{{ backup_restore_test_target }}/var/backups/survivability/sqlite"
+      register: backup_restore_test_sqlite_stage
+
+    - name: Find restored consistent SQLite copies
+      ansible.builtin.find:
+        paths: "{{ backup_restore_test_sqlite_stage.stat.path }}"
+        patterns:
+          - "*.sqlite"
+          - "*.sqlite3"
+          - "*.db"
+        recurse: true
+        file_type: file
+      register: backup_restore_test_sqlite_files
+      when: backup_restore_test_sqlite_stage.stat.exists
+
+    - name: Verify restored SQLite copy integrity
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/sqlite3
+          - "{{ item.path }}"
+          - "PRAGMA integrity_check;"
+      register: backup_restore_test_sqlite_integrity
+      changed_when: false
+      failed_when: backup_restore_test_sqlite_integrity.stdout | trim != 'ok'
+      loop: "{{ backup_restore_test_sqlite_files.files | default([]) }}"
+
+    - name: Count the restored files
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/find
+          - "{{ backup_restore_test_target }}"
+          - -type
+          - f
+      register: backup_restore_test_files
+      changed_when: false
+
+    - name: Report the restore result
+      ansible.builtin.debug:
+        msg: >-
+          Restored {{ backup_restore_test_files.stdout_lines | length }} files
+          into {{ backup_restore_test_target }}.
+
+    - name: Verify repository integrity
+      ansible.builtin.command:
+        argv:
+          - /usr/local/sbin/survivability-backup
+          - run
+          - check
+      register: backup_restore_test_check
+      changed_when: false
+
+    - name: Record the restore finish time
+      ansible.builtin.command: /usr/bin/date +%s
+      register: backup_restore_test_finished
+      changed_when: false
+      check_mode: false
+
+    - name: Report the measured duration against the four-hour objective
+      ansible.builtin.debug:
+        msg: >-
+          Restore test completed in
+          {{ (backup_restore_test_finished.stdout | int) -
+          (backup_restore_test_started.stdout | int) }} seconds; the quarterly
+          objective is four hours.

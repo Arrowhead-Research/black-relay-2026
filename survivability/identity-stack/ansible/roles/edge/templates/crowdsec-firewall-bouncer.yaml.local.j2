@@ -1,0 +1,31 @@
+---
+# Managed by Ansible. The packaged crowdsec-firewall-bouncer.yaml is left as the
+# vendor ships it; every reviewed setting lives here and is merged over it.
+api_url: {{ edge_crowdsec_lapi_url }}
+api_key: {{ crowdsec_bouncer_api_key }}
+mode: nftables
+update_frequency: 10s
+disable_ipv6: true
+deny_action: DROP
+deny_log: false
+supported_decisions_types:
+  - ban
+nftables:
+  ipv4:
+    enabled: true
+    set-only: false
+    table: crowdsec
+    chain: crowdsec-chain
+    priority: -10
+  ipv6:
+    enabled: false
+nftables_hooks:
+  - input
+  - forward
+log_mode: file
+log_dir: /var/log
+log_level: info
+log_compression: true
+log_max_size: 25
+log_max_backups: 4
+log_max_age: 14

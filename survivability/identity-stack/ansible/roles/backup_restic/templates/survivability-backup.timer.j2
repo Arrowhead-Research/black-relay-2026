@@ -1,0 +1,12 @@
+# Managed by Ansible. Randomized delay keeps the backup window around
+# 02:00 UTC while avoiding a fixed simultaneous start.
+[Unit]
+Description=Schedule the daily Survivability restic backup
+
+[Timer]
+OnCalendar={{ backup_restic_backup_oncalendar }} UTC
+RandomizedDelaySec={{ backup_restic_backup_randomized_delay }}
+Persistent=true
+
+[Install]
+WantedBy=timers.target

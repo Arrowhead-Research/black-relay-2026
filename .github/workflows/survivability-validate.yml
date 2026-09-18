@@ -1,0 +1,45 @@
+---
+name: Survivability Validate
+
+on:
+  pull_request:
+    paths:
+      - "survivability/identity-stack/**"
+      - ".github/workflows/survivability-validate.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "survivability/identity-stack/**"
+      - ".github/workflows/survivability-validate.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  credential-free-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        working-directory: survivability/identity-stack
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build pinned development image
+        run: docker compose -f dev/compose.yml build
+
+      - name: Run lint checks
+        run: >-
+          docker compose -f dev/compose.yml run --rm --no-deps
+          --workdir /workspace/survivability/identity-stack
+          --entrypoint make pi lint
+
+      - name: Run validation checks
+        run: >-
+          docker compose -f dev/compose.yml run --rm --no-deps
+          --workdir /workspace/survivability/identity-stack
+          --entrypoint make pi validate

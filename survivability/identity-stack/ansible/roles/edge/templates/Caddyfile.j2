@@ -1,0 +1,54 @@
+{
+	email {{ edge_acme_email }}
+	admin 127.0.0.1:2019
+}
+
+(logging) {
+	log {
+		output file /var/log/caddy/access.json {
+			mode 0640
+			roll_size 50MiB
+			roll_keep 10
+			roll_keep_for 336h
+		}
+		format filter {
+			wrap json
+			fields {
+				request>headers>Authorization delete
+				request>headers>Cookie delete
+				request>headers>Proxy-Authorization delete
+				resp_headers>Set-Cookie delete
+			}
+		}
+	}
+}
+
+(security_headers) {
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	}
+}
+
+{{ pocket_id_domain }} {
+	import logging
+	import security_headers
+	reverse_proxy pocket-id:1411
+}
+
+{{ headscale_domain }} {
+	import logging
+	import security_headers
+	reverse_proxy headscale:8080 {
+		header_up X-Real-IP {remote_host}
+		stream_close_delay 5m
+	}
+}
+
+# The LLDAP UI has no public host name. Only Caddy publishes its listener, and
+# Docker binds that listener to host loopback for access through an SSH tunnel.
+http://:{{ edge_lldap_loopback_port }} {
+	reverse_proxy lldap:17170
+}

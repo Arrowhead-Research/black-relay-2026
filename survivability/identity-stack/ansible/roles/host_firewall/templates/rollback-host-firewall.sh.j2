@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -u
+
+readonly nft_bin=/usr/sbin/nft
+readonly active_policy=/etc/nftables.d/survivability.nft
+readonly last_good_policy=/var/lib/survivability-firewall/last-known-good.nft
+
+logger -t survivability-firewall "applying scheduled host-firewall rollback"
+"${nft_bin}" delete table inet survivability_filter 2>/dev/null || true
+
+if [[ -f "${last_good_policy}" ]]; then
+  if "${nft_bin}" -f "${last_good_policy}"; then
+    install -o root -g root -m 0644 "${last_good_policy}" "${active_policy}"
+    logger -t survivability-firewall "restored last-known-good host firewall"
+    exit 0
+  fi
+  logger -t survivability-firewall "last-known-good host firewall failed to load"
+fi
+
+rm -f "${active_policy}"
+logger -t survivability-firewall "removed host firewall; Hetzner firewall remains active"

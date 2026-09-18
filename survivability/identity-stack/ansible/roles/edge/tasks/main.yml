@@ -1,0 +1,381 @@
+---
+- name: Load SOPS-delivered edge secrets
+  community.sops.load_vars:
+    file: "{{ edge_secrets_file }}"
+    expressions: ignore
+  no_log: true
+  diff: false
+
+- name: Validate edge configuration
+  ansible.builtin.assert:
+    that:
+      - edge_acme_email is match('^[^@ ]+@[^@ ]+\.[^@ ]+$')
+      - pocket_id_domain is match('^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$')
+      - headscale_domain is match('^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$')
+      - pocket_id_domain != headscale_domain
+      - edge_lldap_loopback_port | int >= 1024
+      - edge_lldap_loopback_port | int <= 65535
+      - edge_caddy_image is match('^docker\.io/.+@sha256:[0-9a-f]{64}$')
+      - edge_crowdsec_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+      - edge_crowdsec_bouncer_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+    fail_msg: >-
+      Edge variables are incomplete or invalid. Set the public domains and ACME
+      email in the external inventory before service deployment.
+
+- name: Validate the CrowdSec bouncer credential
+  ansible.builtin.assert:
+    that:
+      - crowdsec_bouncer_api_key is defined
+      - crowdsec_bouncer_api_key is match('^[A-Za-z0-9+/=_-]{32,}$')
+      - crowdsec_bouncer_api_key is not search('REPLACE_WITH|CHANGE_ME')
+    fail_msg: >-
+      crowdsec_bouncer_api_key is missing, too short, or still a placeholder.
+      Generate at least 32 URL-safe characters and store it through SOPS as
+      documented in docs/runbooks/service-deployment.md.
+  no_log: true
+  diff: false
+
+- name: Install the CrowdSec repository signing key
+  ansible.builtin.get_url:
+    url: "{{ edge_crowdsec_key_url }}"
+    dest: /etc/apt/keyrings/crowdsec.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Inspect the downloaded CrowdSec signing key file
+  ansible.builtin.stat:
+    path: /etc/apt/keyrings/crowdsec.asc
+  register: edge_crowdsec_key_file
+  check_mode: false
+
+- name: Inspect the CrowdSec signing key
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/gpg
+      - --show-keys
+      - --with-colons
+      - /etc/apt/keyrings/crowdsec.asc
+  register: edge_crowdsec_key
+  changed_when: false
+  check_mode: false
+  when: edge_crowdsec_key_file.stat.exists
+
+- name: Require the reviewed CrowdSec signing key
+  ansible.builtin.assert:
+    that:
+      - >-
+        edge_crowdsec_key_fingerprint in
+        (edge_crowdsec_key.stdout_lines
+        | select('match', '^fpr:') | join('\n'))
+    fail_msg: "The downloaded CrowdSec repository key has an unexpected fingerprint."
+  when: edge_crowdsec_key_file.stat.exists
+
+- name: Configure the signed CrowdSec package repository
+  ansible.builtin.copy:
+    content: "{{ edge_crowdsec_repository }}\n"
+    dest: /etc/apt/sources.list.d/crowdsec.list
+    owner: root
+    group: root
+    mode: "0644"
+  register: edge_crowdsec_repository_file
+
+- name: Install exact CrowdSec and nftables bouncer versions
+  ansible.builtin.apt:
+    name:
+      - "crowdsec={{ edge_crowdsec_version }}"
+      - >-
+        crowdsec-firewall-bouncer-nftables={{ edge_crowdsec_bouncer_version }}
+    state: present
+    update_cache: true
+    cache_valid_time: >-
+      {{ 0 if edge_crowdsec_repository_file.changed else 3600 }}
+
+- name: Hold reviewed CrowdSec package versions
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop:
+    - crowdsec
+    - crowdsec-firewall-bouncer-nftables
+
+- name: Disable unattended CrowdSec hub changes
+  ansible.builtin.systemd_service:
+    name: crowdsec-hubupdate.timer
+    enabled: false
+    state: stopped
+    masked: true
+  when: not ansible_check_mode
+
+- name: Create edge deployment directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "{{ edge_root }}"
+      mode: "0755"
+    - path: "{{ edge_caddy_data_dir }}"
+      mode: "0700"
+    - path: "{{ edge_caddy_config_dir }}"
+      mode: "0700"
+    - path: "{{ edge_caddy_log_dir }}"
+      mode: "0750"
+
+- name: Create bounded Caddy log file before CrowdSec starts
+  ansible.builtin.file:
+    path: "{{ edge_caddy_log_dir }}/access.json"
+    state: touch
+    access_time: preserve
+    modification_time: preserve
+    owner: root
+    group: root
+    mode: "0640"
+
+- name: Configure CrowdSec SSH and Caddy acquisition
+  ansible.builtin.template:
+    src: crowdsec-acquisition.yml.j2
+    dest: "{{ edge_crowdsec_acquisition_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart CrowdSec
+
+- name: Read enabled CrowdSec hub collections
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/cscli
+      - collections
+      - list
+      - --output
+      - json
+  register: edge_crowdsec_enabled_collections
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Install required CrowdSec hub collections
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/cscli
+      - collections
+      - install
+      - "{{ item }}"
+  loop: "{{ edge_crowdsec_collections }}"
+  changed_when: true
+  when:
+    - not ansible_check_mode
+    - >-
+      item not in
+      ((edge_crowdsec_enabled_collections.stdout | from_json)['collections']
+      | map(attribute='name') | list)
+  notify: Restart CrowdSec
+
+# The local API must be answering before the bouncer credential can be proved
+# or the bouncer itself started, so CrowdSec is enabled ahead of both.
+- name: Enable the CrowdSec local API
+  ansible.builtin.systemd_service:
+    name: crowdsec
+    enabled: true
+    state: started
+  when: not ansible_check_mode
+
+- name: Wait for the CrowdSec local API to listen
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: 8080
+    timeout: 60
+  when: not ansible_check_mode
+
+# Registration is driven by whether the managed credential actually works, not
+# by whether a row exists: only a failing credential is rewritten, so a
+# converged host reports no change.
+- name: Prove the managed bouncer credential against the local API
+  ansible.builtin.uri:
+    url: "{{ edge_crowdsec_lapi_url }}/v1/decisions"
+    method: GET
+    headers:
+      X-Api-Key: "{{ crowdsec_bouncer_api_key }}"
+  register: edge_crowdsec_bouncer_probe
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: not ansible_check_mode
+
+- name: Read registered CrowdSec bouncers
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/cscli
+      - bouncers
+      - list
+      - --output
+      - json
+  register: edge_crowdsec_bouncer_list
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Record registered bouncer names
+  ansible.builtin.set_fact:
+    edge_crowdsec_registered_bouncers: >-
+      {{ ((edge_crowdsec_bouncer_list.stdout | from_json) or [])
+      | map(attribute='name') | list }}
+  when: not ansible_check_mode
+
+- name: Register the managed firewall bouncer credential
+  when:
+    - not ansible_check_mode
+    - edge_crowdsec_bouncer_probe.status | default(0) != 200
+  block:
+    - name: Remove the stale registration of the managed bouncer name
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/cscli
+          - bouncers
+          - delete
+          - "{{ edge_crowdsec_bouncer_name }}"
+      changed_when: true
+      when: edge_crowdsec_bouncer_name in edge_crowdsec_registered_bouncers
+
+    - name: Register the managed firewall bouncer
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/cscli
+          - bouncers
+          - add
+          - "{{ edge_crowdsec_bouncer_name }}"
+          - --key
+          - "{{ crowdsec_bouncer_api_key }}"
+      changed_when: true
+      no_log: true
+
+# The key the Debian postinst generates for itself is held by nothing once this
+# role owns the credential. Leaving it registered would leave a valid local API
+# credential that exists in no reviewed store.
+- name: Remove postinst-generated bouncer registrations
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/cscli
+      - bouncers
+      - delete
+      - "{{ item }}"
+  loop: >-
+    {{ edge_crowdsec_registered_bouncers | default([])
+    | select('match', edge_crowdsec_bouncer_autogenerated_prefix) | list }}
+  changed_when: true
+  when: not ansible_check_mode
+
+- name: Configure the nftables host-firewall bouncer
+  ansible.builtin.template:
+    src: crowdsec-firewall-bouncer.yaml.local.j2
+    dest: "{{ edge_crowdsec_bouncer_override }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+  notify: Restart CrowdSec firewall bouncer
+
+- name: Enable the CrowdSec firewall bouncer
+  ansible.builtin.systemd_service:
+    name: crowdsec-firewall-bouncer
+    enabled: true
+    state: started
+  when: not ansible_check_mode
+
+- name: Create the shared Compose networks
+  community.docker.docker_network:
+    name: "{{ item.name }}"
+    internal: "{{ item.internal }}"
+    state: present
+    ipam_config:
+      - subnet: "{{ item.subnet }}"
+  loop:
+    - name: "{{ edge_proxy_network }}"
+      subnet: "{{ edge_proxy_network_subnet }}"
+      internal: false
+    - name: "{{ edge_backend_network }}"
+      subnet: "{{ edge_backend_network_subnet }}"
+      internal: true
+
+- name: Pull the immutable Caddy image
+  community.docker.docker_image:
+    name: "{{ edge_caddy_image }}"
+    source: pull
+
+- name: Render candidate Caddy configuration
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: "{{ edge_caddy_candidate }}"
+    owner: root
+    group: root
+    mode: "0644"
+- name: Validate candidate Caddy configuration with the pinned image
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/docker
+      - run
+      - --rm
+      - --read-only
+      - --volume
+      - "{{ edge_caddy_candidate }}:/etc/caddy/Caddyfile:ro"
+      - --volume
+      - "{{ edge_caddy_log_dir }}:/var/log/caddy"
+      - "{{ edge_caddy_image }}"
+      - caddy
+      - validate
+      - --config
+      - /etc/caddy/Caddyfile
+      - --adapter
+      - caddyfile
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Promote validated Caddy configuration
+  ansible.builtin.copy:
+    src: "{{ edge_caddy_candidate }}"
+    dest: "{{ edge_caddyfile }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  register: edge_caddy_promoted
+  when: not ansible_check_mode
+  notify: Reload Caddy
+
+- name: Render the edge Compose project
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ edge_compose_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Validate the edge Compose model
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/docker
+      - compose
+      - --project-directory
+      - "{{ edge_root }}"
+      - --file
+      - "{{ edge_compose_file }}"
+      - config
+      - --quiet
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Converge the edge Compose project
+  community.docker.docker_compose_v2:
+    project_src: "{{ edge_root }}"
+    files:
+      - "{{ edge_compose_file | basename }}"
+    state: present
+    pull: missing
+    remove_orphans: true
+    wait: true
+    wait_timeout: 120
+  when: not ansible_check_mode
+
+- name: Apply validated edge and CrowdSec handlers before identity deployment
+  ansible.builtin.meta: flush_handlers

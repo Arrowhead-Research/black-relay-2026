@@ -1,0 +1,211 @@
+---
+- name: Load SOPS-delivered backup secrets
+  community.sops.load_vars:
+    file: "{{ backup_restic_secrets_file }}"
+    expressions: ignore
+  no_log: true
+  diff: false
+
+- name: Validate the backup configuration
+  ansible.builtin.assert:
+    that:
+      - backup_restic_storage_box_server is match('^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$')
+      - >-
+        backup_restic_storage_box_subaccount_username is
+        match('^[a-z0-9][a-z0-9-]*$')
+      - backup_restic_storage_box_known_hosts is sequence
+      - backup_restic_storage_box_known_hosts is not string
+      - backup_restic_storage_box_known_hosts | length > 0
+      - backup_restic_repository_password | length >= 20
+      - backup_restic_repository_password is not search('REPLACE_WITH|CHANGE_ME')
+      - >-
+        backup_restic_ssh_private_key is
+        match('^-----BEGIN OPENSSH PRIVATE KEY-----')
+      - backup_restic_ssh_private_key is not search('REPLACE_WITH|CHANGE_ME')
+      - >-
+        backup_restic_healthchecks_backup_url is
+        match(backup_restic_healthchecks_url_pattern)
+      - >-
+        backup_restic_healthchecks_maintenance_url is
+        match(backup_restic_healthchecks_url_pattern)
+      - backup_restic_manage_schedule is boolean
+      - backup_restic_init_repository is boolean
+      - backup_restic_required_prune_confirmation is string
+      - backup_restic_sftp_port | int == 22
+      - backup_restic_keep_daily | int > 0
+      - backup_restic_keep_weekly | int > 0
+      - backup_restic_keep_monthly | int > 0
+      - backup_restic_stale_after_hours | int > 0
+    fail_msg: >-
+      Backup configuration is incomplete or still contains placeholders. Fill
+      the external inventory placeholders and create the SOPS-encrypted
+      secrets file first; see docs/runbooks/backups.md.
+
+- name: Validate Storage Box known_hosts entries
+  ansible.builtin.assert:
+    that:
+      - >-
+        item is
+        match(backup_restic_known_hosts_pattern)
+    fail_msg: >-
+      Each known_hosts entry must be one host key line produced by ssh-keyscan
+      for SFTP port 22, with no unverified placeholder values.
+  loop: "{{ backup_restic_storage_box_known_hosts }}"
+
+- name: Install restic backup packages
+  ansible.builtin.apt:
+    name: "{{ backup_restic_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create root-only backup directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - "{{ backup_restic_config_dir }}"
+    - "{{ backup_restic_state_dir }}"
+    - "{{ backup_restic_ssh_dir }}"
+    - "{{ backup_restic_cache_dir }}"
+    - "{{ backup_restic_staging_dir }}"
+
+- name: Render root-only restic repository password
+  ansible.builtin.copy:
+    content: "{{ backup_restic_repository_password }}\n"
+    dest: "{{ backup_restic_password_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+
+- name: Render root-only backup Storage Box SSH key
+  ansible.builtin.copy:
+    content: "{{ backup_restic_ssh_private_key | trim }}\n"
+    dest: "{{ backup_restic_ssh_key_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+
+- name: Validate the deployed backup private key
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/ssh-keygen
+      - -y
+      - -f
+      - "{{ backup_restic_ssh_key_file }}"
+  changed_when: false
+
+- name: Install pinned Storage Box host keys
+  ansible.builtin.copy:
+    content: "{{ backup_restic_storage_box_known_hosts | join('\n') }}\n"
+    dest: "{{ backup_restic_known_hosts_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure restic SSH independently of root client configuration
+  ansible.builtin.template:
+    src: ssh-config.j2
+    dest: "{{ backup_restic_ssh_config_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Render root-only restic environment file
+  ansible.builtin.template:
+    src: restic.env.j2
+    dest: "{{ backup_restic_env_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+
+- name: Create the backup helper directory
+  ansible.builtin.file:
+    path: "{{ backup_restic_helper_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the snapshot freshness helper
+  ansible.builtin.copy:
+    src: check-restic-freshness.py
+    dest: "{{ backup_restic_freshness_helper }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the survivability-backup wrapper
+  ansible.builtin.template:
+    src: survivability-backup.sh.j2
+    dest: "{{ backup_restic_script_path }}"
+    owner: root
+    group: root
+    mode: "0700"
+
+# Creating a repository destroys nothing: `init-if-needed` returns early when a
+# repository is already present, and restic refuses to initialize over one. The
+# opt-in flag is the gate; normal convergence leaves it false and the following
+# task fails closed if the configured repository has disappeared.
+- name: Initialize the restic repository when explicitly requested
+  ansible.builtin.command:
+    argv:
+      - "{{ backup_restic_script_path }}"
+      - init-if-needed
+  when: backup_restic_init_repository | bool
+  register: backup_restic_repository_init
+  changed_when: "'repository initialized' in backup_restic_repository_init.stdout"
+  failed_when: backup_restic_repository_init.rc != 0
+
+# This reaches the Storage Box over SFTP, so it is the one slow task in this
+# role. Nothing below consumes its result, so an iteration run may skip it with
+# --skip-tags verify; a run with no tag selection still proves the repository.
+- name: Require the configured restic repository to exist
+  ansible.builtin.command:
+    argv:
+      - "{{ backup_restic_script_path }}"
+      - require-repository
+  register: backup_restic_repository_present
+  changed_when: false
+  failed_when: backup_restic_repository_present.rc != 0
+  tags: verify
+
+- name: Install backup systemd services and timers
+  ansible.builtin.template:
+    src: "{{ item }}"
+    dest: "/etc/systemd/system/{{ item | replace('.j2', '') }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - survivability-backup.service.j2
+    - survivability-backup.timer.j2
+    - survivability-backup-maintenance.service.j2
+    - survivability-backup-maintenance.timer.j2
+  when: backup_restic_manage_schedule | bool
+
+# On the first check-mode run the template task above reports that it would
+# create these units but does not write them, so systemd cannot resolve their
+# names yet. The real convergence run installs, reloads, enables, and starts
+# them; subsequent verification is done explicitly in the runbook.
+- name: Enable the backup and verification timers
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop:
+    - survivability-backup.timer
+    - survivability-backup-maintenance.timer
+  when:
+    - backup_restic_manage_schedule | bool
+    - not ansible_check_mode
