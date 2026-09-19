@@ -26,11 +26,10 @@ Usage: test-backup-restore.sh --snapshot-id ID --ssh-key NAME_OR_ID
                              [--server-type TYPE] [--owner LABEL]
 
 Run through scripts/operator/with-secrets.sh --tooling --age: this is the one
-script needing both provider credentials and an age identity. Also requires
-ANSIBLE_INVENTORY pointing at the protected production-hosts.yml (for the
-Storage Box placeholders). The identity file is the dedicated non-interactive
-Ansible key; its public half is injected through cloud-init, so no FIDO2 touch
-is needed. The age identity must decrypt the committed backup secrets.
+script needing both provider credentials and an age identity. The identity file
+is the dedicated non-interactive Ansible key; its public half is injected
+through cloud-init, so no FIDO2 touch is needed. The age identity must decrypt
+the committed backup secrets.
 EOF
 }
 
@@ -90,7 +89,6 @@ done
   printf 'no age identity; run through scripts/operator/with-secrets.sh --age\n' >&2
   exit 1
 }
-: "${ANSIBLE_INVENTORY:?Set ANSIBLE_INVENTORY to the protected production-hosts.yml first}"
 [[ "${SNAPSHOT_ID}" =~ ^[0-9]+$ ]] || { printf 'snapshot ID must be numeric\n' >&2; exit 2; }
 [[ -n "${SSH_KEY}" ]] || { printf '%s\n' '--ssh-key is required' >&2; exit 2; }
 [[ -n "${IDENTITY_FILE}" ]] || { printf '%s\n' '--identity-file is required' >&2; exit 2; }
@@ -98,8 +96,6 @@ done
 [[ "${IDENTITY_FILE}" != *.pub ]] || { printf 'pass the private-key stub, not its .pub file\n' >&2; exit 2; }
 [[ -f "${IDENTITY_FILE}" ]] || { printf 'identity file not found: %s\n' "${IDENTITY_FILE}" >&2; exit 2; }
 [[ -f "${IDENTITY_FILE}.pub" ]] || { printf 'public key not found: %s.pub\n' "${IDENTITY_FILE}" >&2; exit 2; }
-[[ "${ANSIBLE_INVENTORY}" = /* ]] || { printf 'ANSIBLE_INVENTORY must be an absolute path\n' >&2; exit 2; }
-[[ -f "${ANSIBLE_INVENTORY}" ]] || { printf 'production inventory not found: %s\n' "${ANSIBLE_INVENTORY}" >&2; exit 2; }
 [[ ${#OWNER} -le 63 && "${OWNER}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || {
   printf 'owner must be a lowercase alphanumeric/hyphen Hetzner label value\n' >&2
   exit 2
@@ -178,26 +174,12 @@ for attempt in {1..60}; do
 done
 ssh "${ssh_opts[@]}" "root@${test_ip}" true || { printf 'SSH did not become ready\n' >&2; exit 1; }
 
-python3 - "${ANSIBLE_INVENTORY}" "${TEST_INVENTORY}" "${TEST_HOST_NAME}" "${test_ip}" \
+python3 - "${TEST_INVENTORY}" "${TEST_HOST_NAME}" "${test_ip}" \
   "${IDENTITY_FILE}" "${KNOWN_HOSTS}" <<'PYEOF'
 import sys
 import yaml
 
-production_path, test_path, test_host, test_ip, identity, known_hosts = sys.argv[1:7]
-with open(production_path, encoding="utf-8") as handle:
-    inventory = yaml.safe_load(handle)
-hosts = inventory["all"]["children"]["identity_stack"]["hosts"]
-_, hostvars = next(iter(hosts.items()))
-selected = {}
-for key in (
-    "backup_restic_storage_box_server",
-    "backup_restic_storage_box_subaccount_username",
-    "backup_restic_storage_box_known_hosts",
-):
-    value = hostvars.get(key)
-    if not value or "REPLACE_WITH" in str(value):
-        sys.exit(f"{production_path} is missing a real value for {key}")
-    selected[key] = value
+test_path, test_host, test_ip, identity, known_hosts = sys.argv[1:6]
 test_inventory = {
     "all": {
         "hosts": {
@@ -213,7 +195,6 @@ test_inventory = {
                     + " -o IdentitiesOnly=yes"
                     + " -o PasswordAuthentication=no"
                 ),
-                **selected,
             }
         }
     }

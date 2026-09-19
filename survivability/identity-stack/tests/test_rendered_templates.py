@@ -21,6 +21,9 @@ import render
 
 ROOT = Path(__file__).resolve().parents[1]
 ROLES = ROOT / "ansible" / "roles"
+PRODUCTION_VARS = (
+    ROOT / "ansible" / "inventory" / "production" / "production-vars.yml"
+)
 
 # Templates that render to shell and must parse and lint cleanly.
 SHELL_TEMPLATES = [
@@ -529,6 +532,18 @@ class OperatorAccessTests(unittest.TestCase):
         ]
         self.assertEqual(len(allowed), 1, "expected exactly one AllowUsers line")
         return allowed[0]
+
+    def test_committed_tailnet_accounts_have_matching_policy_rules(self):
+        production = yaml.safe_load(PRODUCTION_VARS.read_text(encoding="utf-8"))
+        policy = load_policy()
+        policy_users = [user for rule in policy["ssh"] for user in rule["users"]]
+        managed_users = [production["operator_access_user"]] + [
+            item["name"] for item in production["operator_access_tailnet_operators"]
+        ]
+        self.assertCountEqual(policy_users, managed_users)
+        self.assertFalse(
+            set(managed_users) & set(production["operator_access_removed_users"])
+        )
 
     def test_public_ssh_admits_only_the_break_glass_operator(self):
         config = self.sshd_config(

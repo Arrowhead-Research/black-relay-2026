@@ -20,7 +20,7 @@
       - edge_crowdsec_bouncer_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
     fail_msg: >-
       Edge variables are incomplete or invalid. Set the public domains and ACME
-      email in the external inventory before service deployment.
+      email in production-vars.yml before service deployment.
 
 - name: Validate the CrowdSec bouncer credential
   ansible.builtin.assert:

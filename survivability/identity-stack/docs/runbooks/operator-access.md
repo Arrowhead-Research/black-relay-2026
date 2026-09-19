@@ -59,11 +59,13 @@ install -m 0600 ansible/inventory/production/hosts.example.yml \
 export ANSIBLE_INVENTORY="$HOME/.config/survivability/production-hosts.yml"
 ```
 
-Replace four placeholders: the production address, the named operator username,
-and absolute paths to the manual and dedicated private keys. Each identity needs
-an adjacent `.pub` file, which is what Ansible actually reads -- private-key
-content is never placed in variables or copied to the server. Keep SSH host-key
-checking enabled; the inventory stays outside the repository.
+Replace three placeholders: the production address and absolute paths to the
+manual and dedicated private keys. The named operator and all other non-secret
+desired state live in the committed `ansible/inventory/production/production-vars.yml`.
+Each identity needs an adjacent `.pub` file, which is what Ansible actually reads
+-- private-key content is never placed in variables or copied to the server.
+Keep SSH host-key checking enabled; the connection inventory stays outside the
+repository.
 
 ## 4. Run the one-time bootstrap
 
@@ -124,8 +126,9 @@ the session; an account with no rule is unreachable.
    ```
 
 2. **Create the account.** Add an entry to `operator_access_tailnet_operators`
-   in the external inventory. `sudo: true` is passwordless and therefore
-   root-equivalent; state it deliberately for each person.
+   in `ansible/inventory/production/production-vars.yml`. `sudo: true` is
+   passwordless and therefore root-equivalent; state it deliberately for each
+   person.
 
    ```yaml
    operator_access_tailnet_operators:

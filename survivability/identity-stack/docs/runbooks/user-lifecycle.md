@@ -184,8 +184,8 @@ test finishes.
 5. If the person held a Unix account on the VPS, remove their `ssh` rule and
    their identity from `group:survivability` in the committed policy, move their
    account name from `operator_access_tailnet_operators` to
-   `operator_access_removed_users` in the external inventory, and converge with
-   `--tags access,identity-policy`. Moving the name rather than deleting the
+   `operator_access_removed_users` in the committed `production-vars.yml`, and
+   converge with `--tags access,identity-policy`. Moving the name rather than deleting the
    entry is what actually removes the account and its home directory; a name
    merely dropped from the list leaves a sudo-capable account behind on the host
    with nothing managing it. Prune the removed entry on a later pass.

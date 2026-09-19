@@ -3,9 +3,12 @@
   hosts: identity_stack
   become: true
   gather_facts: true
+  vars_files:
+    - "{{ playbook_dir }}/../inventory/production/production-vars.yml"
   vars:
-    # The external inventory retains the one-time root/bootstrap identity, but
-    # every normal convergence uses the named account and dedicated Ansible key.
+    # The external inventory retains the one-time root/bootstrap connection,
+    # but every normal convergence uses the committed named operator and the
+    # workstation's dedicated Ansible key.
     ansible_user: "{{ operator_access_user }}"
     ansible_ssh_private_key_file: "{{ operator_access_ansible_ssh_private_key_file }}"
     operator_access_allow_root_ssh: false

@@ -35,8 +35,8 @@
         == identity_stack_required_groups | length
       - identity_stack_pocket_id_bind_username not in [lldap_admin_username]
     fail_msg: >-
-      Identity configuration is incomplete. Fill the external inventory values
-      documented in docs/runbooks/service-deployment.md.
+      Identity configuration is incomplete. Fill the committed production
+      variables documented in docs/runbooks/service-deployment.md.
 
 - name: Validate LLDAP and Pocket ID secrets
   ansible.builtin.assert:
@@ -91,7 +91,7 @@
     fail_msg: >-
       Pocket ID SMTP is enabled but its relay settings are incomplete. Create an
       SMTP user in the SMTP2GO dashboard, store the credentials through SOPS,
-      and set pocket_id_smtp_from in the external inventory. See
+      and set pocket_id_smtp_from in production-vars.yml. See
       docs/runbooks/service-deployment.md.
   when: identity_stack_pocket_id_smtp_enabled | bool
   no_log: true

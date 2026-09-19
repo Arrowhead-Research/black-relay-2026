@@ -6,6 +6,8 @@
   hosts: all
   become: true
   gather_facts: true
+  vars_files:
+    - "{{ playbook_dir }}/../inventory/production/production-vars.yml"
   vars:
     backup_restore_test_target: /var/tmp/survivability-restore-test
   pre_tasks:

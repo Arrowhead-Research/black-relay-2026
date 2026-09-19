@@ -103,9 +103,10 @@ The acceptable plan contains only the new
 server `backups` flag. It must not replace or destroy the server, Primary IPv4,
 firewall, DNS records, or Storage Box.
 
-## 5. Pin the Storage Box in the external inventory
+## 5. Pin the Storage Box in committed production configuration
 
-Add three values to `~/.config/survivability/production-hosts.yml`:
+Add three non-secret values to
+`ansible/inventory/production/production-vars.yml`:
 `backup_restic_storage_box_server`,
 `backup_restic_storage_box_subaccount_username`, and
 `backup_restic_storage_box_known_hosts`.
@@ -244,7 +245,6 @@ This is the one script that needs both provider credentials and the age
 identity, so it uses both scopes:
 
 ```bash
-export ANSIBLE_INVENTORY="$HOME/.config/survivability/production-hosts.yml"
 ./scripts/operator/with-secrets.sh --tooling --age -- \
   ./scripts/operator/test-backup-restore.sh \
     --snapshot-id "$(cat packer-output/promoted-snapshot-id)" \

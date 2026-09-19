@@ -91,7 +91,7 @@ identity_stack_pocket_id_app_name: Black Relay 2026 Identity
 # Outbound relay for Pocket ID one-time access codes. Disabled by default so
 # that bootstrap converges before an SMTP2GO account exists, and so that a
 # deployment which never wants outbound mail stays mute. Enable it in the
-# external inventory once the credentials are in SOPS.
+# committed production-vars.yml once the credentials are in SOPS.
 #
 # SMTP2GO publishes STARTTLS on 25, 80, 587, 2525 and 8025, and implicit TLS on
 # 443, 465 and 8465. Port 587 is the conventional submission port; 2525 is the

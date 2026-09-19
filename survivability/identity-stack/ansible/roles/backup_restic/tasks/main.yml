@@ -38,8 +38,8 @@
       - backup_restic_stale_after_hours | int > 0
     fail_msg: >-
       Backup configuration is incomplete or still contains placeholders. Fill
-      the external inventory placeholders and create the SOPS-encrypted
-      secrets file first; see docs/runbooks/backups.md.
+      production-vars.yml and create the SOPS-encrypted secrets file first; see
+      docs/runbooks/backups.md.
 
 - name: Validate Storage Box known_hosts entries
   ansible.builtin.assert:

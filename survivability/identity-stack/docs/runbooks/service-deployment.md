@@ -29,9 +29,9 @@ make validate
   each pointing to the protected Primary IPv4 with TTL 300.
 - TCP 80 and 443 are reachable. No public UDP service or IPv6 record exists.
 - The backup and isolated restore test in `backups.md` have passed.
-- The external inventory is mode `0600` and contains the service variables shown
-  in `hosts.example.yml`. The MagicDNS suffix is different from the Headscale
-  public name.
+- The external connection inventory is mode `0600`. The non-secret service
+  configuration is committed in `ansible/inventory/production/production-vars.yml`,
+  and the MagicDNS suffix there is different from the Headscale public name.
 
 ```bash
 stat -c '%a %n' "$ANSIBLE_INVENTORY"
@@ -101,7 +101,8 @@ Neither value may contain a line break. The env file is consumed with
 `format: raw`, so an embedded newline truncates the password and silently
 corrupts every setting after it.
 
-Set the two non-secret values in the external inventory, and enable the relay:
+Set the two non-secret values in
+`ansible/inventory/production/production-vars.yml`, and enable the relay:
 
 ```yaml
 identity_stack_pocket_id_smtp_enabled: true
@@ -495,9 +496,9 @@ What each layer contributes, and what to check when it fails:
   connection, and the refusal is silent on the client.
 - The `ssh` rules are one per person and each names only that person's own
   account, so `ssh` as a teammate's account is refused and so is root. Both
-  refusals are the policy working. Adding an account means adding both the
-  inventory entry and the rule; see "Add a teammate who reaches the host only
-  over Tailscale SSH" in `operator-access.md`.
+  refusals are the policy working. Adding an account means updating both the
+  committed production variables and the rule; see "Add a teammate who reaches
+  the host only over Tailscale SSH" in `operator-access.md`.
 
 Two properties worth knowing before you debug a failure:
 

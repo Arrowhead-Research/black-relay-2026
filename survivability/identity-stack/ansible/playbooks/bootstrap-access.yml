@@ -3,6 +3,8 @@
   hosts: identity_stack
   become: true
   gather_facts: true
+  vars_files:
+    - "{{ playbook_dir }}/../inventory/production/production-vars.yml"
   vars:
     operator_access_allow_root_ssh: true
   pre_tasks:

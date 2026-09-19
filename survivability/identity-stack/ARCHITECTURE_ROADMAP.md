@@ -91,11 +91,12 @@ third-party automation. Neither receives production authority.
 `AGENTS.md` states the complete boundary and the full list of operator-only
 operations; it and this section must not drift.
 
-The committed Ansible inventory remains empty for credential-free validation. A
+The committed Ansible inventory remains empty for credential-free validation.
+Reviewable, non-secret production desired state is committed separately. A
 trusted operator creates a mode-`0600` inventory outside the repository from the
-committed example, containing only the production host, one named operator,
-absolute paths to the operator's manual and dedicated Ansible SSH identities
-(never key content), the Python interpreter, and safe SSH options.
+committed example, containing only the production host, absolute paths to the
+operator's manual and dedicated Ansible SSH identities (never key content), the
+bootstrap connection user, Python interpreter, and safe SSH options.
 
 ## Infrastructure architecture
 

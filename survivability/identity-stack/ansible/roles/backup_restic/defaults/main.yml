@@ -1,7 +1,7 @@
 ---
 # Non-secret configuration only. Backup credentials are loaded from the
-# SOPS-encrypted secrets file referenced by backup_restic_secrets_file, and the
-# Storage Box connection details come from the operator's external inventory.
+# SOPS-encrypted secrets file referenced by backup_restic_secrets_file. Storage
+# Box connection details come from the committed production-vars.yml file.
 backup_restic_secrets_file: >-
   {{ playbook_dir }}/../inventory/production/group_vars/all/secrets.sops.yml
 

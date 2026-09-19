@@ -173,12 +173,14 @@ ansible-playbook -i "$ANSIBLE_INVENTORY" --list-tasks --tags identity-policy \
 ## Safe repository inputs
 
 `ansible/inventory/production/hosts.yml` intentionally contains no production
-host details and exists only for credential-free Pi and CI checks. Before
-running production Ansible, an operator copies
-`ansible/inventory/production/hosts.example.yml` to a mode-`0600` file outside
-the repository, such as `~/.config/survivability/production-hosts.yml`, and
-replaces the placeholders. Only local paths — never key content — belong in the
-inventory; Ansible reads the adjacent `.pub` files itself.
+host details and exists only for credential-free Pi and CI checks. Reviewable,
+non-secret desired state lives in the committed
+`ansible/inventory/production/production-vars.yml`. Before running production
+Ansible, an operator copies `ansible/inventory/production/hosts.example.yml` to
+a mode-`0600` file outside the repository, such as
+`~/.config/survivability/production-hosts.yml`, and supplies only the production
+address and workstation-specific SSH key paths. Ansible reads the adjacent
+`.pub` files itself; private-key content never belongs in inventory variables.
 
 `secrets.example.yml` files contain variable names and placeholder values only.
 Operators create and edit encrypted `*.sops.yml` files from trusted
