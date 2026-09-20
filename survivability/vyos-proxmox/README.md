@@ -16,6 +16,7 @@ expected VM NIC identity is:
 | VyOS interface | MAC address | Purpose | Address |
 | --- | --- | --- | --- |
 | `eth0` | `bc:24:11:be:a9:5a` | `BR-LAB-LAN` | `10.73.100.1/24` |
+| `eth0.200` | inherited | Isolated test VLAN 200 | `10.73.200.1/24` |
 | `eth1` | `bc:24:11:fd:0c:5e` | `WAN` and SSH management | DHCP |
 
 The WAN DHCP lease supplies both the address and default route; no static
@@ -26,6 +27,24 @@ The role ensures its commands exist. When it changes the active configuration,
 a handler saves it to disk. It does not purge unrelated commands already on the
 router, but it does remove the three previously managed static-WAN commands
 (address, default route, and address-specific SSH listener) during migration.
+
+## Isolated test VLAN 200
+
+The role creates tagged subinterface `eth0.200` with gateway
+`10.73.200.1/24`. Its DHCP pool is `10.73.200.100` through
+`10.73.200.200`, and clients receive VyOS (`10.73.200.1`) as their DNS server.
+Source NAT masquerades the subnet through DHCP WAN interface `eth1`.
+
+Scoped IPv4 firewall rules allow DHCP, DNS, and ICMP from VLAN 200 to VyOS but
+drop all other router-local access from that VLAN. Forward rules deny traffic
+between VLAN 200 and all RFC1918 networks in both directions, while allowing
+established/related return traffic and public Internet destinations. In
+particular, VLAN 200 cannot reach the untagged `10.73.100.0/24` LAN, and that
+LAN cannot initiate connections into VLAN 200.
+
+The Proxmox bridge attached to `eth0` must be VLAN-aware. The VyOS virtual NIC
+must carry the trunk without a Proxmox VLAN tag; attach a test LXC to that bridge
+with VLAN tag `200`.
 
 ## Authentication model
 

@@ -9,7 +9,43 @@ set interfaces ethernet {{ interface.name }} hw-id '{{ interface.hw_id }}'
 set interfaces ethernet {{ interface.name }} offload {{ offload }}
 {% endfor %}
 {% endfor %}
+{% for vif in vyos_router_ethernet_vifs %}
+set interfaces ethernet {{ vif.parent }} vif {{ vif.vlan_id }} address '{{ vif.address }}'
+set interfaces ethernet {{ vif.parent }} vif {{ vif.vlan_id }} description '{{ vif.description }}'
+{% endfor %}
 set interfaces loopback lo
+{% for rule in vyos_router_firewall_ipv4_input_rules %}
+set firewall ipv4 input filter rule {{ rule.number }} action '{{ rule.action }}'
+set firewall ipv4 input filter rule {{ rule.number }} description '{{ rule.description }}'
+{% if rule.inbound_interface is defined %}
+set firewall ipv4 input filter rule {{ rule.number }} inbound-interface name '{{ rule.inbound_interface }}'
+{% endif %}
+{% if rule.protocol is defined %}
+set firewall ipv4 input filter rule {{ rule.number }} protocol '{{ rule.protocol }}'
+{% endif %}
+{% if rule.destination_port is defined %}
+set firewall ipv4 input filter rule {{ rule.number }} destination port '{{ rule.destination_port }}'
+{% endif %}
+{% endfor %}
+{% for rule in vyos_router_firewall_ipv4_forward_rules %}
+set firewall ipv4 forward filter rule {{ rule.number }} action '{{ rule.action }}'
+set firewall ipv4 forward filter rule {{ rule.number }} description '{{ rule.description }}'
+{% if rule.inbound_interface is defined %}
+set firewall ipv4 forward filter rule {{ rule.number }} inbound-interface name '{{ rule.inbound_interface }}'
+{% endif %}
+{% if rule.outbound_interface is defined %}
+set firewall ipv4 forward filter rule {{ rule.number }} outbound-interface name '{{ rule.outbound_interface }}'
+{% endif %}
+{% if rule.source_address is defined %}
+set firewall ipv4 forward filter rule {{ rule.number }} source address '{{ rule.source_address }}'
+{% endif %}
+{% if rule.destination_address is defined %}
+set firewall ipv4 forward filter rule {{ rule.number }} destination address '{{ rule.destination_address }}'
+{% endif %}
+{% for state in rule.states | default([]) %}
+set firewall ipv4 forward filter rule {{ rule.number }} state {{ state }}
+{% endfor %}
+{% endfor %}
 {% for rule in vyos_router_source_nat_rules %}
 set nat source rule {{ rule.number }} description '{{ rule.description }}'
 set nat source rule {{ rule.number }} outbound-interface name '{{ rule.outbound_interface }}'
@@ -19,15 +55,17 @@ set nat source rule {{ rule.number }} translation address '{{ rule.translation_a
 {% for route in vyos_router_static_routes %}
 set protocols static route {{ route.prefix }} next-hop {{ route.next_hop }}
 {% endfor %}
-set service dhcp-server shared-network-name {{ vyos_router_dhcp.shared_network_name }} subnet {{ vyos_router_dhcp.subnet }} option default-router '{{ vyos_router_dhcp.default_router }}'
-{% for name_server in vyos_router_dhcp.name_servers %}
-set service dhcp-server shared-network-name {{ vyos_router_dhcp.shared_network_name }} subnet {{ vyos_router_dhcp.subnet }} option name-server '{{ name_server }}'
+{% for shared_network in vyos_router_dhcp_shared_networks %}
+set service dhcp-server shared-network-name {{ shared_network.name }} subnet {{ shared_network.subnet }} option default-router '{{ shared_network.default_router }}'
+{% for name_server in shared_network.name_servers %}
+set service dhcp-server shared-network-name {{ shared_network.name }} subnet {{ shared_network.subnet }} option name-server '{{ name_server }}'
 {% endfor %}
-{% for range in vyos_router_dhcp.ranges %}
-set service dhcp-server shared-network-name {{ vyos_router_dhcp.shared_network_name }} subnet {{ vyos_router_dhcp.subnet }} range {{ range.id }} start '{{ range.start }}'
-set service dhcp-server shared-network-name {{ vyos_router_dhcp.shared_network_name }} subnet {{ vyos_router_dhcp.subnet }} range {{ range.id }} stop '{{ range.stop }}'
+{% for range in shared_network.ranges %}
+set service dhcp-server shared-network-name {{ shared_network.name }} subnet {{ shared_network.subnet }} range {{ range.id }} start '{{ range.start }}'
+set service dhcp-server shared-network-name {{ shared_network.name }} subnet {{ shared_network.subnet }} range {{ range.id }} stop '{{ range.stop }}'
 {% endfor %}
-set service dhcp-server shared-network-name {{ vyos_router_dhcp.shared_network_name }} subnet {{ vyos_router_dhcp.subnet }} subnet-id '{{ vyos_router_dhcp.subnet_id }}'
+set service dhcp-server shared-network-name {{ shared_network.name }} subnet {{ shared_network.subnet }} subnet-id '{{ shared_network.subnet_id }}'
+{% endfor %}
 {% for network in vyos_router_dns_forwarding.allow_from %}
 set service dns forwarding allow-from '{{ network }}'
 {% endfor %}

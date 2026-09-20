@@ -17,14 +17,14 @@ def main() -> None:
     lines = [line.strip() for line in sys.stdin if line.strip()]
     if not lines:
         fail("rendered configuration is empty")
-    if len(lines) != 55:
-        fail(f"expected 55 commands from the DHCP migration, got {len(lines)}")
+    if len(lines) != 114:
+        fail(f"expected 114 commands from the VLAN baseline, got {len(lines)}")
     if len(lines) != len(set(lines)):
         fail("rendered configuration contains duplicate commands")
 
     normalized = "\n".join(lines) + "\n"
     expected_digest = (
-        "6f1895e446fb9488920263b4974381cab2159d6d12cba21049935543af9a3f7e"
+        "149e4c282226a9caeb5fb9eb8a6c0776cfc348f6cf79c6828a4d098a233d6c35"
     )
     actual_digest = hashlib.sha256(normalized.encode()).hexdigest()
     if actual_digest != expected_digest:
@@ -47,6 +47,25 @@ def main() -> None:
         "delete protocols static route 0.0.0.0/0 next-hop 10.73.66.1",
         "delete service ssh listen-address '10.73.66.50'",
         "set interfaces ethernet eth1 address 'dhcp'",
+        "set interfaces ethernet eth0 vif 200 address '10.73.200.1/24'",
+        "set nat source rule 200 source address '10.73.200.0/24'",
+        "set nat source rule 200 outbound-interface name 'eth1'",
+        "set nat source rule 200 translation address 'masquerade'",
+        "set service dhcp-server shared-network-name ISOLATED-TEST-VLAN-200 subnet 10.73.200.0/24 option default-router '10.73.200.1'",
+        "set service dhcp-server shared-network-name ISOLATED-TEST-VLAN-200 subnet 10.73.200.0/24 option name-server '10.73.200.1'",
+        "set service dns forwarding allow-from '10.73.200.0/24'",
+        "set service dns forwarding listen-address '10.73.200.1'",
+        "set firewall ipv4 input filter rule 20000 destination port '67'",
+        "set firewall ipv4 input filter rule 20010 destination port '53'",
+        "set firewall ipv4 input filter rule 20090 action 'drop'",
+        "set firewall ipv4 forward filter rule 20000 state established",
+        "set firewall ipv4 forward filter rule 20000 state related",
+        "set firewall ipv4 forward filter rule 20100 destination address '10.0.0.0/8'",
+        "set firewall ipv4 forward filter rule 20110 destination address '172.16.0.0/12'",
+        "set firewall ipv4 forward filter rule 20120 destination address '192.168.0.0/16'",
+        "set firewall ipv4 forward filter rule 20200 source address '10.0.0.0/8'",
+        "set firewall ipv4 forward filter rule 20210 source address '172.16.0.0/12'",
+        "set firewall ipv4 forward filter rule 20220 source address '192.168.0.0/16'",
         "set service ssh disable-password-authentication",
     }
     missing_commands = required_commands.difference(lines)
@@ -61,7 +80,14 @@ def main() -> None:
         if line.startswith(forbidden_prefixes):
             fail(f"static WAN state remains in desired configuration: {line}")
 
-    expected_roots = {"interfaces", "nat", "protocols", "service", "system"}
+    expected_roots = {
+        "firewall",
+        "interfaces",
+        "nat",
+        "protocols",
+        "service",
+        "system",
+    }
     if roots != expected_roots:
         fail(f"expected top-level paths {sorted(expected_roots)}, got {sorted(roots)}")
 

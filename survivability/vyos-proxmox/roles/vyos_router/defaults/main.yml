@@ -22,11 +22,22 @@ vyos_router_ethernet_interfaces:
       - sg
       - tso
 
+vyos_router_ethernet_vifs:
+  - parent: eth0
+    vlan_id: 200
+    address: 10.73.200.1/24
+    description: ISOLATED-TEST-VLAN-200
+
 vyos_router_source_nat_rules:
   - number: 100
     description: BR-LAB-LAN to WAN
     outbound_interface: eth1
     source_address: 10.73.100.0/24
+    translation_address: masquerade
+  - number: 200
+    description: ISOLATED-TEST-VLAN-200 to WAN
+    outbound_interface: eth1
+    source_address: 10.73.200.0/24
     translation_address: masquerade
 
 # The WAN DHCP lease supplies its default route; do not configure a static
@@ -38,27 +49,104 @@ vyos_router_legacy_wan_commands:
   - set protocols static route 0.0.0.0/0 next-hop 10.73.66.1
   - set service ssh listen-address '10.73.66.50'
 
-vyos_router_dhcp:
-  shared_network_name: BR-LAB
-  subnet: 10.73.100.0/24
-  subnet_id: 1
-  default_router: 10.73.100.1
-  name_servers:
-    - 1.1.1.1
-    - 10.73.100.1
-  ranges:
-    - id: 0
-      start: 10.73.100.100
-      stop: 10.73.100.200
+vyos_router_dhcp_shared_networks:
+  - name: BR-LAB
+    subnet: 10.73.100.0/24
+    subnet_id: 1
+    default_router: 10.73.100.1
+    name_servers:
+      - 1.1.1.1
+      - 10.73.100.1
+    ranges:
+      - id: 0
+        start: 10.73.100.100
+        stop: 10.73.100.200
+  - name: ISOLATED-TEST-VLAN-200
+    subnet: 10.73.200.0/24
+    subnet_id: 200
+    default_router: 10.73.200.1
+    name_servers:
+      - 10.73.200.1
+    ranges:
+      - id: 0
+        start: 10.73.200.100
+        stop: 10.73.200.200
 
 vyos_router_dns_forwarding:
   allow_from:
     - 10.73.100.0/24
+    - 10.73.200.0/24
   listen_addresses:
     - 10.73.100.1
+    - 10.73.200.1
   name_servers:
     - 8.8.4.4
     - 8.8.8.8
+
+# These rules are deliberately scoped to eth0.200 so the existing LAN and WAN
+# policy remain unchanged. Base-chain defaults remain accept; explicit drops
+# isolate VLAN 200 from all RFC1918 networks in both directions.
+vyos_router_firewall_ipv4_input_rules:
+  - number: 20000
+    action: accept
+    description: Allow VLAN 200 DHCP to VyOS
+    inbound_interface: eth0.200
+    protocol: udp
+    destination_port: 67
+  - number: 20010
+    action: accept
+    description: Allow VLAN 200 DNS to VyOS
+    inbound_interface: eth0.200
+    protocol: tcp_udp
+    destination_port: 53
+  - number: 20020
+    action: accept
+    description: Allow VLAN 200 ICMP to VyOS
+    inbound_interface: eth0.200
+    protocol: icmp
+  - number: 20090
+    action: drop
+    description: Deny other VLAN 200 access to VyOS
+    inbound_interface: eth0.200
+
+vyos_router_firewall_ipv4_forward_rules:
+  - number: 20000
+    action: accept
+    description: Allow established traffic into VLAN 200
+    outbound_interface: eth0.200
+    states:
+      - established
+      - related
+  - number: 20100
+    action: drop
+    description: Deny VLAN 200 to 10.0.0.0/8
+    inbound_interface: eth0.200
+    destination_address: 10.0.0.0/8
+  - number: 20110
+    action: drop
+    description: Deny VLAN 200 to 172.16.0.0/12
+    inbound_interface: eth0.200
+    destination_address: 172.16.0.0/12
+  - number: 20120
+    action: drop
+    description: Deny VLAN 200 to 192.168.0.0/16
+    inbound_interface: eth0.200
+    destination_address: 192.168.0.0/16
+  - number: 20200
+    action: drop
+    description: Deny 10.0.0.0/8 to VLAN 200
+    outbound_interface: eth0.200
+    source_address: 10.0.0.0/8
+  - number: 20210
+    action: drop
+    description: Deny 172.16.0.0/12 to VLAN 200
+    outbound_interface: eth0.200
+    source_address: 172.16.0.0/12
+  - number: 20220
+    action: drop
+    description: Deny 192.168.0.0/16 to VLAN 200
+    outbound_interface: eth0.200
+    source_address: 192.168.0.0/16
 
 vyos_router_ntp_allow_client_addresses:
   - 127.0.0.0/8
