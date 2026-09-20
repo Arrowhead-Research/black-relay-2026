@@ -1,0 +1,94 @@
+---
+# These defaults describe the supplied, currently working configuration.
+vyos_router_hostname: vyos
+
+vyos_router_ethernet_interfaces:
+  - name: eth0
+    address: 10.73.100.1/24
+    description: BR-LAB-LAN
+    hw_id: bc:24:11:be:a9:5a
+    offloads:
+      - gro
+      - gso
+      - sg
+      - tso
+  - name: eth1
+    address: 10.73.66.50/24
+    description: WAN
+    hw_id: bc:24:11:fd:0c:5e
+    offloads:
+      - gro
+      - gso
+      - sg
+      - tso
+
+vyos_router_source_nat_rules:
+  - number: 100
+    description: BR-LAB-LAN to WAN
+    outbound_interface: eth1
+    source_address: 10.73.100.0/24
+    translation_address: masquerade
+
+vyos_router_static_routes:
+  - prefix: 0.0.0.0/0
+    next_hop: 10.73.66.1
+
+vyos_router_dhcp:
+  shared_network_name: BR-LAB
+  subnet: 10.73.100.0/24
+  subnet_id: 1
+  default_router: 10.73.100.1
+  name_servers:
+    - 1.1.1.1
+    - 10.73.100.1
+  ranges:
+    - id: 0
+      start: 10.73.100.100
+      stop: 10.73.100.200
+
+vyos_router_dns_forwarding:
+  allow_from:
+    - 10.73.100.0/24
+  listen_addresses:
+    - 10.73.100.1
+  name_servers:
+    - 8.8.4.4
+    - 8.8.8.8
+
+vyos_router_ntp_allow_client_addresses:
+  - 127.0.0.0/8
+  - 169.254.0.0/16
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  - ::1/128
+  - fe80::/10
+  - fc00::/7
+vyos_router_ntp_servers:
+  - time1.vyos.net
+  - time2.vyos.net
+  - time3.vyos.net
+
+vyos_router_ssh:
+  listen_addresses:
+    - 10.73.66.50
+  port: 22
+
+vyos_router_config_management_commit_revisions: 100
+vyos_router_console:
+  device: ttyS0
+  kernel: true
+  speed: 115200
+
+vyos_router_operator_group: default
+vyos_router_login_user: vyos
+# Public keys are not secrets, but deployment-specific keys are supplied from
+# inventory/group_vars/vyos_routers/operator.yml rather than committed here.
+vyos_router_ssh_public_keys: []
+
+vyos_router_reboot_on_upgrade_failure: 5
+vyos_router_syslog_local:
+  - facility: all
+    level: info
+  - facility: local7
+    level: debug

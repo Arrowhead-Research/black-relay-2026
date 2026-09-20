@@ -1,0 +1,41 @@
+---
+- name: Require at least one SSH public key
+  ansible.builtin.assert:
+    that:
+      - vyos_router_ssh_public_keys is sequence
+      - vyos_router_ssh_public_keys is not string
+      - vyos_router_ssh_public_keys | length > 0
+    fail_msg: >-
+      Define vyos_router_ssh_public_keys in the local operator inventory file;
+      see inventory/group_vars/vyos_routers/operator.yml.example.
+
+- name: Validate SSH public keys
+  ansible.builtin.assert:
+    that:
+      - item.name is string
+      - item.name | length > 0
+      - item.type in vyos_router_supported_ssh_key_types
+      - item.key is string
+      - item.key | length > 0
+      - item.key != 'REPLACE_WITH_PUBLIC_KEY_BASE64_PAYLOAD'
+    fail_msg: >-
+      Invalid SSH public key definition for
+      {{ item.name | default('unknown') }}.
+  loop: "{{ vyos_router_ssh_public_keys }}"
+  loop_control:
+    label: "{{ item.name | default('unknown') }}"
+  vars:
+    vyos_router_supported_ssh_key_types:
+      - ssh-dss
+      - ssh-rsa
+      - ecdsa-sha2-nistp256
+      - ecdsa-sha2-nistp384
+      - ecdsa-sha2-nistp521
+      - ssh-ed25519
+
+- name: Apply and save the key-only SSH configuration
+  vyos.vyos.vyos_config:
+    src: vyos_config.set.j2
+    match: line
+    save: true
+    comment: Managed by Ansible role vyos_router

@@ -1,0 +1,7 @@
+---
+# Copy this file to operator.yml. The key field is only the base64 payload from
+# the public key file, without the leading key type or trailing comment.
+vyos_router_ssh_public_keys:
+  - name: operator
+    type: ssh-ed25519
+    key: REPLACE_WITH_PUBLIC_KEY_BASE64_PAYLOAD

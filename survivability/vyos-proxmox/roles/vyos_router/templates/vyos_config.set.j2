@@ -1,0 +1,60 @@
+{% for interface in vyos_router_ethernet_interfaces %}
+set interfaces ethernet {{ interface.name }} address '{{ interface.address }}'
+set interfaces ethernet {{ interface.name }} description '{{ interface.description }}'
+set interfaces ethernet {{ interface.name }} hw-id '{{ interface.hw_id }}'
+{% for offload in interface.offloads %}
+set interfaces ethernet {{ interface.name }} offload {{ offload }}
+{% endfor %}
+{% endfor %}
+set interfaces loopback lo
+{% for rule in vyos_router_source_nat_rules %}
+set nat source rule {{ rule.number }} description '{{ rule.description }}'
+set nat source rule {{ rule.number }} outbound-interface name '{{ rule.outbound_interface }}'
+set nat source rule {{ rule.number }} source address '{{ rule.source_address }}'
+set nat source rule {{ rule.number }} translation address '{{ rule.translation_address }}'
+{% endfor %}
+{% for route in vyos_router_static_routes %}
+set protocols static route {{ route.prefix }} next-hop {{ route.next_hop }}
+{% endfor %}
+set service dhcp-server shared-network-name {{ vyos_router_dhcp.shared_network_name }} subnet {{ vyos_router_dhcp.subnet }} option default-router '{{ vyos_router_dhcp.default_router }}'
+{% for name_server in vyos_router_dhcp.name_servers %}
+set service dhcp-server shared-network-name {{ vyos_router_dhcp.shared_network_name }} subnet {{ vyos_router_dhcp.subnet }} option name-server '{{ name_server }}'
+{% endfor %}
+{% for range in vyos_router_dhcp.ranges %}
+set service dhcp-server shared-network-name {{ vyos_router_dhcp.shared_network_name }} subnet {{ vyos_router_dhcp.subnet }} range {{ range.id }} start '{{ range.start }}'
+set service dhcp-server shared-network-name {{ vyos_router_dhcp.shared_network_name }} subnet {{ vyos_router_dhcp.subnet }} range {{ range.id }} stop '{{ range.stop }}'
+{% endfor %}
+set service dhcp-server shared-network-name {{ vyos_router_dhcp.shared_network_name }} subnet {{ vyos_router_dhcp.subnet }} subnet-id '{{ vyos_router_dhcp.subnet_id }}'
+{% for network in vyos_router_dns_forwarding.allow_from %}
+set service dns forwarding allow-from '{{ network }}'
+{% endfor %}
+{% for address in vyos_router_dns_forwarding.listen_addresses %}
+set service dns forwarding listen-address '{{ address }}'
+{% endfor %}
+{% for name_server in vyos_router_dns_forwarding.name_servers %}
+set service dns forwarding name-server {{ name_server }}
+{% endfor %}
+{% for network in vyos_router_ntp_allow_client_addresses %}
+set service ntp allow-client address '{{ network }}'
+{% endfor %}
+{% for server in vyos_router_ntp_servers %}
+set service ntp server {{ server }}
+{% endfor %}
+{% for address in vyos_router_ssh.listen_addresses %}
+set service ssh listen-address '{{ address }}'
+{% endfor %}
+set service ssh port '{{ vyos_router_ssh.port }}'
+set service ssh disable-password-authentication
+set system config-management commit-revisions '{{ vyos_router_config_management_commit_revisions }}'
+set system console device {{ vyos_router_console.device }} kernel
+set system console device {{ vyos_router_console.device }} speed '{{ vyos_router_console.speed }}'
+set system host-name '{{ vyos_router_hostname }}'
+set system login operator-group {{ vyos_router_operator_group }} command-policy allow '*'
+{% for public_key in vyos_router_ssh_public_keys %}
+set system login user {{ vyos_router_login_user }} authentication public-keys '{{ public_key.name }}' key '{{ public_key.key }}'
+set system login user {{ vyos_router_login_user }} authentication public-keys '{{ public_key.name }}' type '{{ public_key.type }}'
+{% endfor %}
+set system option reboot-on-upgrade-failure '{{ vyos_router_reboot_on_upgrade_failure }}'
+{% for destination in vyos_router_syslog_local %}
+set system syslog local facility {{ destination.facility }} level '{{ destination.level }}'
+{% endfor %}

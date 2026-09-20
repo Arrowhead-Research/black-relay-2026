@@ -1,0 +1,12 @@
+# Local operator identity
+inventory/group_vars/vyos_routers/operator.yml
+
+# Configuration exports and Ansible artifacts
+backup/
+**/backup/
+*.retry
+.ansible/
+
+# Test/cache artifacts
+__pycache__/
+.pytest_cache/

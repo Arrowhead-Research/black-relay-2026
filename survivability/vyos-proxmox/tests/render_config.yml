@@ -1,0 +1,31 @@
+---
+- name: Render and parse the VyOS configuration locally
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Load role defaults
+      ansible.builtin.include_vars:
+        file: ../roles/vyos_router/defaults/main.yml
+
+    - name: Supply a fake public key for local rendering
+      ansible.builtin.set_fact:
+        vyos_router_ssh_public_keys:
+          - name: operator
+            type: ssh-ed25519
+            key: AAAAC3NzaC1lZDI1NTE5AAAAITESTONLYNOTAREALPUBLICKEY
+
+    - name: Render non-secret role configuration
+      ansible.builtin.set_fact:
+        rendered_vyos_config: >-
+          {{ lookup('ansible.builtin.template',
+                    '../roles/vyos_router/templates/vyos_config.set.j2') }}
+
+    - name: Parse rendered set commands
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/validate_set_config.py"
+        stdin: "{{ rendered_vyos_config }}"
+      changed_when: false

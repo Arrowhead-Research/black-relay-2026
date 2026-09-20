@@ -1,0 +1,8 @@
+---
+- name: Preserve the current VyOS router configuration
+  hosts: vyos_routers
+  gather_facts: false
+  serial: 1
+
+  roles:
+    - role: vyos_router
