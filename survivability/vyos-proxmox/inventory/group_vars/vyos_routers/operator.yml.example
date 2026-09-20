@@ -1,6 +1,11 @@
 ---
-# Copy this file to operator.yml. The key field is only the base64 payload from
-# the public key file, without the leading key type or trailing comment.
+# Copy this file to operator.yml. Use a hostname maintained by local DHCP/DNS,
+# or update this value after discovering the current WAN lease. For the first
+# migration run, this can be the router's existing 10.73.66.50 address.
+vyos_router_management_host: vyos-wan.example.internal
+
+# The key field is only the base64 payload from the public key file, without the
+# leading key type or trailing comment.
 vyos_router_ssh_public_keys:
   - name: operator
     type: ssh-ed25519

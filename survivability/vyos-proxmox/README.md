@@ -2,8 +2,8 @@
 
 This project preserves the supplied, currently working VyOS network and service
 configuration as a small idempotent Ansible role using
-`vyos.vyos.vyos_config`. The only intentional behavior change is that SSH uses
-public-key authentication and rejects password authentication.
+`vyos.vyos.vyos_config`. The WAN uses DHCP for both its address and default
+route. SSH uses public-key authentication and rejects password authentication.
 
 ## Ownership boundary
 
@@ -16,15 +16,16 @@ expected VM NIC identity is:
 | VyOS interface | MAC address | Purpose | Address |
 | --- | --- | --- | --- |
 | `eth0` | `bc:24:11:be:a9:5a` | `BR-LAB-LAN` | `10.73.100.1/24` |
-| `eth1` | `bc:24:11:fd:0c:5e` | `WAN` and SSH management | `10.73.66.50/24` |
+| `eth1` | `bc:24:11:fd:0c:5e` | `WAN` and SSH management | DHCP |
 
-The current default route is via `10.73.66.1` on the WAN network. Proxmox must
-present the two NICs with the MAC addresses and bridge attachment expected by
-this table before the role is used.
+The WAN DHCP lease supplies both the address and default route; no static
+upstream gateway is configured. Proxmox must present the two NICs with the MAC
+addresses and bridge attachment expected by this table before the role is used.
 
 The role ensures its commands exist. When it changes the active configuration,
 a handler saves it to disk. It does not purge unrelated commands already on the
-router.
+router, but it does remove the three previously managed static-WAN commands
+(address, default route, and address-specific SSH listener) during migration.
 
 ## Authentication model
 
@@ -37,8 +38,10 @@ set service ssh disable-password-authentication
 
 The existing local password hash is not stored or managed by Ansible. It remains
 on the router for Proxmox console recovery but cannot be used for SSH after the
-role is applied. Private SSH keys remain on the trusted operator workstation and
-must never be copied into this repository or the Pi environment.
+role is applied. Because the WAN address is dynamic, SSH is not bound to one IP;
+it listens on the router's addresses and remains key-only. Private SSH keys
+remain on the trusted operator workstation and must never be copied into this
+repository or the Pi environment.
 
 ## Layout
 
@@ -77,8 +80,10 @@ ssh-ed25519 AAAAC3... operator@workstation
 ```
 
 Set `type` to the first field, `key` to only the second/base64 field, and choose
-a stable `name` such as `operator`. Public keys are not secrets, but this
-project keeps deployment-specific identity in the ignored `operator.yml` file.
+a stable `name` such as `operator`. Set `vyos_router_management_host` to a local
+DNS name tracking the DHCP lease, or to the currently discovered lease address.
+Public keys are not secrets, but this project keeps deployment-specific identity
+and addressing in the ignored `operator.yml` file.
 
 Do not configure `ansible_password` in inventory. Ansible should use the
 matching private key from the trusted workstation after the transition.
@@ -94,9 +99,11 @@ ansible-playbook site.yml --syntax-check
 
 ## First key-only deployment
 
-Changing SSH authentication can interrupt management access. Confirm the
-matching private key is available and verify Proxmox console access before the
-first application.
+Changing the WAN from `10.73.66.50/24` to DHCP can interrupt the active SSH
+session and changes the management endpoint. Confirm the matching private key,
+Proxmox console access, and a way to discover the new DHCP lease before the
+first application. Review the DHCP server's leases after applying, then update
+`vyos_router_management_host` unless local DHCP/DNS already tracks it.
 
 If the public key is not already installed, bootstrap through the current SSH
 password without storing it:

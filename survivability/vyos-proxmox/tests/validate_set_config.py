@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Perform lightweight structural validation of rendered VyOS set commands."""
+"""Perform lightweight structural validation of rendered VyOS commands."""
 
 from __future__ import annotations
 
@@ -17,14 +17,14 @@ def main() -> None:
     lines = [line.strip() for line in sys.stdin if line.strip()]
     if not lines:
         fail("rendered configuration is empty")
-    if len(lines) != 54:
-        fail(f"expected 54 commands from the key-only baseline, got {len(lines)}")
+    if len(lines) != 55:
+        fail(f"expected 55 commands from the DHCP migration, got {len(lines)}")
     if len(lines) != len(set(lines)):
         fail("rendered configuration contains duplicate commands")
 
     normalized = "\n".join(lines) + "\n"
     expected_digest = (
-        "69640fb3591c40c060b7bab3fbcb5da8caa81779643feb340e5d84ca0b02d9ba"
+        "6f1895e446fb9488920263b4974381cab2159d6d12cba21049935543af9a3f7e"
     )
     actual_digest = hashlib.sha256(normalized.encode()).hexdigest()
     if actual_digest != expected_digest:
@@ -42,15 +42,30 @@ def main() -> None:
             fail(f"line {number} is not a VyOS set/delete command: {line}")
         roots.add(words[1])
 
-    required_command = "set service ssh disable-password-authentication"
-    if required_command not in lines:
-        fail(f"missing key-only SSH command: {required_command}")
+    required_commands = {
+        "delete interfaces ethernet eth1 address '10.73.66.50/24'",
+        "delete protocols static route 0.0.0.0/0 next-hop 10.73.66.1",
+        "delete service ssh listen-address '10.73.66.50'",
+        "set interfaces ethernet eth1 address 'dhcp'",
+        "set service ssh disable-password-authentication",
+    }
+    missing_commands = required_commands.difference(lines)
+    if missing_commands:
+        fail(f"missing DHCP migration commands: {sorted(missing_commands)}")
+
+    forbidden_prefixes = (
+        "set protocols static route 0.0.0.0/0 ",
+        "set service ssh listen-address ",
+    )
+    for line in lines:
+        if line.startswith(forbidden_prefixes):
+            fail(f"static WAN state remains in desired configuration: {line}")
 
     expected_roots = {"interfaces", "nat", "protocols", "service", "system"}
     if roots != expected_roots:
         fail(f"expected top-level paths {sorted(expected_roots)}, got {sorted(roots)}")
 
-    print(f"validated {len(lines)} unique VyOS set commands")
+    print(f"validated {len(lines)} unique VyOS migration commands")
 
 
 if __name__ == "__main__":

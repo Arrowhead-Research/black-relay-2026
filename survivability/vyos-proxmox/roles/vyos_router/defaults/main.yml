@@ -13,7 +13,7 @@ vyos_router_ethernet_interfaces:
       - sg
       - tso
   - name: eth1
-    address: 10.73.66.50/24
+    address: dhcp
     description: WAN
     hw_id: bc:24:11:fd:0c:5e
     offloads:
@@ -29,9 +29,14 @@ vyos_router_source_nat_rules:
     source_address: 10.73.100.0/24
     translation_address: masquerade
 
-vyos_router_static_routes:
-  - prefix: 0.0.0.0/0
-    next_hop: 10.73.66.1
+# The WAN DHCP lease supplies its default route; do not configure a static
+# upstream gateway. These exact commands are removed when migrating the
+# previously managed static WAN configuration.
+vyos_router_static_routes: []
+vyos_router_legacy_wan_commands:
+  - set interfaces ethernet eth1 address '10.73.66.50/24'
+  - set protocols static route 0.0.0.0/0 next-hop 10.73.66.1
+  - set service ssh listen-address '10.73.66.50'
 
 vyos_router_dhcp:
   shared_network_name: BR-LAB
@@ -70,8 +75,9 @@ vyos_router_ntp_servers:
   - time3.vyos.net
 
 vyos_router_ssh:
-  listen_addresses:
-    - 10.73.66.50
+  # An empty list leaves SSH listening on all router addresses, including the
+  # dynamically assigned WAN address. Access remains key-only.
+  listen_addresses: []
   port: 22
 
 vyos_router_config_management_commit_revisions: 100

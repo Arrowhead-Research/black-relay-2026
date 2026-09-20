@@ -1,3 +1,6 @@
+{% for command in vyos_router_legacy_wan_commands %}
+delete {{ command | regex_replace('^set ', '') }}
+{% endfor %}
 {% for interface in vyos_router_ethernet_interfaces %}
 set interfaces ethernet {{ interface.name }} address '{{ interface.address }}'
 set interfaces ethernet {{ interface.name }} description '{{ interface.description }}'

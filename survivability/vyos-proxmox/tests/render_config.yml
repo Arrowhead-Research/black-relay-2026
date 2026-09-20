@@ -22,7 +22,7 @@
           {{ lookup('ansible.builtin.template',
                     '../roles/vyos_router/templates/vyos_config.set.j2') }}
 
-    - name: Parse rendered set commands
+    - name: Parse the migration set commands
       ansible.builtin.command:
         argv:
           - python3

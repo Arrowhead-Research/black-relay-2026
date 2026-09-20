@@ -33,7 +33,7 @@
       - ecdsa-sha2-nistp521
       - ssh-ed25519
 
-- name: Apply the key-only SSH configuration
+- name: Apply the router configuration
   vyos.vyos.vyos_config:
     src: vyos_config.set.j2
     match: line
