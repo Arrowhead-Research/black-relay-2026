@@ -33,9 +33,10 @@
       - ecdsa-sha2-nistp521
       - ssh-ed25519
 
-- name: Apply and save the key-only SSH configuration
+- name: Apply the key-only SSH configuration
   vyos.vyos.vyos_config:
     src: vyos_config.set.j2
     match: line
-    save: true
+    save: false
     comment: Managed by Ansible role vyos_router
+  notify: Save VyOS configuration

@@ -22,8 +22,9 @@ The current default route is via `10.73.66.1` on the WAN network. Proxmox must
 present the two NICs with the MAC addresses and bridge attachment expected by
 this table before the role is used.
 
-The role ensures its commands exist and saves the active configuration to disk.
-It does not purge unrelated commands already on the router.
+The role ensures its commands exist. When it changes the active configuration,
+a handler saves it to disk. It does not purge unrelated commands already on the
+router.
 
 ## Authentication model
 
@@ -115,5 +116,7 @@ key-authenticated connection without `--ask-pass`:
 ansible-playbook site.yml --check --diff --limit vyos
 ```
 
-The final check should report no changes. The role does not remove unlisted
-public keys in this initial implementation.
+The final check should report no changes. Applying and saving are separate so a
+VyOS `compare saved` output-format difference cannot create a false-positive
+change on an already converged router. The role does not remove unlisted public
+keys in this initial implementation.
