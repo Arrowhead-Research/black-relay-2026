@@ -1,0 +1,28 @@
+---
+# Workstation-specific connection details only. Copy this file to the trusted
+# operator workstation and replace every placeholder there. Reviewable,
+# non-secret desired state lives in production-vars.yml; secrets live in SOPS.
+# Never commit production host details or private-key paths.
+all:
+  children:
+    identity_stack:
+      hosts:
+        identity_production:
+          ansible_host: "REPLACE_WITH_PRODUCTION_IPV4_OR_DNS_NAME"
+          ansible_port: 22
+
+          # The existing manual/FIDO2 identity remains an optional manual login
+          # key; Ansible does not use it as its connection identity.
+          operator_access_manual_ssh_private_key_file: >-
+            /ABSOLUTE/PATH/TO/REPLACE_WITH_CURRENT_OPERATOR_SSH_IDENTITY
+
+          # Both bootstrap and normal site.yml runs use this non-interactive key.
+          operator_access_ansible_ssh_private_key_file: &ansible_ssh_identity >-
+            /ABSOLUTE/PATH/TO/REPLACE_WITH_DEDICATED_ANSIBLE_SSH_IDENTITY
+
+          ansible_user: root
+          ansible_ssh_private_key_file: *ansible_ssh_identity
+          ansible_python_interpreter: /usr/bin/python3
+          ansible_ssh_common_args: >-
+            -o IdentitiesOnly=yes
+            -o PasswordAuthentication=no

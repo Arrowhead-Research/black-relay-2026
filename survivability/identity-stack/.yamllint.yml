@@ -1,0 +1,26 @@
+---
+extends: default
+
+# SOPS ciphertext is opaque: long base64 lines with no document start. Its shape
+# is checked by tests/test_safety_invariants.py instead.
+ignore: |
+  *.sops.yml
+  **/*.sops.yml
+
+rules:
+  braces:
+    max-spaces-inside: 1
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: false
+  line-length:
+    max: 100
+    level: warning
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true
+  truthy:
+    allowed-values:
+      - "true"
+      - "false"
+    check-keys: false

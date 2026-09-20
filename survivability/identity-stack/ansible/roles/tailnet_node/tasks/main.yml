@@ -1,0 +1,184 @@
+---
+- name: Validate tailnet node settings
+  ansible.builtin.assert:
+    that:
+      - tailnet_node_hostname | length > 0
+      - tailnet_node_tag is match('^tag:[a-z0-9-]+$')
+      - tailnet_node_package_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+      - tailnet_node_keyring_sha256 is match('^[0-9a-f]{64}$')
+      - tailnet_node_keyring_url.startswith('https://')
+      - tailnet_node_repository_url.startswith('https://')
+      - tailnet_node_ssh is boolean
+      - tailnet_node_accept_dns is boolean
+      - tailnet_node_accept_routes is boolean
+    fail_msg: "Tailnet node variables are invalid."
+
+# Pinned by digest. get_url compares the checksum before replacing anything, so
+# a rotated or substituted key fails here rather than signing an unreviewed
+# package set, and an unchanged key is a no-op on every later run.
+- name: Install the reviewed Tailscale archive key
+  ansible.builtin.get_url:
+    url: "{{ tailnet_node_keyring_url }}"
+    dest: "{{ tailnet_node_keyring_path }}"
+    checksum: "sha256:{{ tailnet_node_keyring_sha256 }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure the signed Tailscale package source
+  ansible.builtin.template:
+    src: tailscale.list.j2
+    dest: "{{ tailnet_node_repository_list_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Read installed package versions
+  ansible.builtin.package_facts:
+    manager: apt
+
+- name: Select the installed Tailscale versions
+  ansible.builtin.set_fact:
+    tailnet_node_installed_versions: >-
+      {{ ansible_facts.packages.tailscale | default([])
+      | map(attribute='version') | list }}
+
+# The package is held so neither unattended-upgrades nor an incidental
+# `apt upgrade` can move the client past what this Headscale understands. The
+# hold also blocks a reviewed version change, so it is released only when the
+# installed version is not the pinned one, leaving a converged host unchanged.
+- name: Release the Tailscale hold to apply a reviewed version change
+  ansible.builtin.dpkg_selections:
+    name: tailscale
+    selection: install
+  when:
+    - tailnet_node_installed_versions | length > 0
+    - tailnet_node_package_version not in tailnet_node_installed_versions
+
+- name: Install the pinned Tailscale client
+  ansible.builtin.apt:
+    name: "tailscale={{ tailnet_node_package_version }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    allow_downgrade: true
+
+- name: Hold the Tailscale client at the reviewed version
+  ansible.builtin.dpkg_selections:
+    name: tailscale
+    selection: hold
+
+- name: Enable the Tailscale daemon
+  ansible.builtin.systemd_service:
+    name: tailscaled
+    enabled: true
+    state: started
+
+# `tailscale status` exits non-zero whenever the node is not carrying traffic,
+# including the ordinary not-yet-enrolled case, so the exit status is ignored
+# and the reported backend state is what decides.
+- name: Read the current tailnet state
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/tailscale
+      - status
+      - --json
+  register: tailnet_node_status_raw
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Select the tailnet state
+  ansible.builtin.set_fact:
+    tailnet_node_state: >-
+      {{ tailnet_node_status_raw.stdout | from_json
+      if tailnet_node_status_raw.stdout | trim | first | default('') == '{'
+      else {} }}
+
+- name: Select the node registration facts
+  ansible.builtin.set_fact:
+    tailnet_node_registered: >-
+      {{ tailnet_node_state.BackendState | default('NoState')
+      not in tailnet_node_unregistered_states }}
+    tailnet_node_assigned_tags: "{{ tailnet_node_state.Self.Tags | default([]) }}"
+
+# Enrollment is deliberately not automated: the preauthorized key is
+# short-lived and single-use, and it is generated just in time by an operator
+# on the host. Everything above is still applied, so enrolling afterwards needs
+# no package work. See docs/runbooks/service-deployment.md.
+- name: Report that the node is installed but not yet enrolled
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: tailscaled is installed and running but this host has not joined
+      the tailnet (backend state
+      {{ tailnet_node_state.BackendState | default('NoState') }}). Enroll it
+      with a just-in-time key carrying {{ tailnet_node_tag }}, then converge
+      again; see "Enroll the VPS" in docs/runbooks/service-deployment.md.
+  when: not tailnet_node_registered | bool
+
+- name: Converge an enrolled tailnet node
+  when: tailnet_node_registered | bool
+  block:
+    - name: Read the current tailnet preferences
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/tailscale
+          - debug
+          - prefs
+      register: tailnet_node_prefs_raw
+      changed_when: false
+      check_mode: false
+
+    - name: Select the tailnet preferences
+      ansible.builtin.set_fact:
+        tailnet_node_prefs: "{{ tailnet_node_prefs_raw.stdout | from_json }}"
+
+    # `tailscale set` is applied only on drift so that a converged host reports
+    # no change, and so that the diff of a run says plainly when the daemon's
+    # own stored preferences had moved away from what this role declares.
+    - name: Apply the declared tailnet preferences
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/tailscale
+          - set
+          - "--ssh={{ tailnet_node_ssh | bool | lower }}"
+          - "--accept-dns={{ tailnet_node_accept_dns | bool | lower }}"
+          - "--accept-routes={{ tailnet_node_accept_routes | bool | lower }}"
+          - "--hostname={{ tailnet_node_hostname }}"
+      when: >-
+        tailnet_node_prefs.RunSSH | default(false) != tailnet_node_ssh | bool
+        or tailnet_node_prefs.CorpDNS | default(false) != tailnet_node_accept_dns | bool
+        or tailnet_node_prefs.RouteAll | default(false) != tailnet_node_accept_routes | bool
+        or tailnet_node_prefs.Hostname | default('') != tailnet_node_hostname
+      changed_when: true
+
+    # A node that enrolled with an untagged key is authorized as whoever ran
+    # `tailscale up`, not as infrastructure: the grant and the SSH rule written
+    # for the tag do not reach it, and offboarding that person would remove it.
+    # Re-enroll it rather than widening the policy to cover the mistake.
+    - name: Require the node to be owned by its declared tag
+      ansible.builtin.assert:
+        that:
+          - tailnet_node_tag in tailnet_node_assigned_tags
+        fail_msg: >-
+          This node carries tags {{ tailnet_node_assigned_tags | default([]) }}
+          rather than {{ tailnet_node_tag }}. Delete the node in Headscale and
+          re-enroll it with a preauthorized key created with
+          --tags {{ tailnet_node_tag }} and no --user.
+      tags: verify
+
+    # Registered but not Running means someone ran `tailscale down`, or the
+    # daemon cannot reach the control server. Either way the node is enrolled
+    # and carrying nothing, which is exactly the state a silent check misses.
+    - name: Require the node to be carrying tailnet traffic
+      ansible.builtin.assert:
+        that:
+          - tailnet_node_state.BackendState | default('NoState') == 'Running'
+          - tailnet_node_state.Self.TailscaleIPs | default([]) | length > 0
+        fail_msg: >-
+          The node is enrolled but its backend state is
+          {{ tailnet_node_state.BackendState | default('NoState') }} rather than
+          Running, so Tailscale SSH cannot be reached. Check
+          `systemctl status tailscaled` and that the host can reach the
+          Headscale control server over TCP 443.
+      tags: verify

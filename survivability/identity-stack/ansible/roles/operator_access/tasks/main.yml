@@ -1,0 +1,178 @@
+---
+- name: Validate the operator access model
+  ansible.builtin.assert:
+    that:
+      - operator_access_user is match('^[a-z_][a-z0-9_-]{0,31}$')
+      - operator_access_user not in ['root', 'debian']
+      - operator_access_manual_ssh_private_key_file is match('^/.+')
+      - operator_access_ansible_ssh_private_key_file is match('^/.+')
+      - >-
+        operator_access_manual_ssh_private_key_file !=
+        operator_access_ansible_ssh_private_key_file
+      - operator_access_allow_root_ssh is boolean
+    fail_msg: >-
+      Operator access requires one valid named account and distinct absolute
+      paths for its manual and dedicated Ansible SSH identities.
+
+- name: Validate the tailnet-only operator accounts
+  ansible.builtin.assert:
+    that:
+      - item.name | default('') is match('^[a-z_][a-z0-9_-]{0,31}$')
+      - item.name | default('') not in ['root', 'debian', operator_access_user]
+      - item.sudo | default(none) is boolean
+    fail_msg: >-
+      Each tailnet operator needs a valid Unix name, distinct from root and
+      from the break-glass operator, and an explicit sudo boolean.
+  loop: "{{ operator_access_tailnet_operators }}"
+  loop_control:
+    label: "{{ item.name | default('unnamed') }}"
+
+- name: Require removed accounts to be absent from the active list
+  ansible.builtin.assert:
+    that:
+      - >-
+        operator_access_removed_users | intersect(
+        operator_access_tailnet_operators | map(attribute='name') | list)
+        | length == 0
+      - operator_access_user not in operator_access_removed_users
+    fail_msg: >-
+      An account cannot be both configured and removed in the same run.
+
+- name: Read operator public keys from the trusted workstation
+  ansible.builtin.set_fact:
+    operator_access_public_keys:
+      - >-
+        {{ lookup('ansible.builtin.file',
+        operator_access_manual_ssh_private_key_file + '.pub') | trim }}
+      - >-
+        {{ lookup('ansible.builtin.file',
+        operator_access_ansible_ssh_private_key_file + '.pub') | trim }}
+
+- name: Validate each operator public key
+  ansible.builtin.assert:
+    that:
+      - item.splitlines() | length == 1
+      - item is not search('PRIVATE KEY')
+      - >-
+        item is match(
+        '^(ssh-ed25519|sk-ssh-ed25519@openssh.com|'
+        ~ 'ecdsa-sha2-nistp(256|384|521)|sk-ecdsa-sha2-nistp256@openssh.com|'
+        ~ 'ssh-rsa) [A-Za-z0-9+/=]+( .*)?$')
+    fail_msg: >-
+      Each configured identity must have an adjacent .pub file containing
+      exactly one valid OpenSSH public key.
+  loop: "{{ operator_access_public_keys }}"
+  loop_control:
+    label: "operator public key"
+
+- name: Require distinct manual and Ansible public keys
+  ansible.builtin.assert:
+    that:
+      - operator_access_public_keys | unique | length == 2
+    fail_msg: "The dedicated Ansible SSH key must differ from the manual key."
+
+- name: Install access-control packages
+  ansible.builtin.apt:
+    name:
+      - openssh-server
+      - sudo
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the operator group
+  ansible.builtin.group:
+    name: "{{ operator_access_group }}"
+    system: true
+    state: present
+
+- name: Create the named operator account
+  ansible.builtin.user:
+    name: "{{ operator_access_user }}"
+    comment: "Survivability operator"
+    groups: "{{ operator_access_group }}"
+    append: true
+    create_home: true
+    shell: /bin/bash
+    password_lock: true
+    state: present
+
+- name: Install the operator's manual and Ansible public keys exclusively
+  ansible.posix.authorized_key:
+    user: "{{ operator_access_user }}"
+    key: "{{ operator_access_public_keys | join('\n') }}"
+    exclusive: true
+    manage_dir: true
+    state: present
+
+# Supplementary group membership is set exactly rather than appended, so
+# revoking sudo is a one-word change to the inventory entry.
+- name: Create the tailnet-only operator accounts
+  ansible.builtin.user:
+    name: "{{ item.name }}"
+    comment: "Survivability operator (Tailscale SSH only)"
+    groups: "{{ [operator_access_group] if item.sudo | bool else [] }}"
+    append: false
+    create_home: true
+    shell: /bin/bash
+    password_lock: true
+    state: present
+  loop: "{{ operator_access_tailnet_operators }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: operator_access_tailnet_accounts
+
+# Tailscale SSH authenticates in tailscaled and never consults this file, so an
+# authorized_keys here would grant nothing over the tailnet and everything over
+# the public port. Removing it is what makes these accounts tailnet-only, and
+# it also reverts a key added out of band.
+- name: Keep the tailnet-only accounts off the public SSH path
+  ansible.builtin.file:
+    path: "{{ item.home | default('/home/' ~ item.item.name) }}/.ssh/authorized_keys"
+    state: absent
+  loop: "{{ operator_access_tailnet_accounts.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Remove offboarded accounts and their home directories
+  ansible.builtin.user:
+    name: "{{ item }}"
+    state: absent
+    remove: true
+    force: true
+  loop: "{{ operator_access_removed_users }}"
+
+- name: Allow the operator to elevate without a shared password
+  ansible.builtin.copy:
+    dest: /etc/sudoers.d/survivability-admins
+    owner: root
+    group: root
+    mode: "0440"
+    content: "%{{ operator_access_group }} ALL=(ALL:ALL) NOPASSWD: ALL\n"
+    validate: /usr/sbin/visudo -cf %s
+
+- name: Render managed SSH access policy
+  ansible.builtin.template:
+    src: sshd-operator-access.conf.j2
+    # This sorts before the gold-image baseline because OpenSSH uses the first
+    # value obtained for these global keywords.
+    dest: /etc/ssh/sshd_config.d/00-survivability-access.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Validate and reload sshd
+
+- name: Validate and activate SSH policy before changing bootstrap access
+  ansible.builtin.meta: flush_handlers
+
+- name: Remove the bootstrap root authorized key
+  ansible.builtin.file:
+    path: /root/.ssh/authorized_keys
+    state: absent
+  when: not operator_access_allow_root_ssh | bool
+
+- name: Lock the root password
+  ansible.builtin.user:
+    name: root
+    password_lock: true
+  when: not operator_access_allow_root_ssh | bool

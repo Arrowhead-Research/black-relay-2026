@@ -1,0 +1,45 @@
+#!/usr/sbin/nft -f
+# Managed by Ansible. Local edits will be overwritten.
+# Manage only this table; never flush Docker's tables or the complete ruleset.
+table inet survivability_filter
+flush table inet survivability_filter
+
+table inet survivability_filter {
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        meta nfproto ipv6 drop
+        iifname "lo" accept
+        ct state invalid drop
+        ct state { established, related } accept
+        ip protocol icmp icmp type {
+            destination-unreachable,
+            echo-request,
+            parameter-problem,
+            time-exceeded
+        } accept
+        tcp dport { 22, 80, 443 } ct state new accept
+        counter drop
+    }
+
+    # Docker-published traffic traverses forward after destination NAT and does
+    # not traverse the host input chain. This earlier hook permits only the
+    # public edge ports and drops every other Docker DNAT before Docker accepts
+    # it in its own chains. Containers may initiate outbound traffic, but
+    # Docker's later chains still enforce its own bridge isolation policy.
+    chain forward_guard {
+        type filter hook forward priority filter - 1; policy drop;
+
+        ct state invalid drop
+        ct state { established, related } accept
+        ct status dnat meta l4proto tcp ct original proto-dst { 80, 443 } accept
+        ct status dnat drop
+        iifname "docker0" accept
+        iifname "br-*" accept
+        counter drop
+    }
+
+    chain output {
+        type filter hook output priority filter; policy accept;
+    }
+}

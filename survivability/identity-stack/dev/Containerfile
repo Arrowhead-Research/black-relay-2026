@@ -1,0 +1,162 @@
+FROM node:24-trixie-slim@sha256:50c3b2f6988dfc307b86e5301d69611af31f4789bdf232863b07d3b02fe55ae0
+
+ARG TARGETARCH=amd64
+ARG PI_VERSION=0.85.1
+ARG PI_WEB_VERSION=1.202609.0
+ARG PI_WEB_ACCESS_VERSION=0.28.0
+ARG SOPS_VERSION=3.13.3
+ARG AGE_VERSION=1.3.2
+ARG YQ_VERSION=4.53.6
+ARG PACKER_VERSION=1.16.0
+ARG OPENTOFU_VERSION=1.12.6
+ARG DOCKER_CLI_VERSION=5:29.8.0-1~debian.13~trixie
+ARG DOCKER_COMPOSE_VERSION=5.5.1-1~debian.13~trixie
+
+LABEL org.opencontainers.image.title="Hetzner identity Pi development environment"
+LABEL org.opencontainers.image.description="Credential-free Pi Web and Ansible workspace"
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+ENV ANSIBLE_COLLECTIONS_PATH=/usr/share/ansible/collections
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        curl \
+        dumb-init \
+        g++ \
+        git \
+        gnupg \
+        jq \
+        ldap-utils \
+        make \
+        openssh-client \
+        python3 \
+        python3-pip \
+        python3-venv \
+        ripgrep \
+        rsync \
+        shellcheck \
+        tar \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg \
+        -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && printf '%s\n' \
+        'Types: deb' \
+        'URIs: https://download.docker.com/linux/debian' \
+        'Suites: trixie' \
+        'Components: stable' \
+        "Architectures: $(dpkg --print-architecture)" \
+        'Signed-By: /etc/apt/keyrings/docker.asc' \
+        > /etc/apt/sources.list.d/docker.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        "docker-ce-cli=${DOCKER_CLI_VERSION}" \
+        "docker-compose-plugin=${DOCKER_COMPOSE_VERSION}" \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY dev/requirements.txt /tmp/requirements.txt
+COPY dev/ansible-requirements.yml /tmp/ansible-requirements.yml
+
+RUN python3 -m venv "${VIRTUAL_ENV}" \
+    && pip install --no-cache-dir --requirement /tmp/requirements.txt \
+    && ansible-galaxy collection install \
+        --requirements-file /tmp/ansible-requirements.yml \
+        --collections-path "${ANSIBLE_COLLECTIONS_PATH}" \
+    && rm -f /tmp/requirements.txt /tmp/ansible-requirements.yml
+
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+        amd64) \
+            sops_sha='e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b'; \
+            age_sha='cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10'; \
+            yq_sha='c5f056448f973ae7d39b5401949648a78f2dc1947d6a8eb65be60d5c504b9385'; \
+            packer_sha='5edcd14ab59b535040c512dbecd6ec9ef976a000b073c19d93e4c431c948581e'; \
+            tofu_sha='5dc43da4f750f33873dc25e94587128709e819e544b7be9016b255316153c3a8'; \
+            ;; \
+        arm64) \
+            sops_sha='53b0abacd38ef1b12a66d6c100956691b9cefce018d91f81e73ddf7438b94d77'; \
+            age_sha='6b8dc4333c53a5a57c9e5834e3a48f92605d7154014cd07269ff3327db5d37f4'; \
+            yq_sha='88a1016bc1d657375a35864e4f44b6f333df8ff97b559f51bba0adcb2169df09'; \
+            packer_sha='cf18f03460d92265d49b56befff333e80641d845822799eab04357c39f75b5d7'; \
+            tofu_sha='e573979ba68a17fe7b881752051a694a7efcd970e39521f6a25775197861ed4d'; \
+            ;; \
+        *) \
+            printf 'Unsupported architecture: %s\n' "${TARGETARCH}" >&2; \
+            exit 1; \
+            ;; \
+    esac; \
+    curl -fsSL \
+        "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.${TARGETARCH}" \
+        -o /tmp/sops; \
+    printf '%s  %s\n' "${sops_sha}" /tmp/sops | sha256sum --check --strict; \
+    install -m 0755 /tmp/sops /usr/local/bin/sops; \
+    curl -fsSL \
+        "https://github.com/FiloSottile/age/releases/download/v${AGE_VERSION}/age-v${AGE_VERSION}-linux-${TARGETARCH}.tar.gz" \
+        -o /tmp/age.tar.gz; \
+    printf '%s  %s\n' "${age_sha}" /tmp/age.tar.gz | sha256sum --check --strict; \
+    tar -xzf /tmp/age.tar.gz -C /tmp; \
+    install -m 0755 /tmp/age/age /usr/local/bin/age; \
+    install -m 0755 /tmp/age/age-keygen /usr/local/bin/age-keygen; \
+    curl -fsSL \
+        "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_${TARGETARCH}" \
+        -o /tmp/yq; \
+    printf '%s  %s\n' "${yq_sha}" /tmp/yq | sha256sum --check --strict; \
+    install -m 0755 /tmp/yq /usr/local/bin/yq; \
+    curl -fsSL \
+        "https://releases.hashicorp.com/packer/${PACKER_VERSION}/packer_${PACKER_VERSION}_linux_${TARGETARCH}.zip" \
+        -o /tmp/packer.zip; \
+    printf '%s  %s\n' "${packer_sha}" /tmp/packer.zip | sha256sum --check --strict; \
+    python3 -m zipfile -e /tmp/packer.zip /tmp/packer; \
+    install -m 0755 /tmp/packer/packer /usr/local/bin/packer; \
+    curl -fsSL \
+        "https://github.com/opentofu/opentofu/releases/download/v${OPENTOFU_VERSION}/tofu_${OPENTOFU_VERSION}_linux_${TARGETARCH}.zip" \
+        -o /tmp/tofu.zip; \
+    printf '%s  %s\n' "${tofu_sha}" /tmp/tofu.zip | sha256sum --check --strict; \
+    python3 -m zipfile -e /tmp/tofu.zip /tmp/tofu; \
+    install -m 0755 /tmp/tofu/tofu /usr/local/bin/tofu; \
+    rm -rf \
+        /tmp/age \
+        /tmp/age.tar.gz \
+        /tmp/packer \
+        /tmp/packer.zip \
+        /tmp/sops \
+        /tmp/tofu \
+        /tmp/tofu.zip \
+        /tmp/yq
+
+RUN npm install --global --ignore-scripts \
+        "@earendil-works/pi-coding-agent@${PI_VERSION}" \
+    && npm install --global --allow-scripts=node-pty \
+        "@jmfederico/pi-web@${PI_WEB_VERSION}" \
+    && npm cache clean --force
+
+RUN usermod --login pi --home /home/pi --move-home node \
+    && groupmod --new-name pi node \
+    && mkdir -p \
+        /home/pi/.config/pi-web \
+        /home/pi/.pi/agent \
+        /home/pi/.pi-web \
+        /workspace \
+    && chown -R pi:pi /home/pi /workspace
+
+COPY --chown=pi:pi dev/pi-web-config.json /home/pi/.config/pi-web/config.json
+COPY --chown=pi:pi --chmod=0755 dev/entrypoint.sh /usr/local/bin/pi-entrypoint
+COPY --chown=pi:pi --chmod=0755 dev/doctor.sh /usr/local/bin/dev-doctor
+COPY --chown=pi:pi dev/pi-skills/ /home/pi/.agents/skills/
+
+USER pi
+
+RUN pi install "npm:pi-web-access@${PI_WEB_ACCESS_VERSION}" \
+    && npm cache clean --force
+
+WORKDIR /workspace
+
+EXPOSE 8504
+
+ENTRYPOINT ["dumb-init", "--", "/usr/local/bin/pi-entrypoint"]

@@ -1,0 +1,104 @@
+---
+- name: Inspect the LLDAP container process
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/docker
+      - inspect
+      - --format
+      - "{{ '{{.State.Pid}}' }}"
+      - survivability-lldap
+  register: identity_stack_lldap_pid
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Prove the bind account can read required identity attributes
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/nsenter
+      - --target
+      - "{{ identity_stack_lldap_pid.stdout }}"
+      - --net
+      - /usr/bin/ldapsearch
+      - -x
+      - -H
+      - ldap://127.0.0.1:3890
+      - -D
+      - >-
+        uid={{ identity_stack_pocket_id_bind_username }},ou=people,{{ lldap_base_dn }}
+      - -y
+      - "{{ identity_stack_bind_password_file }}"
+      - -b
+      - "{{ lldap_base_dn }}"
+      - "(uid={{ lldap_admin_username }})"
+      - uid
+      - uuid
+      - mail
+      - givenName
+      - sn
+      - displayName
+    stdin_add_newline: false
+  changed_when: false
+  when: not ansible_check_mode
+  no_log: true
+  diff: false
+
+- name: Render a no-state-change LDAP authorization probe
+  ansible.builtin.copy:
+    dest: "{{ identity_stack_readonly_probe_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      dn: uid={{ identity_stack_pocket_id_bind_username }},ou=people,{{ lldap_base_dn }}
+      changetype: modify
+      replace: displayName
+      displayName: Pocket ID LDAP bind
+  changed_when: false
+
+- name: Prove the Pocket ID bind account cannot modify LLDAP
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/nsenter
+      - --target
+      - "{{ identity_stack_lldap_pid.stdout }}"
+      - --net
+      - /usr/bin/ldapmodify
+      - -x
+      - -H
+      - ldap://127.0.0.1:3890
+      - -D
+      - >-
+        uid={{ identity_stack_pocket_id_bind_username }},ou=people,{{ lldap_base_dn }}
+      - -y
+      - "{{ identity_stack_bind_password_file }}"
+      - -f
+      - "{{ identity_stack_readonly_probe_file }}"
+  register: identity_stack_readonly_probe
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+  no_log: true
+  diff: false
+
+# A non-zero exit alone does not prove anything: a failed bind also exits
+# non-zero, so the control would pass on a host where the account cannot
+# authenticate at all. The write must be refused by an authorization decision.
+- name: Refuse a writable Pocket ID bind account
+  ansible.builtin.assert:
+    that:
+      - identity_stack_readonly_probe.rc | int
+        in identity_stack_readonly_refusal_codes
+    fail_msg: >-
+      The Pocket ID bind account did not have an LDAP modify refused on
+      authorization grounds; ldapmodify exited
+      {{ identity_stack_readonly_probe.rc }}. Exit 0 means the account is
+      writable. Exit 49 means it could not bind, so read-only access was never
+      proven. Service deployment is stopped until strict read-only access is
+      demonstrated.
+  when: not ansible_check_mode
+
+- name: Remove the local authorization probe file
+  ansible.builtin.file:
+    path: "{{ identity_stack_readonly_probe_file }}"
+    state: absent
+  changed_when: false

@@ -1,0 +1,32 @@
+---
+- name: Converge the requested identity Compose services
+  community.docker.docker_compose_v2:
+    project_src: "{{ identity_stack_root }}"
+    files:
+      - "{{ identity_stack_compose_file | basename }}"
+    state: present
+    pull: missing
+    remove_orphans: true
+    wait: true
+    wait_timeout: 180
+  when: not ansible_check_mode
+
+- name: Verify Headscale health after full convergence
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/docker
+      - compose
+      - --project-directory
+      - "{{ identity_stack_root }}"
+      - --file
+      - "{{ identity_stack_compose_file }}"
+      - exec
+      - --no-TTY
+      - headscale
+      - headscale
+      - health
+  changed_when: false
+  when:
+    - not identity_stack_bootstrap_only | bool
+    - not ansible_check_mode
+  tags: verify

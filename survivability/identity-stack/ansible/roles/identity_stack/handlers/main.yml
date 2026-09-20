@@ -1,0 +1,26 @@
+---
+# Compose recreates a container when its own model changes, not when the
+# contents of a bind-mounted file change, and Headscale reads both its
+# configuration and its policy only at startup. Without this handler an edited
+# policy reaches the host and is never applied, which presents as a policy
+# change that silently has no effect.
+#
+# This restarts rather than signalling the running process: whether file-mode
+# policy is re-read on SIGHUP depends on the Headscale version, and a restart
+# is unambiguous. The cost is a short coordination outage; existing tunnels are
+# unaffected, but node registration and reauthentication pause until Headscale
+# is healthy again.
+- name: Restart Headscale
+  community.docker.docker_compose_v2:
+    project_src: "{{ identity_stack_root }}"
+    files:
+      - "{{ identity_stack_compose_file | basename }}"
+    services:
+      - headscale
+    dependencies: false
+    state: restarted
+    wait: true
+    wait_timeout: 120
+  when:
+    - not identity_stack_bootstrap_only | bool
+    - not ansible_check_mode

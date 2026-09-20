@@ -1,0 +1,4 @@
+---
+# Seconds before the scheduled rollback restores the last-known-good policy.
+# The activation block cancels it only after a fresh SSH connection succeeds.
+host_firewall_rollback_seconds: 120

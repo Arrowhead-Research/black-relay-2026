@@ -1,0 +1,58 @@
+# Local development tooling
+.pi/
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.agekey
+secrets.yml
+vault.yml
+
+# Decrypted or generated secret material
+*.decrypted
+*.dec
+*.plaintext
+backups/
+
+# Ansible runtime files
+.ansible/
+*.retry
+collections/ansible_collections/
+
+# Python and tooling caches
+__pycache__/
+*.py[cod]
+.cache/
+.pytest_cache/
+.ruff_cache/
+
+# OpenTofu/Packer runtime data and plans must never be committed
+.terraform/
+.terraform.tfstate.lock.info
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+*.pkrvars.hcl
+!*.pkrvars.hcl.example
+tofu/backend.hcl
+crash.log
+crash.*.log
+packer_cache/
+packer-output/
+operator-output/
+
+# Editor and OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Decrypted tooling credentials must never be committed
+secrets/*.plain.env

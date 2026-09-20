@@ -1,0 +1,12 @@
+# Managed by Ansible. Weekly verification and freshness window; retention
+# pruning remains an explicit confirmed operator operation.
+[Unit]
+Description=Schedule the weekly Survivability restic verification
+
+[Timer]
+OnCalendar={{ backup_restic_maintenance_oncalendar }} UTC
+RandomizedDelaySec={{ backup_restic_maintenance_randomized_delay }}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
