@@ -23,6 +23,9 @@ set firewall ipv4 input filter rule {{ rule.number }} inbound-interface name '{{
 {% if rule.protocol is defined %}
 set firewall ipv4 input filter rule {{ rule.number }} protocol '{{ rule.protocol }}'
 {% endif %}
+{% if rule.source_address is defined %}
+set firewall ipv4 input filter rule {{ rule.number }} source address '{{ rule.source_address }}'
+{% endif %}
 {% if rule.destination_port is defined %}
 set firewall ipv4 input filter rule {{ rule.number }} destination port '{{ rule.destination_port }}'
 {% endif %}

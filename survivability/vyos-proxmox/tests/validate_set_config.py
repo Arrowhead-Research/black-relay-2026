@@ -17,14 +17,14 @@ def main() -> None:
     lines = [line.strip() for line in sys.stdin if line.strip()]
     if not lines:
         fail("rendered configuration is empty")
-    if len(lines) != 114:
-        fail(f"expected 114 commands from the VLAN baseline, got {len(lines)}")
+    if len(lines) != 159:
+        fail(f"expected 159 commands from the routed VLAN baseline, got {len(lines)}")
     if len(lines) != len(set(lines)):
         fail("rendered configuration contains duplicate commands")
 
     normalized = "\n".join(lines) + "\n"
     expected_digest = (
-        "149e4c282226a9caeb5fb9eb8a6c0776cfc348f6cf79c6828a4d098a233d6c35"
+        "d146e22e00e7b2e6d228669399d09cfd5264099e9403879d5ba29fd882e4d0fe"
     )
     actual_digest = hashlib.sha256(normalized.encode()).hexdigest()
     if actual_digest != expected_digest:
@@ -48,9 +48,14 @@ def main() -> None:
         "delete service ssh listen-address '10.73.66.50'",
         "set interfaces ethernet eth1 address 'dhcp'",
         "set interfaces ethernet eth0 vif 200 address '10.73.200.1/24'",
+        "set interfaces ethernet eth0 vif 210 address '10.73.210.1/29'",
         "set nat source rule 200 source address '10.73.200.0/24'",
         "set nat source rule 200 outbound-interface name 'eth1'",
         "set nat source rule 200 translation address 'masquerade'",
+        "set nat source rule 210 source address '10.73.210.2/32'",
+        "set nat source rule 210 outbound-interface name 'eth1'",
+        "set nat source rule 210 translation address 'masquerade'",
+        "set protocols static route 100.64.0.0/10 next-hop 10.73.210.2",
         "set service dhcp-server shared-network-name ISOLATED-TEST-VLAN-200 subnet 10.73.200.0/24 option default-router '10.73.200.1'",
         "set service dhcp-server shared-network-name ISOLATED-TEST-VLAN-200 subnet 10.73.200.0/24 option name-server '10.73.200.1'",
         "set service dns forwarding allow-from '10.73.200.0/24'",
@@ -58,6 +63,25 @@ def main() -> None:
         "set firewall ipv4 input filter rule 20000 destination port '67'",
         "set firewall ipv4 input filter rule 20010 destination port '53'",
         "set firewall ipv4 input filter rule 20090 action 'drop'",
+        "set firewall ipv4 input filter rule 21000 inbound-interface name 'eth0.210'",
+        "set firewall ipv4 input filter rule 21000 source address '10.73.210.2/32'",
+        "set firewall ipv4 input filter rule 21000 protocol 'icmp'",
+        "set firewall ipv4 input filter rule 21090 inbound-interface name 'eth0.210'",
+        "set firewall ipv4 input filter rule 21090 action 'drop'",
+        "set firewall ipv4 forward filter rule 18000 state established",
+        "set firewall ipv4 forward filter rule 18000 state related",
+        "set firewall ipv4 forward filter rule 18010 inbound-interface name 'eth0.210'",
+        "set firewall ipv4 forward filter rule 18010 outbound-interface name 'eth0.200'",
+        "set firewall ipv4 forward filter rule 18010 source address '100.64.0.0/10'",
+        "set firewall ipv4 forward filter rule 18010 destination address '10.73.200.0/24'",
+        "set firewall ipv4 forward filter rule 18020 inbound-interface name 'eth0.200'",
+        "set firewall ipv4 forward filter rule 18020 destination address '100.64.0.0/10'",
+        "set firewall ipv4 forward filter rule 18030 inbound-interface name 'eth0.210'",
+        "set firewall ipv4 forward filter rule 18030 source address '100.64.0.0/10'",
+        "set firewall ipv4 forward filter rule 18040 source address '10.73.210.2/32'",
+        "set firewall ipv4 forward filter rule 18040 outbound-interface name 'eth1'",
+        "set firewall ipv4 forward filter rule 18090 inbound-interface name 'eth0.210'",
+        "set firewall ipv4 forward filter rule 18090 action 'drop'",
         "set firewall ipv4 forward filter rule 20000 state established",
         "set firewall ipv4 forward filter rule 20000 state related",
         "set firewall ipv4 forward filter rule 20100 destination address '10.0.0.0/8'",
@@ -66,6 +90,8 @@ def main() -> None:
         "set firewall ipv4 forward filter rule 20200 source address '10.0.0.0/8'",
         "set firewall ipv4 forward filter rule 20210 source address '172.16.0.0/12'",
         "set firewall ipv4 forward filter rule 20220 source address '192.168.0.0/16'",
+        "set firewall ipv4 forward filter rule 20300 outbound-interface name 'eth0.200'",
+        "set firewall ipv4 forward filter rule 20300 action 'drop'",
         "set service ssh disable-password-authentication",
     }
     missing_commands = required_commands.difference(lines)
@@ -79,6 +105,11 @@ def main() -> None:
     for line in lines:
         if line.startswith(forbidden_prefixes):
             fail(f"static WAN state remains in desired configuration: {line}")
+        if (
+            line.startswith("set nat source rule ")
+            and "source address '100.64.0.0/10'" in line
+        ):
+            fail(f"tailnet client addresses must not be translated: {line}")
 
     expected_roots = {
         "firewall",

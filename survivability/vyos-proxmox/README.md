@@ -16,7 +16,8 @@ expected VM NIC identity is:
 | VyOS interface | MAC address | Purpose | Address |
 | --- | --- | --- | --- |
 | `eth0` | `bc:24:11:be:a9:5a` | `BR-LAB-LAN` | `10.73.100.1/24` |
-| `eth0.200` | inherited | Isolated test VLAN 200 | `10.73.200.1/24` |
+| `eth0.200` | inherited | Isolated Detection VLAN 200 | `10.73.200.1/24` |
+| `eth0.210` | inherited | Detection tailnet transit | `10.73.210.1/29` |
 | `eth1` | `bc:24:11:fd:0c:5e` | `WAN` and SSH management | DHCP |
 
 The WAN DHCP lease supplies both the address and default route; no static
@@ -42,9 +43,21 @@ established/related return traffic and public Internet destinations. In
 particular, VLAN 200 cannot reach the untagged `10.73.100.0/24` LAN, and that
 LAN cannot initiate connections into VLAN 200.
 
+A separate LXC on VLAN 210 (`10.73.210.2/29`) advertises only
+`10.73.200.0/24` to Headscale. Subnet-route SNAT is disabled, and VyOS routes
+the Headscale client prefix `100.64.0.0/10` back through that LXC. Explicit
+forward rules permit tailnet clients to initiate any IP protocol into VLAN 200,
+permit only established/related return traffic, prevent the LXC from becoming
+an exit node, and deny every other new flow into VLAN 200. Source NAT on VLAN
+210 covers only the LXC's own `10.73.210.2/32` WAN traffic; tailnet client
+addresses are never translated.
+
 The Proxmox bridge attached to `eth0` must be VLAN-aware. The VyOS virtual NIC
-must carry the trunk without a Proxmox VLAN tag; attach a test LXC to that bridge
-with VLAN tag `200`.
+must carry the trunk without a Proxmox VLAN tag; attach test workloads to that
+bridge with VLAN tag `200` and the dedicated subnet-router LXC with VLAN tag
+`210`. The subnet-router LXC must not have a VLAN 200 NIC. See
+[`docs/detection-subnet-router.md`](docs/detection-subnet-router.md) for the
+trusted-workstation rollout and verification procedure.
 
 ## Authentication model
 
@@ -73,6 +86,8 @@ repository or the Pi environment.
 - `roles/vyos_router/templates/vyos_config.set.j2` renders VyOS `set` commands.
 - `tests/render_config.yml` renders and parses the commands without contacting a
   router.
+- `docs/detection-subnet-router.md` covers the Proxmox/LXC side of the VLAN 200
+  route.
 
 ## Trusted-workstation setup
 
@@ -108,6 +123,10 @@ Do not configure `ansible_password` in inventory. Ansible should use the
 matching private key from the trusted workstation after the transition.
 
 ## Validate locally
+
+The role's routing and firewall syntax targets VyOS rolling release
+`2026.09.17.0028`. Record and review any version change before applying it to a
+new rolling image.
 
 The render test uses a fake public key and does not connect to VyOS:
 

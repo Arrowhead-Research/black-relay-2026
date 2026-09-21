@@ -27,6 +27,10 @@ vyos_router_ethernet_vifs:
     vlan_id: 200
     address: 10.73.200.1/24
     description: ISOLATED-TEST-VLAN-200
+  - parent: eth0
+    vlan_id: 210
+    address: 10.73.210.1/29
+    description: DETECTION-TAILNET-TRANSIT
 
 vyos_router_source_nat_rules:
   - number: 100
@@ -39,11 +43,21 @@ vyos_router_source_nat_rules:
     outbound_interface: eth1
     source_address: 10.73.200.0/24
     translation_address: masquerade
+  # This NAT covers only the dedicated router LXC's own control-plane and
+  # maintenance traffic. Tailnet client traffic retains its 100.64.0.0/10
+  # source address and is never translated on the path to VLAN 200.
+  - number: 210
+    description: DETECTION-TAILNET-TRANSIT router to WAN
+    outbound_interface: eth1
+    source_address: 10.73.210.2/32
+    translation_address: masquerade
 
 # The WAN DHCP lease supplies its default route; do not configure a static
-# upstream gateway. These exact commands are removed when migrating the
-# previously managed static WAN configuration.
-vyos_router_static_routes: []
+# upstream default gateway. The tailnet return route is required because the
+# dedicated subnet router deliberately disables subnet-route SNAT.
+vyos_router_static_routes:
+  - prefix: 100.64.0.0/10
+    next_hop: 10.73.210.2
 vyos_router_legacy_wan_commands:
   - set interfaces ethernet eth1 address '10.73.66.50/24'
   - set protocols static route 0.0.0.0/0 next-hop 10.73.66.1
@@ -83,9 +97,9 @@ vyos_router_dns_forwarding:
     - 8.8.4.4
     - 8.8.8.8
 
-# These rules are deliberately scoped to eth0.200 so the existing LAN and WAN
-# policy remain unchanged. Base-chain defaults remain accept; explicit drops
-# isolate VLAN 200 from all RFC1918 networks in both directions.
+# These rules are deliberately scoped to VLANs 200 and 210 so the existing LAN
+# and WAN policy remain unchanged. Base-chain defaults remain accept; explicit
+# rules make the new Detection path fail closed outside its intended route.
 vyos_router_firewall_ipv4_input_rules:
   - number: 20000
     action: accept
@@ -108,8 +122,54 @@ vyos_router_firewall_ipv4_input_rules:
     action: drop
     description: Deny other VLAN 200 access to VyOS
     inbound_interface: eth0.200
+  - number: 21000
+    action: accept
+    description: Allow detection subnet router ICMP diagnostics
+    inbound_interface: eth0.210
+    source_address: 10.73.210.2/32
+    protocol: icmp
+  - number: 21090
+    action: drop
+    description: Deny other transit VLAN access to VyOS
+    inbound_interface: eth0.210
 
 vyos_router_firewall_ipv4_forward_rules:
+  # Return traffic toward both the Tailscale clients and the router LXC must be
+  # accepted before the transit-interface catch-all drop below.
+  - number: 18000
+    action: accept
+    description: Allow established traffic toward detection transit
+    outbound_interface: eth0.210
+    states:
+      - established
+      - related
+  - number: 18010
+    action: accept
+    description: Allow tailnet clients to VLAN 200
+    inbound_interface: eth0.210
+    outbound_interface: eth0.200
+    source_address: 100.64.0.0/10
+    destination_address: 10.73.200.0/24
+  - number: 18020
+    action: drop
+    description: Deny new VLAN 200 sessions to tailnet clients
+    inbound_interface: eth0.200
+    destination_address: 100.64.0.0/10
+  - number: 18030
+    action: drop
+    description: Deny tailnet clients outside VLAN 200
+    inbound_interface: eth0.210
+    source_address: 100.64.0.0/10
+  - number: 18040
+    action: accept
+    description: Allow detection subnet router to WAN
+    inbound_interface: eth0.210
+    outbound_interface: eth1
+    source_address: 10.73.210.2/32
+  - number: 18090
+    action: drop
+    description: Deny other detection transit forwarding
+    inbound_interface: eth0.210
   - number: 20000
     action: accept
     description: Allow established traffic into VLAN 200
@@ -147,6 +207,10 @@ vyos_router_firewall_ipv4_forward_rules:
     description: Deny 192.168.0.0/16 to VLAN 200
     outbound_interface: eth0.200
     source_address: 192.168.0.0/16
+  - number: 20300
+    action: drop
+    description: Deny other new sessions into VLAN 200
+    outbound_interface: eth0.200
 
 vyos_router_ntp_allow_client_addresses:
   - 127.0.0.0/8
