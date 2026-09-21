@@ -345,8 +345,20 @@ the authority the rest of this section assumes it is.
   deliberately.
 - Each member reaches only their own devices, through `autogroup:self`. Members
   cannot reach each other's laptops. Shared infrastructure is the common ground.
-- Every member reaches the Proxmox subnet named by the `proxmox-lan` host alias,
-  through the node holding `tag:proxmox-subnet-router`.
+- Every Survivability member reaches the Proxmox subnet named by the
+  `proxmox-lan` host alias, through the existing node holding
+  `tag:proxmox-subnet-router`.
+- Members explicitly listed in `group:detection`, and every member of
+  `group:survivability`, reach every protocol and port in `10.73.200.0/24`
+  through the separate node holding `tag:detection-subnet-router`. The
+  Detection group is initially empty so deploying the route before adding that
+  team fails closed without excluding the infrastructure owners. LLDAP
+  `detection` membership does not populate this policy group automatically.
+- `group:survivability` has full access to `autogroup:tagged`, so every current
+  or future tagged infrastructure node remains reachable by its infrastructure
+  owners. Every shared host or routed-subnet alias must also include
+  `group:survivability` in at least one grant because route aliases are separate
+  from the tagged router nodes. Tests enforce both invariants.
 - A grant and an SSH rule authorize `tag:blackrelay-vps`, the VPS itself. See
   "Enroll the VPS as `blackrelay-vps`" below.
 
@@ -412,6 +424,48 @@ ssh "REPLACE_WITH_OPERATOR@REPLACE_WITH_PRODUCTION_HOST" \
 A router that shows no `tag:` enrolled without one. Re-enroll it with a tagged
 key rather than adding grants for the human user who owns it, or offboarding
 that person will take the route down with them.
+
+### Enroll the Detection VLAN subnet router
+
+This is a second, independent LXC. Do not modify, clone the machine identity of,
+or add routes to the existing `tag:proxmox-subnet-router` node. The new LXC has
+only VLAN 210 (`10.73.210.2/29`, gateway `10.73.210.1`) and advertises only
+`10.73.200.0/24`. VyOS carries the traffic between VLANs 210 and 200.
+
+Generate its own short-lived, single-use tagged key:
+
+```bash
+ssh "REPLACE_WITH_OPERATOR@REPLACE_WITH_PRODUCTION_HOST" \
+  'sudo docker compose --project-directory /srv/identity-stack \
+   --file /srv/identity-stack/compose.yml exec -T headscale \
+   headscale preauthkeys create \
+   --expiration 1h --reusable=false --tags tag:detection-subnet-router'
+```
+
+On the new LXC, enroll with subnet-route masquerading disabled. Run this only
+after the VyOS VLAN, firewall, NAT, and `100.64.0.0/10` return route are active:
+
+```bash
+tailscale up --login-server "https://REPLACE_WITH_HEADSCALE_FQDN" \
+  --auth-key "REPLACE_WITH_PREAUTH_KEY" \
+  --hostname detection-subnet-router \
+  --advertise-routes 10.73.200.0/24 \
+  --snat-subnet-routes=false \
+  --accept-routes=false \
+  --accept-dns=false
+```
+
+The policy auto-approves only `10.73.200.0/24` for this tag. Keep the
+`group:detection` list empty while bringing up the route. Then add exactly one
+disposable identity, converge the policy, and complete the allowed
+and denied path checks before replacing it with verified Detection identities.
+Never paste those identities or the preauthorized key into chat or an operator
+log.
+
+Confirm the new node has the dedicated tag and only the intended advertised
+route using the `headscale nodes list --output json` check above. A VLAN 200
+target must observe the client's `100.64.0.0/10` address; seeing
+`10.73.210.2` means SNAT was not disabled and testing must stop.
 
 ### Enroll the VPS as `blackrelay-vps`
 

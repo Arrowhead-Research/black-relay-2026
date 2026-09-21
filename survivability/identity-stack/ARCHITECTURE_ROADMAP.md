@@ -255,6 +255,18 @@ only their own scoped tags. Noninteractive infrastructure nodes enroll with
 short-lived, single-use, preauthorized keys generated just in time and never
 committed or baked into images.
 
+Detection access to `10.73.200.0/24` uses a dedicated tagged subnet-router LXC
+on transit VLAN 210, independent of the existing Proxmox-management subnet
+router. It advertises only the Detection prefix and disables subnet-route SNAT.
+VyOS routes `100.64.0.0/10` back through that LXC, so all traffic crosses VyOS
+and retains the client node address for future capture. Headscale grants every
+IP protocol from the manually maintained Detection policy group and from the
+Survivability infrastructure-owner group to that one prefix; VLAN 200 may
+return established traffic but may not initiate sessions toward tailnet
+clients. Survivability has full access to every tagged node, and every shared
+host or routed-subnet grant also includes Survivability. Tests prevent future
+resources from accidentally excluding their infrastructure owners.
+
 Headscale MagicDNS is sufficient for v1. No private addresses are published
 through public Cloudflare DNS.
 

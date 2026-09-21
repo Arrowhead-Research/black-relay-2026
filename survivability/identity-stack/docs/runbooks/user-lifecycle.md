@@ -105,13 +105,17 @@ the failure presents as "user does not exist" rather than as a denial. Add
    no more than 24 hours and receives no undeclared connectivity.
 
 6. Authorize what the new member may reach. `headscale-users` admits them to
-   the tailnet; it grants no connectivity on its own. A member absent from
-   `group:survivability` in the committed policy can reach nothing at all --
-   not even their own other devices. To give a Survivability operator the
-   team's access, add their Headscale identity to that group in
-   `ansible/roles/identity_stack/files/headscale-policy.hujson`, commit the
-   change so the authorization is reviewable, and converge. See "Policy
-   changes" in `service-deployment.md`.
+   the tailnet; it grants no connectivity on its own. Add a Survivability
+   operator's verified Headscale identity to `group:survivability`. Add a
+   Detection member's identity to `group:detection` only after VLAN 200 access
+   has been approved for that person. The Detection group grants every protocol
+   and port only in `10.73.200.0/24`; it does not grant access to Proxmox,
+   VLAN 100, or other tailnet devices. Survivability members always retain
+   access to every tagged node and shared host or subnet, including VLAN 200.
+   Commit the policy change so the authorization is reviewable, and converge.
+   LLDAP team groups do not populate
+   these policy groups automatically. See "Policy changes" in
+   `service-deployment.md`.
 
 ## Verify denial paths
 
@@ -173,16 +177,18 @@ test finishes.
    authentication; immediate expiry closes existing access without waiting for
    the 24-hour maximum node expiry.
 
-   Infrastructure nodes such as `blackrelay-vps` and the Proxmox subnet router
-   are owned by their tag rather than by a user, so they never appear in the
+   Infrastructure nodes such as `blackrelay-vps`, the existing Proxmox subnet
+   router, and the Detection VLAN subnet router are owned by their tag rather
+   than by a user, so they never appear in the
    listing above and offboarding leaves them running. That is the point of
    tagging them: a departure must not take the tailnet down. Their access is
    revoked by editing the committed policy or deleting the node, and the
    departing operator loses their own reach the moment they leave
    `group:survivability`.
 
-5. If the person held a Unix account on the VPS, remove their `ssh` rule and
-   their identity from `group:survivability` in the committed policy, move their
+5. Remove the person's identity from every committed Headscale policy group,
+   including `group:detection` or `group:survivability` as applicable. If the
+   person held a Unix account on the VPS, also remove their `ssh` rule and move their
    account name from `operator_access_tailnet_operators` to
    `operator_access_removed_users` in the committed `production-vars.yml`, and
    converge with `--tags access,identity-policy`. Moving the name rather than deleting the

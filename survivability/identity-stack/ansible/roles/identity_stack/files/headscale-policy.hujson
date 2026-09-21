@@ -17,18 +17,30 @@
       "robert@litts.me",
       "jake.blackrelay@arrowheadresearch.org",
       "marcel.blackrelay@arrowheadresearch.org"
+    ],
+
+    // Deliberately empty until the operator adds verified Detection identities.
+    // The route can be built and tested fail-closed before any human receives
+    // access. LLDAP team membership does not populate this policy group.
+    "group:detection": [
+      "john.blackrelay@arrowheadresearch.org"
     ]
   },
 
   "hosts": {
-    // The RFC1918 range the Proxmox subnet router advertises.
-    "proxmox-lan": "10.73.66.0/24"
+    // The existing Proxmox subnet router advertises this range. It is not part
+    // of the VyOS Detection path and remains unchanged.
+    "proxmox-lan": "10.73.66.0/24",
+
+    // The dedicated Detection subnet-router LXC advertises only this range.
+    "detection-vlan": "10.73.200.0/24"
   },
 
   "tagOwners": {
     // Survivability owns every declared tag. Application teams receive their
     // own scoped `tag:<team>-<role>` tags only when added deliberately.
     "tag:proxmox-subnet-router": ["group:survivability"],
+    "tag:detection-subnet-router": ["group:survivability"],
 
     // The VPS itself, enrolled as blackrelay-vps with a short-lived
     // preauthorized key carrying this tag and no owning user. The tag owns the
@@ -44,7 +56,8 @@
     // approval stored only in Headscale's database, so a rebuilt or restored
     // subnet router does not need its route re-approving by hand.
     "routes": {
-      "10.73.66.0/24": ["tag:proxmox-subnet-router"]
+      "10.73.66.0/24": ["tag:proxmox-subnet-router"],
+      "10.73.200.0/24": ["tag:detection-subnet-router"]
     }
   },
 
@@ -58,10 +71,30 @@
       "ip": ["*"]
     },
 
+    // Infrastructure owners retain full access to every tagged resource,
+    // including tags introduced later. Routed subnets are covered separately
+    // because an advertised route is not the tagged router node itself.
+    {
+      "src": ["group:survivability"],
+      "dst": ["autogroup:tagged"],
+      "ip": ["*"]
+    },
+
     // The Proxmox subnet behind the subnet router.
     {
       "src": ["group:survivability"],
       "dst": ["proxmox-lan"],
+      "ip": ["*"]
+    },
+
+    // Detection members receive every IP protocol and port, but only inside
+    // VLAN 200. Survivability retains access as the infrastructure owner; every
+    // shared host or subnet added to this policy must include that group. The
+    // dedicated subnet router disables SNAT, so VyOS and targets retain each
+    // client's 100.64.0.0/10 source address.
+    {
+      "src": ["group:detection", "group:survivability"],
+      "dst": ["detection-vlan"],
       "ip": ["*"]
     },
 

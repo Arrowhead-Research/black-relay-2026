@@ -328,6 +328,68 @@ class ServiceConfigurationTests(unittest.TestCase):
                 ):
                     self.assertIn(alias, known, f"{alias} is used but never declared")
 
+    def test_detection_vlan_uses_its_dedicated_router_and_group(self):
+        policy = load_policy()
+
+        self.assertIn("group:detection", policy["groups"])
+        self.assertEqual(policy["hosts"]["detection-vlan"], "10.73.200.0/24")
+        self.assertEqual(
+            policy["tagOwners"]["tag:detection-subnet-router"],
+            ["group:survivability"],
+        )
+        self.assertEqual(
+            policy["autoApprovers"]["routes"]["10.73.200.0/24"],
+            ["tag:detection-subnet-router"],
+        )
+        self.assertEqual(
+            policy["autoApprovers"]["routes"]["10.73.66.0/24"],
+            ["tag:proxmox-subnet-router"],
+            "the existing Proxmox route must remain independently owned",
+        )
+
+        detection_grants = [
+            grant
+            for grant in policy["grants"]
+            if "detection-vlan" in grant["dst"]
+        ]
+        self.assertEqual(
+            detection_grants,
+            [
+                {
+                    "src": ["group:detection", "group:survivability"],
+                    "dst": ["detection-vlan"],
+                    "ip": ["*"],
+                }
+            ],
+        )
+
+    def test_survivability_reaches_every_shared_resource(self):
+        policy = load_policy()
+
+        tagged_resource_grants = [
+            grant
+            for grant in policy["grants"]
+            if "autogroup:tagged" in grant["dst"]
+            and "group:survivability" in grant["src"]
+            and "*" in grant.get("ip", [])
+        ]
+        self.assertTrue(
+            tagged_resource_grants,
+            "tagged resources must remain reachable by group:survivability",
+        )
+
+        for destination in policy.get("hosts", {}):
+            grants = [
+                grant
+                for grant in policy["grants"]
+                if destination in grant["dst"]
+                and "group:survivability" in grant["src"]
+            ]
+            self.assertTrue(
+                grants,
+                f"shared resource {destination} excludes group:survivability",
+            )
+
     def test_no_grant_opens_the_whole_tailnet_or_the_internet(self):
         for grant in load_policy()["grants"]:
             for destination in grant["dst"]:
