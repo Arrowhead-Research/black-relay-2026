@@ -383,7 +383,7 @@ POST /api/v1/nodes/{node_id}/register
 
 ### 9.3 MQTT topics and message shape (draft, pending the fusion standard)
 
-Proposed topic layout:
+Proposed topic layout. The alert, cue and node-status topics are implemented in `analytics/src/rfanalytics/formats.py`:
 
 ```text
 detection/rf/alerts            # Rule-triggered alerts
@@ -438,7 +438,7 @@ HackRF nodes will extend awareness beyond the WBT bands. They are **not part of 
 |---|---|---|---|
 | 1 | What is the fusion MQTT message standard (envelope, topics, QoS, auth)? | Fusion leads | Blocks CEN-09. Section 9.3 is a placeholder. |
 | 2 | What is the TAK alert-configuration format, and does it arrive directly or through fusion? | TAK team / Fusion | Blocks CEN-11. |
-| 3 | Do camera cues go directly to the camera subsystem or through fusion? | Camera / Fusion leads | Affects CEN-07. |
+| 3 | Do camera cues go directly to the camera subsystem or through fusion? What cue volume can the cameras handle? | Camera / Fusion leads | Affects CEN-07. Cueing on every TPMS reading, as specified, produces about 400 cues a day on the simulated site, mostly passing cars; filtering by zone is available. |
 | 4 | Do nodes use wired Ethernet or Wi-Fi for backhaul? | RF lead | Wired removes self-interference and simplifies exclusion. Strongly preferred where feasible. |
 | 5 | Which Kismet release do we pin? Does it use WebSocket or legacy TCP remote capture? | RF lead | **Partly resolved:** `2026-10-R1` is pinned in `central/`, with the legacy TCP listener (3501) enabled. Remote-capture mode still to be confirmed on a stand-in node. |
 | 6 | Which database: PostgreSQL/TimescaleDB or SQLite? | RF lead | SQLite is simpler and more portable. Postgres scales better for co-traveler queries. |

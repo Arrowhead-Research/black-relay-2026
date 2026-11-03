@@ -8,7 +8,7 @@
 
 The RF subsystem gives the safehouse passive, receive-only awareness of nearby Wi-Fi, Bluetooth/BLE, and TPMS emitters. Distributed WBT nodes stream their captures to a central Kismet server. An analytics service characterizes the emitters, places them in zones, learns patterns of life, and publishes alerts and camera cues to the fusion service over MQTT. The full design is in [`DESIGN.md`](DESIGN.md).
 
-**Current state:** the WBT node hardware is not yet available. The central Kismet stack, a scenario simulator, and the first phase of `rf-analytics` (ingest, friendly exclusion, visits, zone localization) are built and tested on simulated data. Alerting, the Kismet ingest adapter, and the node software are not built yet. The node assembly and startup steps below are drafts that still need to be validated on hardware.
+**Current state:** the WBT node hardware is not yet available. The central Kismet stack, a scenario simulator, and `rf-analytics` (ingest, friendly exclusion, visits, zone localization, alert rules, camera cues, and durable MQTT output) are built and tested on simulated data. The Kismet ingest adapter and the node software are not built yet. The node assembly and startup steps below are drafts that still need to be validated on hardware.
 
 ## File Tree
 
@@ -18,9 +18,9 @@ rf-subsystem/
 ├── README.md                    # This file
 ├── schemas/
 │   └── observation.v0.schema.json   # Normalized observation contract (ingest → analytics)
-├── analytics/                   # rf-analytics: ingest, exclusion, visits, localization (Python, uv)
-│   ├── src/rfanalytics/         # Analyzer, localization, friendly list, scorer, CLI
-│   ├── config/                  # Example friendly list
+├── analytics/                   # rf-analytics: ingest, exclusion, visits, localization, alerts (Python, uv)
+│   ├── src/rfanalytics/         # Analyzer, localization, alert rules, wire format, outbox, scorer, CLI
+│   ├── config/                  # Example friendly list and alert rules
 │   └── tests/                   # Contract, business-rule, and scenario tests
 ├── central/                     # Docker Compose stack for the central server
 │   ├── docker-compose.yml       # kismet-server + development MQTT broker
@@ -108,7 +108,7 @@ Node configuration (`/etc/rf-node/node.yaml`) is specified in DESIGN.md section 
 
 1. Start the central stack: `cd central && cp .env.example .env && docker compose up -d --build --wait`. See [`central/README.md`](central/README.md).
 2. Without node hardware, feed the stack simulated data: `cd simulator && uv sync --extra mqtt && uv run rfsim run scenarios/loiterer.yaml --start-now --realtime --speed 60 --mqtt-host 127.0.0.1 -o /dev/null`. See [`simulator/README.md`](simulator/README.md).
-   To process the feed, run `cd analytics && uv sync --extra mqtt && uv run rfanalytics run --site ../simulator/sites/dev-site.yaml --mqtt-host 127.0.0.1 -o events.jsonl`. See [`analytics/README.md`](analytics/README.md).
+   To process the feed and publish alerts, run `cd analytics && uv sync --extra mqtt && uv run rfanalytics run --site ../simulator/sites/dev-site.yaml --mqtt-host 127.0.0.1 -o events.jsonl --rules config/rules.example.yaml --publish-host 127.0.0.1`. See [`analytics/README.md`](analytics/README.md).
 3. **Bring up WBT nodes.** This is a draft until it is validated on hardware. The node agent and systemd units are not built yet, so steps 3.4–3.5 are manual for now.
    1. Make sure the central stack is running and the central server is on the tailnet as `rf-central`.
    2. **Power order:** power the USB hub **first**, wait about 5 seconds, then power the Pi. This way all radios are present when the Pi enumerates USB devices.
@@ -126,7 +126,7 @@ Focus checks on business rules, event definitions, and contracts with connected 
 
 - **Automated checks:**
   - `cd simulator && uv run pytest` validates every scenario's output against `schemas/observation.v0.schema.json` and checks the scenario properties that analytics tests rely on.
-  - `cd analytics && uv run pytest` covers the ingest contract, the analyzer's business rules, and end-to-end quality on scenarios, including the phase 3 target of at least 80% localization accuracy.
+  - `cd analytics && uv run pytest` covers the ingest contract, the analyzer and alert-rule business rules, the outbound wire format and outbox, and end-to-end quality on scenarios. That includes the phase 3 target of at least 80% localization accuracy and the expected alerts per scenario.
 - **Manual verification:** `docker compose ps` in `central/` shows `kismet-server` as healthy. `curl -u <user>:<pass> http://127.0.0.1:2501/system/status.json` returns the Kismet version. The Kismet log shows `Launching remote capture server on 0.0.0.0 3501`.
 - **Node hardware checks (manual, on each node):**
 
@@ -165,8 +165,8 @@ Focus checks on business rules, event definitions, and contracts with connected 
 | `kismet-server` → `rf-analytics` | Internal | Kismet REST API and event bus | Adapter not built yet. |
 | `rf-analytics` ingest | Internal | `rf.observation.v0` ([`schemas/observation.v0.schema.json`](schemas/observation.v0.schema.json)) over JSONL or MQTT | Implemented. Validated against the schema. |
 | `rf-analytics` events | Internal | `rf.analytics-event.v0` (see [`analytics/README.md`](analytics/README.md)) | Implemented. Feeds the alert engine (next). |
-| Alerts, node status → fusion service | Outbound | MQTT (draft topics `detection/rf/...`) | Waiting on the fusion message standard. |
-| TPMS camera cue → camera subsystem | Outbound | MQTT, directly or through fusion | Routing to be decided (DESIGN.md open question 3). |
+| Alerts, node status → fusion service | Outbound | MQTT QoS 1, `detection/rf/alerts` and `detection/rf/status/nodes`, with a durable outbox | Implemented with the draft format. Waiting on the fusion message standard. |
+| TPMS camera cue → camera subsystem | Outbound | MQTT `detection/rf/cues/camera` | Implemented. Routing (directly or through fusion) and expected cue volume still to be agreed (DESIGN.md open question 3). |
 | Alert configuration from TAK | Inbound | To be decided | Waiting on the TAK team. |
 
 **Dependencies:**
@@ -181,5 +181,6 @@ Focus checks on business rules, event definitions, and contracts with connected 
 
 | Date | Change |
 |---|---|
+| 2026-11-02 | Added `rf-analytics` alerting: six rule types, TPMS camera cues, a draft fusion wire format, and durable MQTT output. |
 | 2026-11-02 | Added `rf-analytics` phase 1: ingest, friendly exclusion, visits, zone localization, and a ground-truth scorer. |
 | 2026-11-02 | Added the subsystem design (`DESIGN.md`), the central Kismet and MQTT stack, the observation schema, and the `rfsim` simulator. Drafted node assembly and startup steps; these are not yet validated on hardware. |
