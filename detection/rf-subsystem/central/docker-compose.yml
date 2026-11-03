@@ -1,0 +1,49 @@
+# RF subsystem central stack (DESIGN.md, section 7.1).
+#
+#   cp .env.example .env   # then edit
+#   docker compose up -d --build
+#
+# BIND_ADDR controls where ports are exposed on the host. Use 127.0.0.1 for
+# local development or the host's Tailscale IP (100.x.y.z) on the tailnet.
+# Never bind to 0.0.0.0 on a host with a public interface.
+
+name: rf-central
+
+services:
+  kismet-server:
+    build:
+      context: ./kismet
+      args:
+        KISMET_VERSION: ${KISMET_VERSION:-2026-10-R1}
+    image: black-relay/rf-kismet-server:${KISMET_VERSION:-2026-10-R1}
+    restart: unless-stopped
+    environment:
+      KISMET_ADMIN_USER: ${KISMET_ADMIN_USER:-}
+      KISMET_ADMIN_PASSWORD: ${KISMET_ADMIN_PASSWORD:-}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:2501:2501"
+      - "${BIND_ADDR:-127.0.0.1}:3501:3501"
+    volumes:
+      - kismet-logs:/var/lib/kismet
+      - kismet-home:/root/.kismet
+    healthcheck:
+      # 401 means the server is up but wants auth; that is healthy.
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://localhost:2501/system/status.json | grep -qE '200|401'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  mqtt:
+    image: eclipse-mosquitto:2.0.22
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:1883:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mqtt-data:/mosquitto/data
+
+volumes:
+  kismet-logs:
+  kismet-home:
+  mqtt-data:
