@@ -1,0 +1,32 @@
+# Friendly device list for rf-analytics (DESIGN.md 7.3.3).
+# Observations matching an active entry are dropped before any processing.
+#
+# Each entry sets exactly one of:
+#   emitter_id: lowercase MAC / BLE address, or tpms:<8 hex digits>
+#   ssid:       Wi-Fi network name (matches access points only)
+#
+# source: node-registration | operator | tak | test
+# expires (optional): RFC 3339 UTC time after which the entry stops matching.
+#
+# Devices that randomize their address (most phones) cannot be excluded by
+# ID. Register stable identifiers: access points, vehicles' TPMS sensors,
+# laptops and radios with randomization disabled.
+
+entries:
+  - label: Safehouse access point
+    source: operator
+    ssid: RELAY-OPS
+
+  - label: rf-node-01 onboard Wi-Fi
+    source: node-registration
+    emitter_id: d8:3a:dd:00:00:01
+
+  - label: Team vehicle, front left TPMS
+    source: operator
+    emitter_id: tpms:1a2b3c4d
+
+  - label: Visiting contractor laptop
+    source: operator
+    emitter_id: 00:11:22:33:44:55
+    expires: "2026-11-30T00:00:00Z"
+    notes: Remove after site survey
