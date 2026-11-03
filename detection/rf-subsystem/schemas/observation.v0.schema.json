@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/black-relay-2026/detection/rf-subsystem/schemas/observation.v0.schema.json",
+  "title": "RF observation (v0)",
+  "description": "One detection of one emitter by one node. Normalized form used by rf-analytics ingest (DESIGN.md, section 7.3.1). Produced by the Kismet ingest adapter and by the simulator.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "timestamp", "node_id", "emitter_type", "emitter_id", "rssi_dbm", "frequency_mhz", "attributes"],
+  "properties": {
+    "schema": { "const": "rf.observation.v0" },
+    "timestamp": { "type": "string", "format": "date-time", "description": "UTC, RFC 3339 with Z suffix." },
+    "node_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+    "emitter_type": { "enum": ["wifi_ap", "wifi_client", "bt_classic", "ble", "tpms"] },
+    "emitter_id": {
+      "type": "string",
+      "description": "MAC/BLE address (lowercase, colon separated) or 'tpms:' followed by the 8 hex digit sensor ID.",
+      "pattern": "^(([0-9a-f]{2}:){5}[0-9a-f]{2}|tpms:[0-9a-f]{8})$"
+    },
+    "rssi_dbm": { "type": "integer", "minimum": -130, "maximum": 0 },
+    "frequency_mhz": { "type": "number", "exclusiveMinimum": 0 },
+    "attributes": {
+      "type": "object",
+      "description": "Type-specific characteristics. Known keys are listed; others are allowed.",
+      "properties": {
+        "randomized_address": { "type": "boolean" },
+        "manufacturer": { "type": "string" },
+        "ssid": { "type": "string" },
+        "encryption": { "type": "string" },
+        "probed_ssids": { "type": "array", "items": { "type": "string" } },
+        "ble_company_id": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "device_class": { "type": "string" },
+        "name": { "type": "string" },
+        "tpms_protocol": { "type": "string" },
+        "pressure_kpa": { "type": "number" },
+        "temperature_c": { "type": "number" }
+      }
+    }
+  }
+}

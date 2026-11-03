@@ -1,0 +1,62 @@
+name: baseline-friendly
+description: >
+  Only the team and site infrastructure are present. Use it to exercise
+  friendly-device learning mode (DESIGN.md 7.3.3). Analytics should raise no
+  alerts and should propose every team device as a friendly candidate.
+site: ../sites/dev-site.yaml
+start_time: "2026-11-02T14:00:00Z"
+duration: "0:30:00"
+seed: 101
+
+actors:
+  - id: safehouse-ap
+    role: infrastructure
+    friendly: true
+    devices:
+      - { kit: access_point, attributes: { ssid: RELAY-OPS } }
+    path:
+      - { t: 0, pos: [20, 12] }
+      - { t: end, pos: [20, 12] }
+
+  - id: neighbor-ap
+    role: infrastructure
+    friendly: false
+    devices: [access_point]
+    path:
+      - { t: 0, pos: [70, 60] }
+      - { t: end, pos: [70, 60] }
+
+  - id: team-1
+    role: friendly
+    devices: [phone, smartwatch]
+    path:
+      - { t: 0, pos: [15, 10] }
+      - { t: "0:10:00", pos: [15, 10] }
+      - { t: "0:11:00", pos: [25, 25] }
+      - { t: "0:14:00", pos: [25, 25] }
+      - { t: "0:15:00", pos: [15, 10] }
+      - { t: end, pos: [15, 10] }
+
+  - id: team-2
+    role: friendly
+    devices: [phone, { kit: phone, randomize: false }]
+    path:
+      - { t: 0, pos: [25, 15] }
+      - { t: end, pos: [25, 15] }
+
+  - id: team-3
+    role: friendly
+    devices: [phone, hotspot]
+    path:
+      - { t: 0, pos: [18, 8] }
+      - { t: end, pos: [18, 8] }
+
+  - id: team-vehicle
+    role: friendly
+    devices: [vehicle]
+    path:  # parked; drives off at the end so its TPMS sensors are heard
+      - { t: 0, pos: [38, 15] }
+      - { t: "0:25:00", pos: [38, 15] }
+      - { t: "0:25:10", pos: [38, 38] }
+      - { t: "0:25:20", pos: [38, 15] }
+      - { t: end, pos: [38, 15] }

@@ -1,0 +1,61 @@
+name: repeat-vehicle-co-travelers
+description: >
+  Over 24 hours, the same vehicle (four TPMS sensors and a Bluetooth head
+  unit) visits three times, each time parking in the east lot. Two occupants
+  arrive with it every time: the driver (phone and smartwatch) and a
+  passenger (phone and tracker tag). A second vehicle carrying one occupant
+  passes by once. Background traffic runs all day.
+  Expected: TPMS camera cues on each arrival; the TPMS sensors grouped into
+  one vehicle entity; a repeat-visitor alert on the third visit; a
+  co-traveler group of vehicle, driver, and passenger devices (with lower
+  identity confidence for the randomized phone addresses).
+site: ../sites/dev-site.yaml
+start_time: "2026-11-02T00:00:00Z"
+duration: "24:00:00"
+seed: 404
+
+background:
+  road: { from: [-20, 40], to: [60, 40] }
+  pedestrians_per_hour: 10
+  vehicles_per_hour: 25
+
+actors:
+  - id: safehouse-ap
+    role: infrastructure
+    friendly: true
+    devices:
+      - { kit: access_point, attributes: { ssid: RELAY-OPS } }
+    path:
+      - { t: 0, pos: [20, 12] }
+      - { t: end, pos: [20, 12] }
+
+  - id: subject-vehicle
+    role: subject
+    devices: [vehicle, phone, smartwatch, phone, tracker]
+    visits:
+      - - { t: "8:10:00", pos: [-20, 40] }
+        - { t: "8:10:06", pos: [38, 40] }
+        - { t: "8:10:09", pos: [38, 15] }   # parks
+        - { t: "8:22:00", pos: [38, 15] }
+        - { t: "8:22:03", pos: [38, 40] }
+        - { t: "8:22:08", pos: [60, 40] }
+      - - { t: "13:35:00", pos: [60, 40] }
+        - { t: "13:35:03", pos: [38, 40] }
+        - { t: "13:35:06", pos: [38, 15] }
+        - { t: "13:55:00", pos: [38, 15] }
+        - { t: "13:55:03", pos: [38, 40] }
+        - { t: "13:55:09", pos: [-20, 40] }
+      - - { t: "21:45:00", pos: [-20, 40] }
+        - { t: "21:45:06", pos: [38, 40] }
+        - { t: "21:45:09", pos: [38, 15] }
+        - { t: "21:58:00", pos: [38, 15] }
+        - { t: "21:58:03", pos: [38, 40] }
+        - { t: "21:58:08", pos: [60, 40] }
+
+  - id: one-off-vehicle
+    role: subject
+    devices: [vehicle, phone]
+    path:
+      - { t: "16:00:00", pos: [-20, 40] }
+      - { t: "16:00:06", pos: [40, 40] }
+      - { t: "16:00:08", pos: [60, 40] }
