@@ -279,6 +279,9 @@ With 4 nodes and indoor or near-building propagation, RSSI-based positioning is 
 - Smooth RSSI per (emitter, node) with a rolling median or an exponential moving average before using it. A single packet's RSSI is too noisy.
 - Correct for per-adapter RSSI offsets using a calibration step at install.
 - Report: `zone`, `confidence` (0–1), `nodes_contributing`, and `method`.
+- When an emitter goes silent, mark its zone *unknown* rather than keeping the last estimate. TPMS sensors stop transmitting while a vehicle is parked, so keeping the last estimate would hold the zone where the vehicle arrived.
+
+> **Simulation results (2026-11-02, `analytics/README.md`):** strongest-node scores 87–94% on subjects at the edges of the site but only about 58% for devices between nodes. Centroid shows the reverse: about 95% between nodes and below 30% at the edges. A hybrid of the two is a candidate improvement. Zones without a node, such as the road, cannot be reported by either method.
 
 #### 7.3.5 Pattern of life (CEN-05)
 
@@ -340,7 +343,7 @@ CEN-08 requires all inferences to tolerate the noise that comes with passive cap
 | Noise source | Mitigation |
 |---|---|
 | RSSI fluctuation (multipath, body shadowing, antenna orientation) | Smooth per (emitter, node). Never base location on a single packet. Report confidence. |
-| Missed packets and intermittent detection | Bridge gaps when building visits. Require a minimum observation count before creating a device or raising an alert. |
+| Missed packets and intermittent detection | Bridge gaps when building visits, using a longer gap for TPMS. Require a minimum number of transmissions before confirming a visit. Mark the zone stale after a period of silence. |
 | MAC and BLE address randomization | Flag randomized addresses. Link identities by fingerprint with explicit confidence. Exclude low-confidence identities from long-term statistics by default. |
 | Duplicate observations across nodes | Deduplicate per emitter per time window, keeping the RSSI from each node. |
 | Through-traffic (passing cars, pedestrians) | Use dwell and repeat thresholds so that one-off passes do not trigger pattern alerts. |
