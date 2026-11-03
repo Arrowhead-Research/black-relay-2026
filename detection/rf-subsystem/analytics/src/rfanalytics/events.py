@@ -6,6 +6,9 @@ to be defined by the fusion team (DESIGN.md open question 1).
 
 Event types:
 
+* ``first_heard``: first observation of a new visit, for configured types
+  only (TPMS by default). Unconfirmed; used where latency matters more than
+  noise rejection, such as camera cues. ``zone`` is the hearing node's zone.
 * ``visit_start``: an emitter's visit is confirmed (enough transmissions to
   rule out a spurious decode). ``timestamp`` is the first observation.
 * ``zone_estimate``: the emitter's estimated zone changed.

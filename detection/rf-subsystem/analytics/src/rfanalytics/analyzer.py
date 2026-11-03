@@ -56,6 +56,9 @@ class AnalyzerConfig:
     same_transmission_s: float = 0.5  # observations closer than this are one transmission
     visit_gap_s: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_VISIT_GAP_S))
     expiry_check_interval_s: float = 5.0
+    # Emit a low-latency ``first_heard`` event on the first observation of a
+    # new visit for these types (used for TPMS camera cues, before confirmation).
+    first_heard_types: frozenset[str] = frozenset({"tpms"})
 
     def __post_init__(self) -> None:
         if self.method not in METHODS:
@@ -76,6 +79,7 @@ class _Visit:
     observations: int = 1
     confirmed: bool = False
     randomized: bool = False
+    attributes: dict[str, Any] = field(default_factory=dict)
     nodes: set[str] = field(default_factory=set)
     fresh_since: float = 0.0
     zone: str | None = None
@@ -145,10 +149,19 @@ class Analyzer:
                 last_seen=obs.t,
                 last_tx=obs.t,
                 randomized=obs.randomized,
+                attributes=obs.attributes,
                 fresh_since=obs.t,
             )
             self._open[obs.emitter_id] = visit
             self.stats.emitters.add(obs.emitter_id)
+            if obs.emitter_type in self.config.first_heard_types:
+                node = self.site.nodes.get(obs.node_id)
+                events.append(Event("first_heard", obs.t, obs.emitter_id, obs.emitter_type, {
+                    "node_id": obs.node_id,
+                    "rssi_dbm": obs.rssi_dbm,
+                    "zone": node.zone if node else None,
+                    "attributes": obs.attributes,
+                }))
         else:
             visit.observations += 1
             if obs.t - visit.last_seen > self.config.stale_after_s:
@@ -169,7 +182,7 @@ class Analyzer:
             visit.confirmed = True
             self.stats.visits_confirmed += 1
             events.append(Event("visit_start", visit.start, visit.emitter_id, visit.emitter_type,
-                                {"randomized_address": visit.randomized}))
+                                {"randomized_address": visit.randomized, "attributes": visit.attributes}))
             if visit.zone is not None:
                 events.append(self._zone_event(visit, visit.zone_since))
         return events

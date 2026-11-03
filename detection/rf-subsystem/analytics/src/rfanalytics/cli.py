@@ -14,8 +14,10 @@ import sys
 from pathlib import Path
 from typing import IO, Iterator
 
+from rfanalytics.alerts import AlertEngine, Message, load_rules
 from rfanalytics.analyzer import Analyzer, AnalyzerConfig
 from rfanalytics.events import Event
+from rfanalytics.formats import TOPIC_PREFIX, to_wire
 from rfanalytics.friendly import FriendlyEntry, FriendlyList, load_friendly
 from rfanalytics.localization import METHODS
 from rfanalytics.observation import ObservationError, parse_observation
@@ -36,9 +38,16 @@ def main(argv: list[str] | None = None) -> int:
     src.add_argument("--mqtt-host", help="subscribe to observations on this MQTT broker")
     run.add_argument("--mqtt-port", type=int, default=1883)
     run.add_argument("--mqtt-topic", default="detection/rf/sim/observations")
-    run.add_argument("-o", "--out", default="-", help="events JSONL output (default: stdout)")
+    run.add_argument("-o", "--out", default="-", help="events JSONL output (default: stdout; 'none' to skip)")
     run.add_argument("--method", choices=METHODS, default="strongest")
     run.add_argument("--stats", type=Path, help="write run statistics JSON here")
+    run.add_argument("--rules", type=Path, help="alert rules YAML; enables alerting")
+    run.add_argument("--alerts-out", help="write outbound messages as JSONL {topic, payload} ('-' for stdout)")
+    run.add_argument("--publish-host", help="publish outbound messages to this MQTT broker")
+    run.add_argument("--publish-port", type=int, default=1883)
+    run.add_argument("--topic-prefix", default=TOPIC_PREFIX)
+    run.add_argument("--outbox", type=Path, default=Path("rf-outbox.jsonl"),
+                     help="durable outbox for unacknowledged messages (default: ./rf-outbox.jsonl)")
 
     sc = sub.add_parser("score", help="score events against rfsim ground truth")
     sc.add_argument("--site", type=Path, required=True)
@@ -63,8 +72,14 @@ def _run(args: argparse.Namespace) -> int:
     site = load_site(args.site)
     friendly = load_friendly(args.friendly) if args.friendly else FriendlyList()
     analyzer = Analyzer(site, friendly, AnalyzerConfig(method=args.method))
-    out = sys.stdout if args.out == "-" else open(args.out, "w")
+    engine = None
+    if args.rules:
+        rules, tz = load_rules(args.rules)
+        engine = AlertEngine(rules, node_ids=sorted(site.nodes), tz=tz)
+    sink = _MessageSink(args) if engine else None
+    out = None if args.out in ("none", "") else (sys.stdout if args.out == "-" else open(args.out, "w"))
     invalid = 0
+    next_tick = float("-inf")
     try:
         records = _mqtt_records(args) if args.mqtt_host else _file_records(args.input)
         for line_no, record in records:
@@ -74,22 +89,74 @@ def _run(args: argparse.Namespace) -> int:
                 invalid += 1
                 print(f"rfanalytics: skipping record {line_no}: {exc}", file=sys.stderr)
                 continue
-            _write(out, analyzer.ingest(obs))
+            messages = engine.observe(obs) if engine else []
+            events = analyzer.ingest(obs)
+            _write(out, events)
+            if engine:
+                for ev in events:
+                    messages += engine.handle(ev)
+                if obs.t >= next_tick:
+                    messages += engine.tick(obs.t)
+                    next_tick = obs.t + 1.0
+                sink.send(messages)
     except KeyboardInterrupt:
         pass
     finally:
-        _write(out, analyzer.flush())
-        if out is not sys.stdout:
+        events = analyzer.flush()
+        _write(out, events)
+        if engine:
+            sink.send([m for ev in events for m in engine.handle(ev)])
+            sink.close()
+        if out not in (None, sys.stdout):
             out.close()
 
     stats = {**analyzer.stats.to_dict(), "invalid_records": invalid}
+    if sink:
+        stats.update(sink.counts)
     if args.stats:
         args.stats.write_text(json.dumps(stats, indent=2) + "\n")
     print("rfanalytics: " + ", ".join(f"{k}={v}" for k, v in stats.items()), file=sys.stderr)
     return 0
 
 
-def _write(out: IO[str], events: list[Event]) -> None:
+class _MessageSink:
+    """Routes outbound messages to a JSONL file and/or MQTT (via the durable outbox)."""
+
+    def __init__(self, args: argparse.Namespace) -> None:
+        self.prefix = args.topic_prefix
+        self.file = None
+        if args.alerts_out:
+            self.file = sys.stdout if args.alerts_out == "-" else open(args.alerts_out, "w")
+        self.publisher = None
+        if args.publish_host:
+            from rfanalytics.outbox import MqttPublisher, Outbox
+
+            outbox = Outbox(args.outbox)
+            if len(outbox):
+                print(f"rfanalytics: replaying {len(outbox)} message(s) from {args.outbox}", file=sys.stderr)
+            self.publisher = MqttPublisher(outbox, args.publish_host, args.publish_port)
+        self.counts: dict[str, int] = {"alerts": 0, "camera_cues": 0, "node_status": 0}
+
+    def send(self, messages: list[Message]) -> None:
+        for msg in messages:
+            topic, payload = to_wire(msg, self.prefix)
+            self.counts[{"alert": "alerts", "camera_cue": "camera_cues"}.get(msg.kind, msg.kind)] += 1
+            if self.file:
+                self.file.write(json.dumps({"topic": topic, "payload": payload}, separators=(",", ":")) + "\n")
+                self.file.flush()
+            if self.publisher:
+                self.publisher.send(msg.id, topic, payload)
+
+    def close(self) -> None:
+        if self.publisher:
+            self.publisher.close()
+        if self.file not in (None, sys.stdout):
+            self.file.close()
+
+
+def _write(out: IO[str] | None, events: list[Event]) -> None:
+    if out is None:
+        return
     for ev in events:
         out.write(json.dumps(ev.to_dict(), separators=(",", ":")) + "\n")
     if events:
