@@ -34,14 +34,25 @@ Carried decisions baked in here (task-7 brief):
 
 The MQTT client is **injected** (:meth:`__init__`) so tests drive a fake and the
 service drives paho. The bridge touches only a tiny client surface:
-``publish(topic, payload, qos) -> info`` (with ``info.mid``), ``subscribe(topic)``,
-and the assignable ``on_connect`` / ``on_message`` / ``on_publish`` callbacks.
+``publish(topic, payload, qos) -> info`` (with ``info.mid``),
+``subscribe(topic, qos)``, and the assignable ``on_connect`` / ``on_message`` /
+``on_publish`` callbacks.
+
+**Thread safety.** paho runs ``on_message`` (→ :meth:`dispatch`) and
+``on_publish`` (→ :meth:`on_publish_ack`) on its own network loop thread, while a
+service's main thread calls :meth:`publish_status` and :meth:`expire_tracks` on a
+timer. All of them mutate the shared outbox, matcher, and pending-cue state (and
+the outbox file). Every public entry point therefore takes one re-entrant lock, so
+all state changes serialize and no concurrent-mutation ``RuntimeError`` can kill
+message processing. Internal helpers run under the caller's lock and never
+re-acquire it beyond the re-entrant guarantee.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from typing import Any, Callable, Optional
 
@@ -109,6 +120,10 @@ class Bridge:
         # track's next detection. The epoch bounds the entry's lifetime so a match
         # whose track never produces a further detection cannot leak (expire_tracks).
         self._pending_cue: dict[str, tuple[str, float]] = {}
+        # Serializes all shared-state mutation across the paho loop thread and the
+        # service's heartbeat thread (re-entrant: a locked public method may call
+        # another helper that would otherwise re-lock on the same thread).
+        self._lock = threading.RLock()
 
     # --- MQTT wiring --------------------------------------------------------
 
@@ -138,15 +153,19 @@ class Bridge:
 
         Replay re-sends every un-acked durable entry with its original bytes, so
         events queued during an outage reach fusion with their ``event_id`` and
-        ``timestamp`` intact (carried decision 2).
+        ``timestamp`` intact (carried decision 2). Both topics are subscribed at
+        QoS 1 so a reconnect blip cannot silently drop an inbound Frigate
+        ``object_start``/``object_end`` (or an RF cue).
         """
-        self._client.subscribe(self._frigate_topic)
-        self._client.subscribe(formats.TOPIC_RF_CUES_IN)
-        self._outbox.replay(self._publish)
+        with self._lock:
+            self._client.subscribe(self._frigate_topic, 1)
+            self._client.subscribe(formats.TOPIC_RF_CUES_IN, 1)
+            self._outbox.replay(self._publish)
 
     def on_publish_ack(self, mid: Any) -> None:
         """Broker PUBACK for a QoS-1 publish: drop the acked entry from the outbox."""
-        self._outbox.ack(mid)
+        with self._lock:
+            self._outbox.ack(mid)
 
     def expire_tracks(self, now: Optional[float] = None) -> None:
         """Retire stale matcher tracks and aged pending cues to bound memory.
@@ -160,13 +179,14 @@ class Bridge:
         """
         if now is None:
             now = float(self._time_fn())
-        self._matcher.expire(now)
-        horizon = now - self._pending_ttl_s
-        self._pending_cue = {
-            object_id: entry
-            for object_id, entry in self._pending_cue.items()
-            if entry[1] >= horizon
-        }
+        with self._lock:
+            self._matcher.expire(now)
+            horizon = now - self._pending_ttl_s
+            self._pending_cue = {
+                object_id: entry
+                for object_id, entry in self._pending_cue.items()
+                if entry[1] >= horizon
+            }
 
     # --- inbound dispatch ---------------------------------------------------
 
@@ -180,11 +200,12 @@ class Bridge:
         data = self._decode_json(payload)
         if data is None:
             return
-        if topic == self._frigate_topic:
-            self._handle_frigate(data)
-        elif topic == formats.TOPIC_RF_CUES_IN:
-            self._handle_cue(data)
-        # Any other topic: not ours — ignore.
+        with self._lock:
+            if topic == self._frigate_topic:
+                self._handle_frigate(data)
+            elif topic == formats.TOPIC_RF_CUES_IN:
+                self._handle_cue(data)
+            # Any other topic: not ours — ignore.
 
     @staticmethod
     def _decode_json(payload: Any) -> Optional[object]:
@@ -217,8 +238,11 @@ class Bridge:
         if event is None:
             return
 
-        zone = event.zones[0] if event.zones else _NO_ZONE
-        self._matcher.observe_track(event.object_id, zone, float(self._time_fn()))
+        # Record ALL zones the track currently occupies (Frigate zones overlap), so
+        # an RF cue for ANY of them can match — not just zones[0]. A track outside
+        # every defined zone is recorded under a sentinel no real cue zone matches.
+        zones = list(event.zones) if event.zones else [_NO_ZONE]
+        self._matcher.observe_track(event.object_id, zones, float(self._time_fn()))
 
         attributes: dict[str, Any] = {
             "bbox": list(event.bbox),
@@ -311,8 +335,9 @@ class Bridge:
         except formats.ClockNotReady:
             logger.debug("clock not NTP-synced; dropping status heartbeat")
             return
-        self._outbox.enqueue(formats.TOPIC_STATUS, message, durable=True)
-        self._outbox.flush(self._publish)
+        with self._lock:
+            self._outbox.enqueue(formats.TOPIC_STATUS, message, durable=True)
+            self._outbox.flush(self._publish)
 
     # --- outbound publish ---------------------------------------------------
 

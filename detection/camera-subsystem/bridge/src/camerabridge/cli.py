@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import subprocess
 import sys
 import time
@@ -40,7 +41,7 @@ from .status import NodeState
 
 logger = logging.getLogger("camerabridge")
 
-__all__ = ["load_config", "make_bridge", "mark_clock_if_synced", "main"]
+__all__ = ["load_config", "make_bridge", "mark_clock_if_synced", "start_client", "main"]
 
 # Outbox overflow caps: defaults sized for a node riding out a multi-day uplink
 # outage without unbounded disk use (overridable via config).
@@ -48,6 +49,23 @@ _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
 _DEFAULT_MAX_AGE_S = 7 * 24 * 3600
 _DEFAULT_STATUS_INTERVAL_S = 30.0
 _DEFAULT_CUE_WINDOW_S = 5.0
+
+# Every camera.* message carries node_id, and the contract pins it to this pattern
+# (schemas/*.schema.json). A bad field-provisioned value (uppercase, underscore,
+# leading hyphen) would make every message schema-invalid and be silently dropped
+# by fusion — so it is validated once, loudly, at startup.
+_NODE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def _validate_node_id(node_id: Any) -> str:
+    """Return ``node_id`` if it matches the contract pattern, else raise ValueError."""
+    if not isinstance(node_id, str) or not _NODE_ID_RE.match(node_id):
+        raise ValueError(
+            f"node_id {node_id!r} is invalid: must match ^[a-z0-9][a-z0-9-]*$ "
+            "(lowercase letters, digits and hyphens; no leading hyphen). Fix the "
+            "node_id in the config before starting the service."
+        )
+    return node_id
 
 
 def load_config(path: str) -> dict:
@@ -72,7 +90,7 @@ def make_bridge(
     ``covered_zones``, ``cue_window_s``, the ``outbox`` path/caps, and the
     ``frigate`` topic/base URL.
     """
-    node_id = cfg["node_id"]
+    node_id = _validate_node_id(cfg["node_id"])
     covered_zones = set(cfg.get("covered_zones", []))
     window_s = float(cfg.get("cue_window_s", _DEFAULT_CUE_WINDOW_S))
 
@@ -158,6 +176,21 @@ def _ntp_synchronized() -> bool:
     return out.stdout.strip() == "yes"
 
 
+def start_client(client: Any, host: str, port: int, *, min_delay: int = 1, max_delay: int = 60) -> None:
+    """Start the MQTT loop with an async connect that survives a broker-down boot.
+
+    Uses ``connect_async`` (which does NOT raise when the broker is unreachable)
+    plus ``reconnect_delay_set`` so the paho network thread keeps retrying with
+    backoff. A central-broker outage is a documented degradation case (DESIGN.md
+    4.3): the node must stay up detecting/recording and queueing durable events,
+    not exit at boot because the broker happens to be down. ``loop_start`` runs the
+    retrying network thread.
+    """
+    client.reconnect_delay_set(min_delay=min_delay, max_delay=max_delay)
+    client.connect_async(host, port)
+    client.loop_start()
+
+
 def _default_node_state(link_online: bool) -> NodeState:
     """A conservative heartbeat state.
 
@@ -198,8 +231,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     status_interval = float(cfg.get("status_interval_s", _DEFAULT_STATUS_INTERVAL_S))
 
     mark_clock_if_synced(clock)
-    client.connect(broker.get("host", "127.0.0.1"), int(broker.get("port", 1883)))
-    client.loop_start()
+    # Async connect + auto-reconnect: stay up and retry if the broker is down now.
+    start_client(client, broker.get("host", "127.0.0.1"), int(broker.get("port", 1883)))
     logger.info("camerabridge running for node %s", cfg["node_id"])
     try:
         while True:

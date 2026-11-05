@@ -81,7 +81,7 @@ class FakeMqttClient:
         return _FakeInfo(mid)
 
     def subscribe(self, topic, qos=0):
-        self.subscriptions.append(topic)
+        self.subscriptions.append((topic, qos))
 
 
 def load_schema(name: str) -> dict:
@@ -380,8 +380,11 @@ def test_handle_connect_subscribes_and_replays_outbox(tmp_path):
     bridge = make_bridge(client, tmp_path=tmp_path, outbox=outbox)
     bridge.handle_connect()
 
-    assert "frigate/events" in client.subscriptions
-    assert formats.TOPIC_RF_CUES_IN in client.subscriptions
+    # Both topics subscribed at QoS 1 (M2) so a reconnect blip cannot drop an
+    # inbound object_start/object_end or RF cue.
+    subs = dict(client.subscriptions)
+    assert subs["frigate/events"] == 1
+    assert subs[formats.TOPIC_RF_CUES_IN] == 1
     # The durable message queued during the "outage" is replayed on connect.
     pubs = decode_published(client)
     assert any(m["object_id"] == "trk-queued" for _t, m, _q in pubs)
@@ -428,6 +431,149 @@ def test_publish_status_dropped_when_clock_not_ready(tmp_path):
         NodeState(camera_online=True, link_online=True, recording_ok=True, detector_ok=True)
     )
     assert client.published == []
+
+
+# --- multi-zone cue matching (I2) -------------------------------------------
+
+
+def test_multi_zone_track_matches_cue_for_any_occupied_zone(tmp_path):
+    client = FakeMqttClient()
+    matcher = CueMatcher(covered_zones={"perimeter-north", "driveway"}, window_s=5.0)
+    bridge = make_bridge(client, tmp_path=tmp_path, matcher=matcher, time_fn=lambda: FIXED_EPOCH)
+
+    # A track occupying BOTH zones at once (Frigate zones overlap).
+    bridge.dispatch(
+        "frigate/events",
+        json.dumps(frigate_payload("new", "trk-1", ("perimeter-north", "driveway"))).encode(),
+    )
+    # A cue for the SECOND zone must still match (not just zones[0]).
+    cue = {"rf_cue_id": "rf-cue-2", "zone": "driveway", "ts_epoch": FIXED_EPOCH}
+    bridge.dispatch(formats.TOPIC_RF_CUES_IN, json.dumps(cue).encode())
+
+    acks = [m for t, m, _q in decode_published(client) if t == formats.TOPIC_CUE_ACKS]
+    assert acks[-1]["matched"] is True
+    assert acks[-1]["object_id"] == "trk-1"
+    assert acks[-1]["zone"] == "driveway"
+
+
+# --- concurrency: shared state is serialized (C1) ---------------------------
+
+
+def test_concurrent_dispatch_and_heartbeat_no_race(tmp_path):
+    import threading
+
+    from camerabridge.status import NodeState
+
+    client = FakeMqttClient()
+    bridge = make_bridge(client, tmp_path=tmp_path)
+    errors: list[BaseException] = []
+    rounds = 400
+
+    def feed():
+        try:
+            for i in range(rounds):
+                bridge.dispatch(
+                    "frigate/events",
+                    json.dumps(frigate_payload("new", f"trk-{i % 11}", ("perimeter-north",))).encode(),
+                )
+                bridge.dispatch(
+                    formats.TOPIC_RF_CUES_IN,
+                    json.dumps(
+                        {"rf_cue_id": f"c{i}", "zone": "perimeter-north", "ts_epoch": FIXED_EPOCH}
+                    ).encode(),
+                )
+        except BaseException as exc:  # noqa: BLE001 - surface any race to the assert
+            errors.append(exc)
+
+    def beat():
+        try:
+            for i in range(rounds):
+                bridge.publish_status(NodeState(True, True, True, True))
+                bridge.expire_tracks(now=FIXED_EPOCH + i)
+                bridge.on_publish_ack(i + 1)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=feed), threading.Thread(target=beat)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # No "dictionary changed size during iteration" (or any other) race.
+    assert errors == [], errors
+    # State stayed consistent and usable afterwards.
+    bridge.expire_tracks(now=FIXED_EPOCH + 10_000)
+    assert bridge._pending_cue == {}
+
+
+# --- broker-down at boot does not crash (I1) --------------------------------
+
+
+class _BrokerDownClient:
+    """A fake whose synchronous ``connect`` would raise — proves we don't call it.
+
+    ``connect_async`` records the attempt (paho's non-raising, retry-on-loop path).
+    """
+
+    def __init__(self):
+        self.connect_async_calls = []
+        self.loop_started = False
+        self.reconnect_delay = None
+
+    def connect(self, *a, **k):  # pragma: no cover - must never be called
+        raise ConnectionRefusedError("broker is down at boot")
+
+    def connect_async(self, host, port, *a, **k):
+        self.connect_async_calls.append((host, port))
+
+    def reconnect_delay_set(self, *, min_delay, max_delay):
+        self.reconnect_delay = (min_delay, max_delay)
+
+    def loop_start(self):
+        self.loop_started = True
+
+
+def test_start_client_survives_broker_down_boot():
+    from camerabridge import cli
+
+    client = _BrokerDownClient()
+    # Must not raise even though a synchronous connect would have.
+    cli.start_client(client, "10.0.0.2", 1883)
+    assert client.connect_async_calls == [("10.0.0.2", 1883)]
+    assert client.loop_started is True
+    assert client.reconnect_delay is not None
+
+
+# --- node_id validation (M1) ------------------------------------------------
+
+
+def test_make_bridge_rejects_invalid_node_id(tmp_path):
+    import pytest
+
+    from camerabridge import cli
+
+    cfg = {
+        "node_id": "CAM_01",  # uppercase + underscore: violates ^[a-z0-9][a-z0-9-]*$
+        "covered_zones": ["perimeter-north"],
+        "outbox": {"path": str(tmp_path / "outbox.jsonl")},
+        "frigate": {"topic": "frigate/events", "base_url": "http://x"},
+    }
+    with pytest.raises(ValueError, match="node_id"):
+        cli.make_bridge(cfg, client=FakeMqttClient(), clock=FakeClock())
+
+
+def test_make_bridge_accepts_valid_node_id(tmp_path):
+    from camerabridge import cli
+
+    cfg = {
+        "node_id": "cam-01",
+        "covered_zones": ["perimeter-north"],
+        "outbox": {"path": str(tmp_path / "outbox.jsonl")},
+        "frigate": {"topic": "frigate/events", "base_url": "http://x"},
+    }
+    bridge = cli.make_bridge(cfg, client=FakeMqttClient(), clock=FakeClock())
+    assert isinstance(bridge, Bridge)
 
 
 # --- CLI config plumbing ----------------------------------------------------

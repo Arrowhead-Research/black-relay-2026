@@ -128,12 +128,18 @@ class CueMatcher:
     def __init__(self, covered_zones: set[str], window_s: float = 5.0) -> None:
         self._covered_zones = set(covered_zones)
         self._window_s = window_s
-        # object_id -> (zone, last-seen epoch seconds)
-        self._tracks: dict[str, tuple[str, float]] = {}
+        # object_id -> (frozenset of zones the track occupies, last-seen epoch secs)
+        self._tracks: dict[str, tuple[frozenset[str], float]] = {}
 
-    def observe_track(self, object_id: str, zone: str, ts_epoch: float) -> None:
-        """Record or refresh an open track, keyed by ``object_id``."""
-        self._tracks[object_id] = (zone, ts_epoch)
+    def observe_track(self, object_id: str, zone, ts_epoch: float) -> None:
+        """Record or refresh an open track, keyed by ``object_id``.
+
+        ``zone`` may be a single zone name or an iterable of names: Frigate zones
+        overlap, so a track can occupy several at once, and a cue for ANY of them
+        should match. A bare string is treated as a one-zone set.
+        """
+        zones = frozenset([zone]) if isinstance(zone, str) else frozenset(zone)
+        self._tracks[object_id] = (zones, ts_epoch)
 
     def expire(self, now_epoch: float) -> None:
         """Drop tracks last seen more than one window behind ``now_epoch``.
@@ -154,17 +160,18 @@ class CueMatcher:
         """Return an open track's ``object_id`` matching ``cue``, else ``None``.
 
         A cue in a zone the node does not cover never matches. Among the open
-        tracks in the cue's zone within ``±window_s``, the one closest in time is
-        returned (deterministic when several are in range); if none qualify,
-        ``None``. Never raises.
+        tracks occupying the cue's zone within ``±window_s``, the one closest in
+        time is returned (deterministic when several are in range); if none
+        qualify, ``None``. A track occupying several zones matches a cue for any of
+        them. Never raises.
         """
         if cue.zone not in self._covered_zones:
             return None
 
         best_object_id: str | None = None
         best_delta: float | None = None
-        for object_id, (zone, ts_epoch) in self._tracks.items():
-            if zone != cue.zone:
+        for object_id, (zones, ts_epoch) in self._tracks.items():
+            if cue.zone not in zones:
                 continue
             delta = abs(ts_epoch - cue.ts_epoch)
             if delta <= self._window_s and (best_delta is None or delta < best_delta):
