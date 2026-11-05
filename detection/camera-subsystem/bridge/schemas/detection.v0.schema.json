@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://black-relay.local/schemas/camera.detection.v0.schema.json",
+  "title": "camera.detection.v0",
+  "description": "One detection of one object by one camera over its track lifecycle (DESIGN.md 5.2). In v0 camera_id == node_id (RLC-520A only).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "event_id",
+    "timestamp",
+    "node_id",
+    "camera_id",
+    "event",
+    "object_id",
+    "label",
+    "confidence",
+    "zones",
+    "attributes"
+  ],
+  "properties": {
+    "schema": {
+      "const": "camera.detection.v0"
+    },
+    "event_id": {
+      "type": "string",
+      "description": "UUIDv4 for idempotent fusion dedupe."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$",
+      "description": "RFC 3339 UTC, stamped at publish from an NTP-corrected clock; the trailing Z is required."
+    },
+    "node_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "camera_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "event": {
+      "enum": [
+        "object_start",
+        "object_update",
+        "object_end"
+      ]
+    },
+    "object_id": {
+      "type": "string",
+      "description": "Frigate's stable per-track id."
+    },
+    "label": {
+      "type": "string"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "zones": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "0..n shared-vocabulary zone names; [] means detected outside all defined zones."
+    },
+    "attributes": {
+      "type": "object",
+      "description": "Open sub-object (bbox, area_px, stationary, sub_label, snapshot_url, clip_url, rf_cue_id, ...)."
+    }
+  }
+}

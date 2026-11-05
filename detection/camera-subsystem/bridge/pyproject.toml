@@ -1,0 +1,25 @@
+[project]
+name = "camerabridge"
+version = "0.0.0"
+description = "Black Relay camera subsystem edge bridge: translates Frigate MQTT object events into the normalized, versioned camera.* contract and delivers them durably to the fusion broker."
+requires-python = ">=3.11"
+dependencies = [
+    "jsonschema>=4.20",
+    "paho-mqtt>=2.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+# This task lays down only the skeleton and the JSON Schemas; the importable
+# `camerabridge` package arrives in later tasks under src/. Keep the project
+# non-packaged for now so `uv run` never tries to build an empty package, and
+# expose src/ on the path so later tasks' imports resolve without changes here.
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

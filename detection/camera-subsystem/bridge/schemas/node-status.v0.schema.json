@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://black-relay.local/schemas/camera.node-status.v0.schema.json",
+  "title": "camera.node-status.v0",
+  "description": "Edge node heartbeat, parallel to rf.node-status.v0 (DESIGN.md 5.3).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "event_id",
+    "timestamp",
+    "node_id",
+    "camera_online",
+    "link_online",
+    "recording_ok",
+    "detector_ok",
+    "attributes"
+  ],
+  "properties": {
+    "schema": {
+      "const": "camera.node-status.v0"
+    },
+    "event_id": {
+      "type": "string",
+      "description": "UUIDv4 for idempotent fusion dedupe."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$",
+      "description": "RFC 3339 UTC; the trailing Z is required."
+    },
+    "node_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "camera_online": {
+      "type": "boolean"
+    },
+    "link_online": {
+      "type": "boolean"
+    },
+    "recording_ok": {
+      "type": "boolean"
+    },
+    "detector_ok": {
+      "type": "boolean"
+    },
+    "attributes": {
+      "type": "object",
+      "description": "Open sub-object (frigate_version, detection_fps, storage_free_pct, uplink_rssi_dbm, ...)."
+    }
+  }
+}

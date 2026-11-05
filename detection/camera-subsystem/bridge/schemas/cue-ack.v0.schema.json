@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://black-relay.local/schemas/camera.cue-ack.v0.schema.json",
+  "title": "camera.cue-ack.v0",
+  "description": "Acknowledgement that a node acted on an inbound RF cue, matched to a visual track or not (DESIGN.md 5.4).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "event_id",
+    "timestamp",
+    "node_id",
+    "rf_cue_id",
+    "zone",
+    "matched",
+    "object_id",
+    "attributes"
+  ],
+  "properties": {
+    "schema": {
+      "const": "camera.cue-ack.v0"
+    },
+    "event_id": {
+      "type": "string",
+      "description": "UUIDv4 for idempotent fusion dedupe."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$",
+      "description": "RFC 3339 UTC; the trailing Z is required."
+    },
+    "node_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "rf_cue_id": {
+      "type": "string",
+      "description": "Id of the inbound rf.camera-cue.v0 this acknowledges."
+    },
+    "zone": {
+      "type": "string"
+    },
+    "matched": {
+      "type": "boolean"
+    },
+    "object_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Matched track's object_id, or null when the cue had no visual match."
+    },
+    "attributes": {
+      "type": "object",
+      "description": "Open sub-object (e.g. snapshot_url)."
+    }
+  }
+}
