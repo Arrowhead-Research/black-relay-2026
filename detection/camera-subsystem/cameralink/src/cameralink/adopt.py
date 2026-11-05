@@ -7,7 +7,7 @@ a crash is on disk before the act it protects:
 - ``attempted`` is written before any login. A daemon restart in the same link generation
   finds it, with no outcome beside it, and sends nothing.
 - A failure is stamped along with ``attempted`` and removed on success, so a crash cannot
-  dodge the rolling cap.
+  dodge the rolling caps.
 - A new password is saved as ``pending_password`` before the camera hears of it, and is
   promoted to ``password`` only once a login with it has worked.
 - Each finished setting is recorded as it finishes, so a retry repeats only the rest.
@@ -27,6 +27,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from cameralink.reolink import (
+    ApiError,
     AuthFailed,
     CameraError,
     LockedOut,
@@ -49,6 +50,10 @@ _PROBE_TIMEOUT = 3.0
 # 13 s after going offline, port 9000 within about 40 s.
 SETTLE_SECONDS = 45
 FAILURE_CAP = 3
+# The factory signature skips FAILURE_CAP, because a real reset must adopt at once, but a
+# camera can show it without being reset. Baichuan reports no remain_times to warn of a
+# lockout, so a failed try on the signature is limited apart from the cap. Success never is.
+SIGNATURE_FAILURE_CAP = 1
 FAILURE_WINDOW_SECONDS = 24 * 3600
 # The camera locks at 10 failures, and one enable_services call can spend 3. Stopping here
 # keeps the margin even if the camera's own counter does not fall over the cap's 24 hours.
@@ -219,19 +224,21 @@ class _Adoption:
         return current - since >= SETTLE_SECONDS
 
     def _capped(self) -> bool:
-        return len(self._recent_failures()) >= FAILURE_CAP
+        return len(self._recent(self.rec.failures)) >= FAILURE_CAP
 
-    def _recent_failures(self) -> tuple[float, ...]:
+    def _recent(self, stamps: tuple[float, ...]) -> tuple[float, ...]:
         # A stamp from the future is kept: this node can boot with an old clock.
         oldest = self.now().timestamp() - FAILURE_WINDOW_SECONDS
-        return tuple(stamp for stamp in self.rec.failures if stamp > oldest)
+        return tuple(stamp for stamp in stamps if stamp > oldest)
 
     def _factory_signature(self) -> LinkState:
+        if len(self._recent(self.rec.signature_failures)) >= SIGNATURE_FAILURE_CAP:
+            return LinkState.NEEDS_RESET
         if self.rec.password != _BLANK:
             self._update(
                 pending_password=self.rec.password, password=_BLANK, pending_rejected=False
             )
-        self._begin_attempt()
+        self._begin_attempt(signature=True)
         failure = None
         try:
             _run_enable(self.enable, self.ip, _BLANK, self.enable_timeout)
@@ -240,11 +247,17 @@ class _Adoption:
             return LinkState.ADOPTING
         except CameraError as err:
             failure = err
+        if isinstance(failure, ApiError):
+            # enable_services raises this only once logged in, so blank worked, and this
+            # was no failed login. The attempt for this generation is still used.
+            self._update(signature_failures=self.rec.signature_failures[:-1])
         if failure is not None:
             return self._login_failed(failure)
         # Blank worked, so this is a real reset: the camera's own failure count is gone, and
         # any lockout with it. The settings are gone too, which _change_password records.
-        self._update(failures=(), locked=False, phase=_PHASE_HTTP_FOLLOW_UP)
+        self._update(
+            failures=(), signature_failures=(), locked=False, phase=_PHASE_HTTP_FOLLOW_UP
+        )
         return self._blank_login()
 
     def _recover(self) -> LinkState:
@@ -290,15 +303,20 @@ class _Adoption:
             return LinkState.ADOPTED  # refused; the undo restored the phase
         return state if state is not None else self._guarded(self._run_steps)
 
-    def _begin_attempt(self) -> None:
+    def _begin_attempt(self, signature: bool = False) -> None:
         rec = self.rec
-        self._undo = (rec.attempted, rec.phase)
-        stamp = self.now().timestamp()
-        self._update(attempted=self.key, phase=None, failures=(*self._recent_failures(), stamp))
+        self._undo = {
+            "attempted": rec.attempted,
+            "phase": rec.phase,
+            "failures": rec.failures,
+            "signature_failures": rec.signature_failures,
+        }
+        field = "signature_failures" if signature else "failures"
+        stamps = (*self._recent(getattr(rec, field)), self.now().timestamp())
+        self._update(attempted=self.key, phase=None, **{field: stamps})
 
     def _undo_attempt(self) -> None:
-        attempted, phase = self._undo
-        self._update(attempted=attempted, phase=phase, failures=self.rec.failures[:-1])
+        self._update(**self._undo)
 
     def _try_login(self, password: str, rejected: str | None = None) -> LinkState | None:
         """One counted HTTP login. None means it worked; otherwise the state to report."""

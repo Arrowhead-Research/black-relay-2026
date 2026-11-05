@@ -32,6 +32,7 @@ class CameraRecord:
     phase: str | None = None  # how that attempt stands; None while its outcome is unknown
     applied: dict = field(default_factory=dict)  # finished step name -> the value it applied
     failures: tuple[float, ...] = ()  # epoch times of failed attempts, for the rolling cap
+    signature_failures: tuple[float, ...] = ()  # the same for logins on the factory signature
     pending_rejected: bool = False  # the camera refused pending_password, so skip to blank
     locked: bool = False  # no more attempts until a generation shows the factory signature
     settle_key: str | None = None  # "<mac>/<link generation>" the settle time belongs to
@@ -92,4 +93,10 @@ class CameraStore:
 
 
 def _record(fields: dict) -> CameraRecord:
-    return CameraRecord(**{**fields, "failures": tuple(fields.get("failures", ()))})
+    return CameraRecord(
+        **{
+            **fields,
+            "failures": tuple(fields.get("failures", ())),
+            "signature_failures": tuple(fields.get("signature_failures", ())),
+        }
+    )

@@ -951,6 +951,162 @@ def test_cap_reached_also_blocks_the_blank_after_a_rejected_pending(path):
     assert bench.camera.logins == [("http", "the-pending-one")]
 
 
+# The factory-signature limit.
+
+
+@pytest.fixture
+def closed_http_stranger(path):
+    """Port 80 closed and a password this node does not know: the signature, falsely."""
+    return Bench(path, FakeCamera(password="somebody-elses", http=False))
+
+
+def test_false_signature_gets_one_baichuan_attempt_in_24_hours(closed_http_stranger):
+    bench = closed_http_stranger
+    camera = bench.camera
+    for generation in range(1, 41):
+        assert bench.link_up(generation) is LinkState.NEEDS_RESET
+        bench.restart()
+        bench.clock.advance(60)
+        assert bench.tick() is LinkState.NEEDS_RESET
+        bench.restart()
+    assert bench.enable_passwords == [""]
+    assert camera.logins == [("baichuan", "")]
+    assert camera.failures == 1
+
+
+def test_false_signature_on_a_known_camera_keeps_its_password_and_waits(path):
+    bench = Bench(path, FakeCamera(password=SECRET, http=False))
+    bench.known()
+    for generation in range(1, 11):
+        assert bench.link_up(generation) is LinkState.NEEDS_RESET
+        bench.restart()
+    assert bench.camera.logins == [("baichuan", "")]
+    assert bench.record().pending_password == SECRET
+
+
+def test_signature_limit_rolls_after_24_hours(closed_http_stranger):
+    bench = closed_http_stranger
+    bench.link_up(1)
+
+    bench.clock.advance(adopt.FAILURE_WINDOW_SECONDS - 46)
+    assert bench.link_up(2) is LinkState.NEEDS_RESET  # 1 s short after this settle
+    assert len(bench.enable_passwords) == 1
+
+    bench.clock.advance(1)
+    assert bench.tick(2) is LinkState.NEEDS_RESET  # generation 2 is not yet attempted
+    assert len(bench.enable_passwords) == 2
+
+
+def test_signature_limit_treats_a_stamp_from_the_future_as_recent(closed_http_stranger):
+    bench = closed_http_stranger
+    bench.link_up(1)
+    bench.clock.advance(-48 * 3600)
+
+    assert bench.link_up(2) is LinkState.NEEDS_RESET
+    assert len(bench.enable_passwords) == 1
+
+
+def test_real_reset_after_the_signature_window_adopts(closed_http_stranger):
+    bench = closed_http_stranger
+    assert bench.link_up(1) is LinkState.NEEDS_RESET
+
+    bench.camera.factory_reset()
+    bench.clock.advance(adopt.FAILURE_WINDOW_SECONDS)
+
+    assert bench.link_up(2) is LinkState.ADOPTED
+    assert bench.record().signature_failures == ()
+    assert_fully_adopted(bench)
+
+
+def test_real_reset_inside_the_signature_window_waits_for_it(closed_http_stranger):
+    bench = closed_http_stranger
+    assert bench.link_up(1) is LinkState.NEEDS_RESET
+
+    bench.camera.factory_reset()
+    assert bench.link_up(2) is LinkState.NEEDS_RESET
+    assert len(bench.enable_passwords) == 1
+
+    bench.clock.advance(adopt.FAILURE_WINDOW_SECONDS)
+    assert bench.link_up(3) is LinkState.ADOPTED
+
+
+def test_real_reset_after_a_failed_http_guess_adopts_at_once(stranger):
+    assert stranger.link_up(1) is LinkState.NEEDS_RESET
+    assert stranger.camera.logins == [("http", "")]
+
+    stranger.camera.factory_reset()
+
+    assert stranger.link_up(2) is LinkState.ADOPTED
+    assert stranger.enable_passwords == [""]
+    assert_fully_adopted(stranger)
+
+
+def test_successful_blank_logins_are_never_limited(factory):
+    for generation in range(1, 6):
+        assert factory.link_up(generation) is LinkState.ADOPTED
+        assert factory.record().signature_failures == ()
+        assert_fully_adopted(factory)
+        factory.camera.factory_reset()
+    assert len(factory.enable_passwords) == 5
+
+
+def test_signature_failure_does_not_spend_the_http_cap(path):
+    bench = Bench(path, FakeCamera(password=SECRET, http=False))
+    bench.known()
+    assert bench.link_up(1) is LinkState.NEEDS_RESET
+    assert bench.record().failures == ()
+
+    bench.camera.http = True
+    assert bench.link_up(2) is LinkState.ADOPTED
+    assert bench.camera.logins[-1] == ("http", SECRET)
+
+
+def test_http_cap_does_not_spend_the_signature_limit(stranger):
+    for generation in (1, 2, 3):
+        stranger.link_up(generation)
+    assert stranger.record().signature_failures == ()
+
+    stranger.camera.http = False
+    assert stranger.link_up(4) is LinkState.NEEDS_RESET
+    assert stranger.enable_passwords == [""]
+
+
+def test_lockout_on_a_signature_is_still_limited(closed_http_stranger):
+    bench = closed_http_stranger
+    bench.camera.failures = LIMIT
+    for generation in range(1, 6):
+        assert bench.link_up(generation) is LinkState.NEEDS_RESET
+    assert len(bench.enable_passwords) == 1
+    assert bench.record().locked
+
+
+def test_enable_failing_after_its_login_does_not_spend_the_limit(factory):
+    # enable_services raises ApiError only once logged in, which proves blank is live.
+    factory.camera.script["enable_services"] = [ApiError("port write failed")]
+    assert factory.link_up(1) is LinkState.FAILED
+    assert factory.record().signature_failures == ()
+
+    assert factory.link_up(2) is LinkState.ADOPTED
+    assert_fully_adopted(factory)
+
+
+def test_signature_limit_counts_an_attempt_cut_off_by_a_crash(closed_http_stranger):
+    bench = closed_http_stranger
+    original = bench.camera.judge
+
+    def dies(*args, **kwargs):
+        raise PowerCut
+
+    bench.camera.judge = dies
+    with pytest.raises(PowerCut):
+        bench.link_up(1)
+    bench.camera.judge = original
+    bench.restart()
+
+    assert bench.link_up(2) is LinkState.NEEDS_RESET
+    assert bench.enable_passwords == [""]
+
+
 # LockedOut.
 
 
@@ -1003,11 +1159,14 @@ def test_enable_services_timeout_counts_as_outcome_unknown(factory):
     factory.clock.advance(45)
     assert factory.tick(enable=hangs, enable_timeout=0.01) is LinkState.FAILED
     assert factory.record().attempted == f"{MAC}/1"
-    assert len(factory.record().failures) == 1
+    assert len(factory.record().signature_failures) == 1
 
     assert factory.tick() is LinkState.FAILED  # no second attempt in this generation
     assert factory.enable_passwords == []
-    assert factory.link_up(2) is LinkState.ADOPTED
+    assert factory.link_up(2) is LinkState.NEEDS_RESET  # the day's signature attempt is spent
+    assert factory.enable_passwords == []
+    factory.clock.advance(adopt.FAILURE_WINDOW_SECONDS)
+    assert factory.link_up(3) is LinkState.ADOPTED
 
 
 def test_enable_services_ignoring_cancellation_cannot_hang_the_daemon(factory, monkeypatch):
@@ -1062,7 +1221,7 @@ def test_enable_services_raising_something_unexpected_counts_as_unknown(factory)
     factory.tick()
     factory.clock.advance(45)
     assert factory.tick(enable=surprised) is LinkState.FAILED
-    assert len(factory.record().failures) == 1
+    assert len(factory.record().signature_failures) == 1
 
 
 def test_enable_services_refused_does_not_use_the_attempt(factory):
@@ -1074,6 +1233,7 @@ def test_enable_services_refused_does_not_use_the_attempt(factory):
     record = factory.record()
     assert record.attempted != f"{MAC}/1"
     assert record.failures == ()
+    assert record.signature_failures == ()
 
     assert factory.tick() is LinkState.ADOPTED
 
@@ -1251,6 +1411,7 @@ def test_store_round_trips_every_field(path):
         phase="failed",
         applied={"set_name": NODE, "set_rotation": False},
         failures=(1.5, 2.5),
+        signature_failures=(3.5,),
         locked=True,
         settle_key=f"{MAC}/3",
         settle_since=9.0,
@@ -1545,6 +1706,17 @@ def assert_loginable_from_disk(bench):
     assert bench.camera.password in on_disk
 
 
+def _adopt_after_crash(bench, generation):
+    """Adopts now, unless a cut stamped the signature attempt, which then holds for a day."""
+    state = bench.link_up(generation)
+    if state is LinkState.NEEDS_RESET and bench.record().signature_failures:
+        assert bench.enable_passwords.count("") <= 1
+        assert_loginable_from_disk(bench)
+        bench.clock.advance(adopt.FAILURE_WINDOW_SECONDS)
+        state = bench.link_up(generation + 1)
+    return state
+
+
 def _after_the_cut(bench):
     bench.restart()
     bench.camera.power = Power()
@@ -1577,7 +1749,7 @@ def test_crash_at_every_point_never_strands_the_camera(tmp_path, crash_point):
     assert_loginable_from_disk(bench)
 
     # A reboot, which is a new link generation.
-    assert bench.link_up(2) is LinkState.ADOPTED
+    assert _adopt_after_crash(bench, 2) is LinkState.ADOPTED
     assert_loginable_from_disk(bench)
     assert_fully_adopted(bench)
     assert bench.camera.failures < LIMIT
@@ -1594,7 +1766,7 @@ def test_steps_finished_before_the_cut_are_not_repeated(tmp_path, crash_point):
     _after_the_cut(bench)
     bench.camera.calls.clear()
 
-    assert bench.link_up(2) is LinkState.ADOPTED
+    assert _adopt_after_crash(bench, 2) is LinkState.ADOPTED
 
     if bench.camera.calls.count("set_password"):
         return  # blank proved live, which proves a reset and starts the settings over
@@ -1616,16 +1788,16 @@ def test_two_crashes_in_a_row_never_strand_the_camera(tmp_path, monkeypatch, sce
             bench.store.power = bench.camera.power
 
             try:
-                state = bench.link_up(2)
+                state = _adopt_after_crash(bench, 2)
             except PowerCut:
                 assert_loginable_from_disk(bench)
                 _after_the_cut(bench)
-                if bench.link_up(3) is not LinkState.ADOPTED:
+                if _adopt_after_crash(bench, 5) is not LinkState.ADOPTED:
                     # Each cut mid-login stamps a failure, so the cap can hold it for a day.
                     assert len(bench.record().failures) >= adopt.FAILURE_CAP
                     assert_loginable_from_disk(bench)
                     bench.clock.advance(adopt.FAILURE_WINDOW_SECONDS)
-                    assert bench.link_up(4) is LinkState.ADOPTED
+                    assert bench.link_up(9) is LinkState.ADOPTED
             else:
                 assert state is LinkState.ADOPTED
                 path.unlink()
