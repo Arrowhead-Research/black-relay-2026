@@ -13,6 +13,8 @@ Live view is unverified on hardware. go2rtc serves the camera's main stream on R
 the camera for its first consumer and drops it after the last, so nothing in this config
 may hold a consumer open: no ``publish``, no ``preload``. go2rtc skips the login check for
 loopback clients and when no username is set, so with no relay user it listens on loopback.
+Its API serves the same stream with no login, so that stays on loopback in every case, behind
+the firewall as well. Frigate's nginx reaches it there.
 
 Rendering is deterministic, so that a changed output means a changed config. A changed
 secret changes only the env file.
@@ -208,7 +210,11 @@ def _rtsp_section(relay_user: Any) -> dict[str, str]:
 
 
 def _indented_yaml(section: Mapping, indent: int) -> str:
-    text = yaml.safe_dump(dict(section), sort_keys=True, default_flow_style=False, width=2**16)
+    # Every scalar is quoted, because PyYAML writes YAML 1.1 and Frigate reads 1.2, where
+    # plain words such as 1e3 and 0o17 are numbers.
+    text = yaml.safe_dump(
+        dict(section), sort_keys=True, default_flow_style=False, default_style='"', width=2**16
+    )
     return "".join(" " * indent + f"{line}\n" for line in text.splitlines()).rstrip("\n")
 
 

@@ -10,6 +10,7 @@ from urllib.parse import quote_plus
 
 import pytest
 import yaml
+from ruamel.yaml import YAML
 
 from cameralink.frigate_config import (
     CAMERA_PASSWORD_ENV,
@@ -40,6 +41,12 @@ def text(**overrides) -> str:
 
 def config(**overrides) -> dict:
     return yaml.safe_load(text(**overrides))
+
+
+def as_frigate_reads_it(**overrides) -> dict:
+    # Frigate and its create_config.py load with ruamel, which follows YAML 1.2. PyYAML
+    # follows 1.1, and the two disagree on which plain words are numbers.
+    return YAML().load(text(**overrides))
 
 
 def camera(**overrides) -> dict:
@@ -76,6 +83,13 @@ def test_a_node_id_yaml_would_read_as_another_type_stays_a_string(node_id):
     # Provisioning allows all of these, and Frigate refuses a camera key that is not a
     # string, so one unquoted key would cost the kit all detection.
     cfg = config(node_id=node_id, covered_zones=["gate"])
+    assert list(cfg["cameras"]) == [node_id]
+    assert list(cfg["go2rtc"]["streams"]) == [node_id]
+
+
+@pytest.mark.parametrize("node_id", ["123", "null", "true", "1e3", "12e4", "0o17", "0x10", "on"])
+def test_frigates_yaml_reader_keeps_node_ids_as_strings(node_id):
+    cfg = as_frigate_reads_it(node_id=node_id, covered_zones=["gate"])
     assert list(cfg["cameras"]) == [node_id]
     assert list(cfg["go2rtc"]["streams"]) == [node_id]
 
@@ -208,7 +222,14 @@ def test_live_view_requires_the_relay_login():
 def test_nothing_keeps_the_camera_open_or_publishes_video():
     # go2rtc dials a source for its first consumer and drops it after the last. publish
     # and preload would each hold a consumer open, so neither may appear.
-    assert set(config()["go2rtc"]) == {"rtsp", "streams"}
+    assert set(config()["go2rtc"]) == {"api", "rtsp", "streams"}
+
+
+def test_go2rtc_api_stays_on_loopback():
+    # It serves the stream with no login and shows the camera password. Frigate's nginx
+    # reaches it on 127.0.0.1, so this is a second layer behind the firewall.
+    assert config()["go2rtc"]["api"] == {"listen": "127.0.0.1:1984"}
+    assert as_frigate_reads_it()["go2rtc"]["api"]["listen"] == "127.0.0.1:1984"
 
 
 def test_no_rtmp_or_relay_address_is_left():
@@ -228,9 +249,12 @@ def test_anonymous_broker_leaves_rtsp_on_loopback_with_no_login():
     assert "{" + RELAY_PASSWORD_ENV + "}" not in text(relay_user="")
 
 
-@pytest.mark.parametrize("user", ["kit1", "Kit_1", "a.b-c", "me@site", "a+b~c"])
+@pytest.mark.parametrize("user", ["kit1", "Kit_1", "a.b-c", "me@site", "a+b~c", "1e3", "1.5e3", "0o17", "123", "null"])
 def test_ordinary_relay_users_are_written_as_they_are(user):
-    assert config(relay_user=user)["go2rtc"]["rtsp"]["username"] == user
+    # A number here would stop go2rtc: create_config.py calls len() on the value.
+    for cfg in (config(relay_user=user), as_frigate_reads_it(relay_user=user)):
+        assert cfg["go2rtc"]["rtsp"]["username"] == user
+        assert isinstance(cfg["go2rtc"]["rtsp"]["username"], str)
 
 
 @pytest.mark.parametrize(
@@ -345,6 +369,21 @@ def test_existing_without_zones_means_full_frame(existing):
 def test_unusable_existing_coordinates_raise_and_name_the_zone(coordinates):
     with pytest.raises(FrigateConfigError, match="gate"):
         text(existing=drawn({"gate": coordinates}))
+
+
+@pytest.mark.parametrize("name", ["1e3", "12e4", "2E5", "1e-3", "0o17", "0x1f", "1_000", "123", "on", "null"])
+def test_frigates_yaml_reader_keeps_zone_names_as_strings(name):
+    # Frigate refuses a zone key that is not a string, so one such name costs all detection.
+    zones = as_frigate_reads_it(covered_zones=[name])["cameras"]["cam-8da040"]["zones"]
+    assert list(zones) == [name]
+    assert isinstance(list(zones)[0], str)
+    assert zones[name]["coordinates"] == FULL_FRAME
+
+
+def test_frigates_yaml_reader_keeps_saved_list_coordinates_as_strings():
+    points = ["0.1,0.2", "0.3,0.2", "0.3,0.9"]
+    zones = as_frigate_reads_it(existing=drawn({"gate": points}))["cameras"]["cam-8da040"]["zones"]
+    assert list(zones["gate"]["coordinates"]) == points
 
 
 @pytest.mark.parametrize("zone", [None, "0,0,1,0,1,1", {}, {"coordinates": None}, {"inertia": 3}, []])

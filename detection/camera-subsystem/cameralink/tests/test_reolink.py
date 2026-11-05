@@ -572,8 +572,7 @@ def test_set_streams_sends_main_2304x1296_at_25fps_and_sub_640x480_at_15fps():
 
 
 def test_set_streams_uses_the_body_shape_the_camera_accepted():
-    # The recorded values are older, so only the keys are compared. SetEnc rejects vType,
-    # gop, width and height.
+    # The recorded values are older, so only the keys are compared.
     client, opener = logged_in(SetEnc=recorded("setenc_ok")["response"])
 
     client.set_streams()

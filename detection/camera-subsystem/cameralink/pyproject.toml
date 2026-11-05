@@ -11,6 +11,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "ruamel-yaml>=0.18,<0.19",
 ]
 
 [build-system]

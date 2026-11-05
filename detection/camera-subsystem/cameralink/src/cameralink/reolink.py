@@ -228,8 +228,10 @@ class ReolinkClient:
         self._call("SetOsd", {"Osd": osd})
 
     def set_streams(self) -> None:
-        # SetEnc rejects vType, gop, width and height (rspCode -4). See
-        # fixtures/reolink/setenc.json and setenc_ok.json. The values are in getenc.json's range.
+        # The keys of fixtures/reolink/setenc_ok.json, a body the camera accepted. setenc.json
+        # also sent vType, gop, width and height and got rspCode -4, but it had an out-of-range
+        # sub frameRate too, so which field caused that is unknown. The values here are in
+        # getenc.json's range.
         self._call(
             "SetEnc",
             {
