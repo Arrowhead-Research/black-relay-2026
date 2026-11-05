@@ -1949,7 +1949,7 @@ def test_i6_a_restart_after_the_ap_died_keeps_the_window(node: Node) -> None:
     assert node.state is S.JOINING
 
 
-def test_i7_a_lost_link_reissues_the_join_every_minute_and_never_opens_the_ap(node: Node) -> None:
+def test_i7_a_lost_link_reissues_the_join_every_three_minutes_and_never_opens_the_ap(node: Node) -> None:
     node.seed_config()
     node.boot()
     node.system.link_up()
@@ -1958,11 +1958,11 @@ def test_i7_a_lost_link_reissues_the_join_every_minute_and_never_opens_the_ap(no
     node.system.link_down()
     joins = node.system.count("join")
 
-    node.tick(59)
+    node.tick(179)
     assert node.system.count("join") == joins
     node.tick(1)
     assert node.system.count("join") == joins + 1
-    node.tick(59)
+    node.tick(179)
     assert node.system.count("join") == joins + 1
     node.tick(1)
     assert node.system.count("join") == joins + 2
@@ -2009,7 +2009,7 @@ def test_i7_a_restart_while_provisioned_keeps_rejoining(node: Node) -> None:
     joins = node.system.count("join")
 
     node.boot()
-    node.tick(60)
+    node.tick(180)
 
     assert node.system.count("join") == joins + 1
 

@@ -356,6 +356,7 @@ class NodeStore:
             and entries
             and all(
                 isinstance(entry, dict)
+                and isinstance(entry.get("target"), str)
                 and entry.get("target") in known
                 and isinstance(entry.get("write"), bool)
                 for entry in entries

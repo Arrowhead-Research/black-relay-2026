@@ -175,8 +175,9 @@ class RealSystem:
         return self._uplink()[1]
 
     def tailscale_up(self, key_file: Path, hostname: str) -> None:
-        # Only ever called with a new key, which must replace any earlier login.
-        _run(tailscale_up_args(key_file, hostname, force_reauth=True), timeout=_TAILSCALE_TIMEOUT_S)
+        # No --force-reauth: a retry after a killed login would re-authenticate with
+        # a possibly spent one-off key and could lose a working login.
+        _run(tailscale_up_args(key_file, hostname), timeout=_TAILSCALE_TIMEOUT_S)
 
     def gpio_reprovision_held(self) -> bool:
         """Read the active-low button by line name, with libgpiod 1.x or 2.x.

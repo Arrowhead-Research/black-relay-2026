@@ -102,8 +102,8 @@ def test_the_tailscale_key_is_passed_by_file_only(
 
     system.tailscale_up(key_file, "edge-7")
 
-    assert run.calls[0][0] == tailscale_up_args(key_file, "edge-7", force_reauth=True)
-    assert "--force-reauth" in run.calls[0][0]
+    assert run.calls[0][0] == tailscale_up_args(key_file, "edge-7")
+    assert "--force-reauth" not in run.calls[0][0]
     assert "tskey-auth-s3cret" not in " ".join(run.calls[0][0])
 
 

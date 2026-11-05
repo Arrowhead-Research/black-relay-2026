@@ -629,6 +629,8 @@ def test_c1_pending_login_ignores_a_damaged_bridge_config(store: NodeStore, path
         '{"a": 1}',
         "[1]",
         '[{"target": 1, "write": true}]',
+        '[{"target": [], "write": true}]',
+        '[{"target": {}, "write": true}]',
         '[{"target": "x"}]',
     ],
 )

@@ -78,7 +78,7 @@ class Settings:
     ap_port: int = 80
     interface: str = "wlan0"
     ap_check_s: float = 10.0
-    rejoin_s: float = 60.0
+    rejoin_s: float = 180.0
     hostname_retry_s: float = 30.0
     tailscale_backoff_s: float = 30.0
     tailscale_backoff_max_s: float = 3600.0
