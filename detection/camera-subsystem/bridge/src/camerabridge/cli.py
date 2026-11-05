@@ -268,7 +268,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     Exits nonzero if a callback hit an outbox I/O error, a network thread died, or the
     heartbeat hit an I/O error, so the service manager restarts the bridge. A dead
     thread would otherwise leave a node reporting a stale ``link_online``. The service
-    unit therefore needs ``Restart=always``.
+    unit therefore needs ``Restart=always``, ``RestartSec=5`` and ``StartLimitIntervalSec=0``.
     """
     parser = argparse.ArgumentParser(prog="camerabridge", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)

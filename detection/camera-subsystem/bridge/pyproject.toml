@@ -5,7 +5,7 @@ description = "Black Relay camera subsystem edge bridge: translates Frigate MQTT
 requires-python = ">=3.11"
 dependencies = [
     "jsonschema>=4.20",
-    "paho-mqtt>=2.0",
+    "paho-mqtt>=2.2,<2.3",
     "pyyaml>=6.0",
 ]
 

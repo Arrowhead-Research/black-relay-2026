@@ -323,7 +323,7 @@ batch, so a large replay cannot stall Frigate's event handling.
 
 **I/O failure.** If the outbox cannot write (a full disk, for example), or a network
 thread dies, the bridge exits nonzero so its service manager restarts it. The service
-unit needs `Restart=always`. The event being handled at that moment is lost.
+unit needs `Restart=always`, `RestartSec=5`, and `StartLimitIntervalSec=0`, so it keeps retrying until a full disk recovers. The event being handled at that moment is lost.
 
 **Overflow policy (FIFO drop-oldest-first).** The queue is bounded by size
 (`max_bytes`) and per-entry age (`max_age_s`). Because `object_update` is never
