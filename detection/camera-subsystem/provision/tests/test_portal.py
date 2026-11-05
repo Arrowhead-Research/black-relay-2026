@@ -1478,3 +1478,46 @@ def test_server_refuses_an_empty_interface(harness: Harness) -> None:
     """Setting the option to an empty name removes the restriction instead of adding one."""
     with pytest.raises(ValueError):
         make_server(harness.app, "127.0.0.1", 0, interface="")
+
+
+def test_server_logs_only_the_type_of_a_connection_failure(
+    capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    server = make_server(make_app(
+        scan_ssids=list, apply=Mock(), portal_host=PORTAL_HOST, mode=PortalMode.FULL
+    ), "127.0.0.1", 0, "lo")
+    try:
+        try:
+            raise TimeoutError(WIFI_PSK)
+        except TimeoutError:
+            server.handle_error(None, ("127.0.0.1", 1))
+    finally:
+        server.server_close()
+
+    captured = capsys.readouterr()
+    assert captured.err == "" and captured.out == ""
+    assert "TimeoutError" in caplog.text
+    assert WIFI_PSK not in caplog.text
+
+
+def test_a_silent_socket_prints_no_traceback(
+    capfd: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(portal._QuietRequestHandler, "timeout", 0.05)
+    server = make_server(make_app(
+        scan_ssids=list, apply=Mock(), portal_host=PORTAL_HOST, mode=PortalMode.FULL
+    ), "127.0.0.1", 0, "lo")
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
+    thread.start()
+    try:
+        with socket.create_connection(server.server_address, timeout=5) as client:
+            assert client.recv(1) == b""  # the server gives up and hangs up
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
+
+    assert "Traceback" not in capfd.readouterr().err
+    assert "TimeoutError" in caplog.text

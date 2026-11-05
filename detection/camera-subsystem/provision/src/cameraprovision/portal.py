@@ -21,6 +21,7 @@ import ipaddress
 import logging
 import re
 import socket
+import sys
 import threading
 from dataclasses import dataclass, field
 from importlib import resources
@@ -187,8 +188,8 @@ class SubmitResult:
 class WifiChange:
     """What ``WIFI_ONLY`` hands to ``apply``.
 
-    Field names match ``NodeConfig``, so the saved config takes it directly:
-    ``dataclasses.replace(saved, **dataclasses.asdict(change))``.
+    Task 6 applies this by re-rendering the WiFi keyfile from these two fields and the
+    saved hostname; it does not rebuild or revalidate a NodeConfig.
     """
 
     wifi_ssid: str
@@ -477,6 +478,10 @@ class _QuietRequestHandler(WSGIRequestHandler):
 
 class _PortalServer(ThreadingMixIn, WSGIServer):
     daemon_threads = True
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """Log the type only. The default prints a traceback, for a silent socket too."""
+        logger.warning("a portal connection failed: %s", sys.exc_info()[0].__name__)
 
 
 def make_server(app: WSGIApplication, ip: str, port: int, interface: str = "wlan0") -> WSGIServer:

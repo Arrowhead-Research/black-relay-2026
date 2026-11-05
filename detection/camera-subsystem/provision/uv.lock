@@ -34,7 +34,7 @@ dev = [{ name = "pytest", specifier = ">=8.0" }]
 [[package]]
 name = "cameraprovision"
 version = "0.0.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "pyyaml" },
 ]

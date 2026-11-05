@@ -12,10 +12,16 @@ import secrets
 import string
 import uuid
 
-__all__ = ["generate_ap_passphrase", "nm_wifi_profile", "render_nm_keyfile", "tailscale_up_args"]
+__all__ = [
+    "UPLINK_PROFILE_ID",
+    "generate_ap_passphrase",
+    "nm_wifi_profile",
+    "render_nm_keyfile",
+    "tailscale_up_args",
+]
 
 # Fixed, so re-provisioning replaces the profile instead of adding one per site.
-_PROFILE_ID = "black-relay-uplink"
+UPLINK_PROFILE_ID = "black-relay-uplink"
 
 # Printed on the kit label and typed by hand, so look-alike characters are left out.
 _PASSPHRASE_ALPHABET = "".join(c for c in string.ascii_letters + string.digits if c not in "0O1lI")
@@ -33,8 +39,8 @@ def nm_wifi_profile(ssid: str, psk: str, hostname: str) -> dict[str, dict[str, s
     """
     return {
         "connection": {
-            "id": _PROFILE_ID,
-            "uuid": str(uuid.uuid5(uuid.NAMESPACE_DNS, _PROFILE_ID)),
+            "id": UPLINK_PROFILE_ID,
+            "uuid": str(uuid.uuid5(uuid.NAMESPACE_DNS, UPLINK_PROFILE_ID)),
             "type": "wifi",
             "autoconnect": "true",
             "autoconnect-retries": "0",

@@ -1,0 +1,1607 @@
+"""Tests for ``cameraprovision.daemon``: the wiring of the pure cores to the system.
+
+Only the operating system is faked: nmcli, tailscale, GPIO and the listening socket.
+The state machine, the watchdog decision, the portal's WSGI app and the on-disk store
+are all real, so each test drives what a node would do. Time comes from a fake clock.
+"""
+
+from __future__ import annotations
+
+import io
+import logging
+import signal
+import socket
+import threading
+import time
+from pathlib import Path
+from typing import Any, Callable, Iterator
+from urllib.parse import urlencode
+from wsgiref.util import setup_testing_defaults
+from wsgiref.validate import validator
+
+import pytest
+import yaml
+from camerabridge import cli as bridge_cli
+
+from cameraprovision import __main__ as cli
+from cameraprovision.config import BrokerConfig, FrigateConfig, NodeConfig
+from cameraprovision.daemon import Provisioner, ProvisionerFailed, Settings
+from cameraprovision.portal import make_server
+from cameraprovision.state import ProvisionState as S
+from cameraprovision.store import NodeStore, Paths
+from cameraprovision.system import SystemCommandError
+
+WIFI_PSK = "w1fi-s3cret-Psk"
+NEW_WIFI_PSK = "n3w-w1fi-s3cret"
+BROKER_PASSWORD = "br0ker-s3cret-Pw"
+TAILSCALE_KEY = "tskey-auth-s3cret"
+SECRETS = (WIFI_PSK, NEW_WIFI_PSK, BROKER_PASSWORD, TAILSCALE_KEY)
+AP_IP = "10.42.0.1"
+BROWSER_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+FORM_TYPE = "application/x-www-form-urlencoded"
+JOIN_TIMEOUT = 120.0
+AP_WINDOW = 300.0
+AP_CAP = 1800.0
+
+
+def valid_form(**overrides: str) -> dict[str, str]:
+    form = {
+        "wifi_ssid": "Site-WiFi",
+        "wifi_psk": WIFI_PSK,
+        "hostname": "edge-7",
+        "node_id": "cam-01",
+        "broker_host": "10.0.0.2",
+        "broker_port": "1883",
+        "broker_username": "camera-cam-01",
+        "broker_password": BROKER_PASSWORD,
+        "mediamtx_address": "10.0.0.2:8554",
+        "frigate_base_url": "http://cam-01.local:5000",
+        "covered_zones": "perimeter-north, driveway",
+        "vpn_requested": "on",
+        "tailscale_auth_key": TAILSCALE_KEY,
+    }
+    form.update(overrides)
+    return form
+
+
+def node_config(**overrides: Any) -> NodeConfig:
+    values: dict[str, Any] = {
+        "node_id": "cam-01",
+        "hostname": "edge-7",
+        "wifi_ssid": "Site-WiFi",
+        "wifi_psk": WIFI_PSK,
+        "tailscale_auth_key": "",
+        "vpn_requested": False,
+        "mediamtx_address": "10.0.0.2:8554",
+        "covered_zones": ["perimeter-north"],
+        "broker": BrokerConfig(host="10.0.0.2", username="camera-cam-01", password=BROKER_PASSWORD),
+        "frigate": FrigateConfig(base_url="http://cam-01.local:5000"),
+    }
+    values.update(overrides)
+    return NodeConfig(**values)
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class FakeSystem:
+    """Records every side effect, in order, and fails on request."""
+
+    def __init__(self, calls: list[str]) -> None:
+        self.calls = calls
+        self.boot = "boot-1"
+        self.button = False
+        self.associated = False
+        self.lease = False
+        self.ssids = ["Site-WiFi", "Neighbour"]
+        self.failing: dict[str, Exception] = {}
+        self.tailscale_args: list[tuple[Path, str]] = []
+        self.chowned: list[Path] = []
+
+    def _do(self, name: str) -> None:
+        self.calls.append(name)
+        if name in self.failing:
+            raise self.failing[name]
+
+    def boot_id(self) -> str:
+        self._do("boot_id")
+        return self.boot
+
+    def gpio_reprovision_held(self) -> bool:
+        self._do("gpio")
+        return self.button
+
+    def scan_ssids(self) -> list[str]:
+        self._do("scan")
+        return list(self.ssids)
+
+    def start_ap(self) -> None:
+        self._do("start_ap")
+
+    def stop_ap(self) -> None:
+        self._do("stop_ap")
+
+    def reload_connections(self) -> None:
+        self._do("reload")
+
+    def join_uplink(self) -> None:
+        self._do("join")
+
+    def wifi_associated(self) -> bool:
+        self._do("wifi_associated")
+        return self.associated
+
+    def ipv4_lease(self) -> bool:
+        self._do("ipv4_lease")
+        return self.lease
+
+    def tailscale_up(self, key_file: Path, hostname: str) -> None:
+        self.tailscale_args.append((key_file, hostname))
+        self._do("tailscale_up")
+
+    def chown_to_service_user(self, path: Path) -> None:
+        self.chowned.append(path)
+        self._do("chown")
+
+    def link_up(self) -> None:
+        self.associated = self.lease = True
+
+    def link_down(self) -> None:
+        self.associated = self.lease = False
+
+    def count(self, name: str) -> int:
+        return self.calls.count(name)
+
+
+class FakeListener:
+    """Stands in for the socket. The WSGI app it holds is the real portal."""
+
+    def __init__(self, app: Any, ip: str, port: int, interface: str) -> None:
+        self.app, self.ip, self.port, self.interface = app, ip, port, interface
+        self.closed = False
+        self.was_shut_down = threading.Event()
+
+    def serve_forever(self, poll_interval: float = 0.5) -> None:
+        self.was_shut_down.wait()
+
+    def shutdown(self) -> None:
+        self.was_shut_down.set()
+
+    def server_close(self) -> None:
+        self.closed = True
+
+
+class Response:
+    def __init__(self, status: str, headers: dict[str, str], body: str, closer: Any) -> None:
+        self.status, self.headers, self.body = status, headers, body
+        self._closer = closer
+        self._finished = False
+
+    @property
+    def code(self) -> int:
+        return int(self.status.split()[0])
+
+    def finish(self) -> None:
+        """What wsgiref does once the response is on the wire."""
+        if not self._finished:
+            self._finished = True
+            self._closer.close()
+
+
+class Node:
+    """One simulated kit: a disk, a clock and a radio that survive daemon restarts."""
+
+    def __init__(self, root: Path) -> None:
+        self.calls: list[str] = []
+        self.clock = FakeClock()
+        self.system = FakeSystem(self.calls)
+        self.paths = Paths(
+            bridge_config=root / "etc/camerabridge/bridge.yaml",
+            mediamtx_env=root / "etc/camerabridge/mediamtx.env",
+            nm_connections_dir=root / "etc/NetworkManager/system-connections",
+            state_dir=root / "var/lib/camera-provision",
+        )
+        self.listeners: list[FakeListener] = []
+        self.daemon: Provisioner | None = None
+        self.responses: list[Response] = []
+
+    def _listen(self, app: Any, ip: str, port: int, interface: str) -> FakeListener:
+        self.calls.append("listen")
+        listener = FakeListener(app, ip, port, interface)
+        self.listeners.append(listener)
+        return listener
+
+    def store(self) -> NodeStore:
+        return NodeStore(self.paths, chown=lambda path: None)
+
+    def seed_config(self, cfg: NodeConfig | None = None) -> None:
+        self.store().save(cfg or node_config())
+
+    def boot(self, *, server_factory: Any = None, **settings: Any) -> Provisioner:
+        """Start a daemon process."""
+        self.daemon = Provisioner(
+            system=self.system,
+            paths=self.paths,
+            clock=self.clock,
+            settings=Settings(
+                join_timeout_s=JOIN_TIMEOUT, ap_window_s=AP_WINDOW, ap_cap_s=AP_CAP, **settings
+            ),
+            server_factory=server_factory or self._listen,
+        )
+        self.daemon.start()
+        return self.daemon
+
+    def tick(self, seconds: float = 0.0) -> Provisioner:
+        self.clock.advance(seconds)
+        assert self.daemon is not None
+        self.daemon.tick()
+        return self.daemon
+
+    @property
+    def state(self) -> S:
+        assert self.daemon is not None
+        return self.daemon.state
+
+    def open_listeners(self) -> list[FakeListener]:
+        return [listener for listener in self.listeners if not listener.closed]
+
+    def listener(self) -> FakeListener:
+        open_now = self.open_listeners()
+        assert len(open_now) == 1
+        return open_now[0]
+
+    def request(
+        self,
+        method: str = "GET",
+        form: dict[str, str] | None = None,
+        *,
+        host: str = AP_IP,
+        accept: str = BROWSER_ACCEPT,
+    ) -> Response:
+        """Make a real WSGI call on the open listener's app. Leaves the response unfinished."""
+        response = self.request_app(self.listener().app, method, form, host=host, accept=accept)
+        self.responses.append(response)
+        return response
+
+    @staticmethod
+    def request_app(
+        app: Any,
+        method: str = "GET",
+        form: dict[str, str] | None = None,
+        *,
+        host: str = AP_IP,
+        accept: str = BROWSER_ACCEPT,
+    ) -> Response:
+        body = urlencode(form or {}).encode()
+        environ: dict[str, Any] = {}
+        setup_testing_defaults(environ)
+        environ.update(
+            REQUEST_METHOD=method,
+            QUERY_STRING="",
+            PATH_INFO="/",
+            HTTP_HOST=host,
+            HTTP_ACCEPT=accept,
+            CONTENT_LENGTH=str(len(body)),
+        )
+        environ["wsgi.input"] = io.BytesIO(body)
+        if method == "POST":
+            environ["CONTENT_TYPE"] = FORM_TYPE
+        started: dict[str, Any] = {}
+
+        def start_response(status: str, headers: list[tuple[str, str]], exc_info: Any = None) -> Any:
+            started.update(status=status, headers=dict(headers))
+            return lambda data: None
+
+        result = validator(app)(environ, start_response)
+        text = b"".join(result).decode()
+        return Response(started["status"], started["headers"], text, result)
+
+    def submit(self, form: dict[str, str] | None = None) -> Response:
+        """POST the form, and let the response finish."""
+        response = self.request("POST", valid_form() if form is None else form)
+        response.finish()
+        return response
+
+    def disk(self) -> dict[str, bytes]:
+        """Every file the store owns, to prove a failure changed nothing."""
+        files = [
+            self.paths.bridge_config,
+            self.paths.mediamtx_env,
+            self.paths.nm_keyfile,
+            self.paths.node_file,
+            self.paths.tailscale_key,
+        ]
+        return {str(path): path.read_bytes() for path in files if path.exists()}
+
+    def bridge_yaml(self) -> dict[str, Any]:
+        return yaml.safe_load(self.paths.bridge_config.read_text())
+
+
+@pytest.fixture
+def node(tmp_path: Path) -> Iterator[Node]:
+    kit = Node(tmp_path)
+    yield kit
+    if kit.daemon is not None:
+        kit.daemon.shutdown()
+    for response in kit.responses:
+        response.finish()
+
+
+def after(calls: list[str], first: str, then: str) -> bool:
+    return first in calls and then in calls and calls.index(first) < calls.index(then)
+
+
+# --- required behaviours ----------------------------------------------------------------
+
+
+def test_blank_boot_opens_the_ap_with_the_full_portal(node: Node) -> None:
+    node.boot()
+
+    assert node.state is S.AP_UP
+    assert node.system.count("start_ap") == 1
+    listener = node.listener()
+    assert (listener.ip, listener.port, listener.interface) == (AP_IP, 80, "wlan0")
+    page = node.request().body
+    assert 'name="broker_host"' in page and 'name="wifi_psk"' in page
+
+
+def test_scan_runs_before_the_ap_and_the_listener_after_it(node: Node) -> None:
+    node.boot()
+
+    assert after(node.calls, "scan", "start_ap")
+    assert after(node.calls, "start_ap", "listen")
+
+
+def test_the_portal_shows_the_cached_scan_without_rescanning(node: Node) -> None:
+    node.boot()
+    scans = node.system.count("scan")
+
+    page = node.request().body
+
+    assert 'value="Neighbour"' in page
+    assert node.system.count("scan") == scans
+
+
+def test_the_scan_cache_gives_each_reader_its_own_copy(node: Node) -> None:
+    daemon = node.boot()
+
+    daemon._cached_ssids().clear()
+
+    assert daemon._cached_ssids() == ["Site-WiFi", "Neighbour"]
+
+
+def test_an_empty_scan_keeps_the_last_good_list(node: Node) -> None:
+    node.seed_config()
+    node.system.button = True
+    node.boot()
+    node.system.ssids = []
+
+    node.tick(AP_WINDOW)  # to JOINING
+    node.tick(JOIN_TIMEOUT)  # to FALLBACK_AP, scanning again
+    node.tick()
+
+    assert node.state is S.FALLBACK_AP
+    assert 'value="Neighbour"' in node.request().body
+
+
+def test_a_failed_scan_still_opens_the_ap(node: Node) -> None:
+    node.system.failing["scan"] = SystemCommandError("nmcli failed")
+
+    node.boot()
+
+    assert node.state is S.AP_UP
+    assert node.listener() is not None
+
+
+def test_portal_host_is_the_ap_ip_clients_send(node: Node) -> None:
+    """Served on port 80, so the Host a browser sends is the bare IP. Anything else is 403."""
+    node.boot()
+
+    assert node.request("GET", host=AP_IP).code == 200
+    assert node.request("POST", valid_form(), host=f"{AP_IP}:80").code == 403
+
+
+def test_submit_writes_config_and_profile_then_joins(node: Node) -> None:
+    node.boot()
+
+    response = node.request("POST", valid_form())
+    assert response.code == 200
+    # Saved, but the join must wait for the response to reach the operator.
+    assert node.bridge_yaml()["node_id"] == "cam-01"
+    keyfile = node.paths.nm_keyfile.read_text()
+    assert "ssid=Site-WiFi" in keyfile and f"psk={WIFI_PSK}" in keyfile
+    assert node.paths.nm_keyfile.name == "black-relay-uplink.nmconnection"
+    assert node.paths.nm_keyfile.stat().st_mode & 0o777 == 0o600
+    node.tick()
+    assert node.state is S.AP_UP
+    assert node.system.count("join") == 0
+
+    response.finish()
+    node.tick()
+
+    assert node.state is S.JOINING
+    calls = node.calls
+    assert after(calls, "stop_ap", "reload") and after(calls, "reload", "join")
+    assert node.open_listeners() == []
+
+
+def test_a_double_tap_submit_is_idempotent(node: Node) -> None:
+    node.boot()
+    first = node.request("POST", valid_form())
+    saved = node.disk()
+    second = node.request("POST", valid_form())
+    assert (first.code, second.code) == (200, 200)
+    assert node.disk() == saved
+
+    first.finish()
+    second.finish()
+    node.tick()
+
+    assert node.state is S.JOINING
+    assert node.system.count("join") == 1
+
+
+def test_config_received_is_not_fired_for_a_get_finishing_after_a_post(node: Node) -> None:
+    """Only the POST's own response going out may start the join."""
+    node.boot()
+    get = node.request("GET")
+    post = node.request("POST", valid_form())
+
+    get.finish()
+    node.tick()
+
+    assert node.state is S.AP_UP
+    post.finish()
+    node.tick()
+    assert node.state is S.JOINING
+
+
+def test_rejected_submit_writes_nothing_and_stays_up(node: Node) -> None:
+    node.boot()
+
+    response = node.request("POST", valid_form(node_id="BAD"))
+    response.finish()
+    node.tick()
+
+    assert response.code == 400
+    assert node.disk() == {}
+    assert node.state is S.AP_UP
+    assert node.listener() is not None
+
+
+def test_joining_past_the_timeout_falls_back_to_the_ap(node: Node) -> None:
+    node.seed_config()
+    node.boot()
+    assert node.state is S.JOINING
+
+    node.tick(JOIN_TIMEOUT - 1)
+    assert node.state is S.JOINING
+    assert node.system.count("start_ap") == 0
+
+    node.tick(1)
+
+    assert node.state is S.FALLBACK_AP
+    assert node.system.count("start_ap") == 1
+    assert after(node.calls, "start_ap", "listen")
+    page = node.request().body
+    assert 'name="wifi_psk"' in page
+    assert 'name="broker_host"' not in page
+
+
+def test_a_second_join_after_the_ap_window_succeeds(node: Node) -> None:
+    """Power cut: the node boots before the router, and rejoins when WiFi returns."""
+    node.seed_config()
+    node.boot()
+    node.tick(JOIN_TIMEOUT)
+    assert node.state is S.FALLBACK_AP
+
+    node.tick(AP_WINDOW - 1)
+    assert node.state is S.FALLBACK_AP
+    node.tick(1)
+    assert node.state is S.JOINING
+    assert node.system.count("join") == 2
+    assert node.open_listeners() == []
+
+    # Most of a timeout has passed since boot, but this attempt gets a full one.
+    node.system.link_up()
+    node.tick(JOIN_TIMEOUT - 1)
+
+    assert node.state is S.PROVISIONED
+    assert node.system.count("start_ap") == 1
+
+
+def test_each_join_attempt_gets_a_full_timeout(node: Node) -> None:
+    node.seed_config()
+    node.boot()
+    node.tick(JOIN_TIMEOUT)
+    node.tick(AP_WINDOW)
+    assert node.state is S.JOINING
+
+    node.tick(JOIN_TIMEOUT - 1)
+    assert node.state is S.JOINING
+
+    node.tick(1)
+    assert node.state is S.FALLBACK_AP
+
+
+def test_association_without_a_lease_is_not_uplink(node: Node) -> None:
+    node.seed_config()
+    node.boot()
+    node.system.associated = True
+
+    node.tick(1)
+    assert node.state is S.JOINING
+
+    node.tick(JOIN_TIMEOUT)
+    assert node.state is S.FALLBACK_AP
+
+
+def test_provisioned_link_loss_does_not_open_the_ap(node: Node) -> None:
+    node.seed_config()
+    node.boot()
+    node.system.link_up()
+    node.tick(1)
+    assert node.state is S.PROVISIONED
+
+    node.system.link_down()
+    for _ in range(5):
+        node.tick(JOIN_TIMEOUT + AP_WINDOW + AP_CAP)
+
+    assert node.state is S.PROVISIONED
+    assert node.system.count("start_ap") == 0
+    assert node.listeners == []
+
+
+def test_restart_on_the_same_boot_restores_state_without_firing_boot(node: Node) -> None:
+    node.seed_config()
+    node.boot()
+    node.system.link_up()
+    node.tick(1)
+    assert node.state is S.PROVISIONED
+    node.daemon.shutdown()
+    node.system.link_down()
+    node.system.button = True  # only read at a real boot
+    joins = node.system.count("join")
+
+    node.boot()
+
+    assert node.state is S.PROVISIONED  # BOOT would give JOINING, the button AP_UP
+    assert node.system.count("join") == joins
+    assert node.system.count("gpio") == 1
+    assert node.system.count("start_ap") == 0
+
+
+def test_restart_in_fallback_reopens_the_wifi_only_portal(node: Node) -> None:
+    node.seed_config()
+    node.boot()
+    node.tick(JOIN_TIMEOUT)
+    assert node.state is S.FALLBACK_AP
+    node.daemon.shutdown()
+
+    node.boot()
+
+    assert node.state is S.FALLBACK_AP
+    assert len(node.open_listeners()) == 1
+    assert 'name="broker_host"' not in node.request().body
+
+
+def test_restart_during_joining_keeps_the_original_join_timer(node: Node) -> None:
+    """Otherwise a crash loop would keep a node with bad credentials from ever falling back."""
+    node.seed_config()
+    node.boot()
+    node.tick(JOIN_TIMEOUT - 10)
+    node.daemon.shutdown()
+
+    node.boot()
+    assert node.state is S.JOINING
+    node.tick(10)
+
+    assert node.state is S.FALLBACK_AP
+
+
+
+
+def test_restart_keeps_the_ap_cap(node: Node) -> None:
+    node.seed_config()
+    node.system.button = True
+    node.boot()
+    for _ in range(6):
+        node.tick(AP_WINDOW - 1)
+        node.request("GET")
+    node.daemon.shutdown()  # 1794 s in
+
+    node.boot()
+    assert node.state is S.AP_UP
+    node.tick(6)
+
+    assert node.state is S.JOINING
+
+
+def test_new_boot_id_fires_boot(node: Node) -> None:
+    node.seed_config()
+    node.boot()
+    node.system.link_up()
+    node.tick(1)
+    assert node.state is S.PROVISIONED
+    node.daemon.shutdown()
+    node.system.link_down()
+    joins = node.system.count("join")
+
+    node.system.boot = "boot-2"
+    node.boot()
+
+    assert node.state is S.JOINING
+    assert node.system.count("join") == joins + 1
+
+
+def test_corrupt_state_file_fires_boot(node: Node) -> None:
+    node.seed_config()
+    node.boot()
+    node.daemon.shutdown()
+    node.paths.state_file.write_text("{not json")
+
+    node.boot()
+
+    assert node.state is S.JOINING
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"boot_id": "boot-1", "state": "nonsense", "entered_at": 1}',
+        '{"boot_id": "boot-1", "state": "joining"}',
+        '{"boot_id": "boot-1", "state": "joining", "entered_at": "soon"}',
+        '{"boot_id": "boot-1", "state": "unprovisioned", "entered_at": 1}',
+        "[]",
+    ],
+)
+def test_a_malformed_state_file_fires_boot(node: Node, content: str) -> None:
+    node.seed_config()
+    node.paths.state_file.parent.mkdir(parents=True, exist_ok=True)
+    node.paths.state_file.write_text(content)
+
+    node.boot()
+
+    assert node.state is S.JOINING
+    assert node.system.count("gpio") == 1
+
+
+def test_button_at_boot_opens_the_ap_even_with_config(node: Node) -> None:
+    node.seed_config()
+    node.system.button = True
+
+    node.boot()
+
+    assert node.state is S.AP_UP
+    assert node.system.count("join") == 0
+    assert 'name="broker_host"' in node.request().body  # the full form, not the WiFi repair
+
+
+def test_ap_window_restarts_on_the_hook_and_stops_at_the_cap(node: Node) -> None:
+    node.seed_config()
+    node.system.button = True
+    node.boot()
+    elapsed = 0.0
+
+    # Each form GET restarts the 300 s window, up to the 1800 s cap.
+    while elapsed + AP_WINDOW - 1 < AP_CAP:
+        node.tick(AP_WINDOW - 1)
+        elapsed += AP_WINDOW - 1
+        assert node.state is S.AP_UP
+        node.request("GET")
+
+    node.tick(AP_CAP - elapsed)
+
+    assert node.state is S.JOINING
+
+
+def test_ap_window_elapses_without_a_form_request(node: Node) -> None:
+    node.seed_config()
+    node.system.button = True
+    node.boot()
+
+    node.tick(AP_WINDOW - 1)
+    assert node.state is S.AP_UP
+    node.tick(1)
+
+    assert node.state is S.JOINING
+
+
+def test_connectivity_probes_do_not_restart_the_window(node: Node) -> None:
+    node.seed_config()
+    node.system.button = True
+    node.boot()
+
+    node.tick(AP_WINDOW - 1)
+    node.request("GET", accept="*/*")  # a phone's probe, no text/html
+    node.request("GET", host="connectivitycheck.gstatic.com")  # the redirect
+    node.tick(1)
+
+    assert node.state is S.JOINING
+
+
+def test_a_blank_node_keeps_its_ap_open_past_the_cap(node: Node) -> None:
+    node.boot()
+
+    node.tick(AP_CAP + AP_WINDOW)
+    node.tick(AP_CAP + AP_WINDOW)
+
+    assert node.state is S.AP_UP
+    assert node.system.count("start_ap") == 1
+    assert len(node.open_listeners()) == 1
+
+
+def test_has_config_is_read_at_each_event(node: Node) -> None:
+    """A config removed while the AP is up: nothing to rejoin with, so the AP stays."""
+    node.seed_config()
+    node.system.button = True
+    node.boot()
+    node.paths.bridge_config.unlink()
+
+    node.tick(AP_WINDOW)
+
+    assert node.state is S.AP_UP
+
+
+def test_listener_is_down_outside_ap_states(node: Node) -> None:
+    node.seed_config()
+    node.boot()
+    assert node.state is S.JOINING
+    assert node.listeners == []
+
+    node.tick(JOIN_TIMEOUT)
+    assert node.state is S.FALLBACK_AP
+    assert len(node.open_listeners()) == 1
+
+    node.tick(AP_WINDOW)
+    assert node.state is S.JOINING
+    assert node.open_listeners() == []
+
+    node.system.link_up()
+    node.tick(1)
+    assert node.state is S.PROVISIONED
+    assert node.open_listeners() == []
+    assert all(listener.was_shut_down.is_set() for listener in node.listeners)
+
+
+def test_the_listener_stops_before_the_ap(node: Node) -> None:
+    node.seed_config()
+    node.boot()
+    node.tick(JOIN_TIMEOUT)
+    listener = node.listener()
+    node.calls.clear()
+    seen: list[bool] = []
+    original = node.system.stop_ap
+    node.system.stop_ap = lambda: (seen.append(listener.closed), original())[1]  # type: ignore[method-assign]
+
+    node.tick(AP_WINDOW)
+
+    assert seen == [True]
+
+
+# --- apply ------------------------------------------------------------------------------
+
+
+def test_failed_apply_leaves_the_old_config_and_the_portal_up(node: Node) -> None:
+    node.seed_config(node_config(hostname="old-name"))
+    node.system.button = True
+    node.boot()
+    before = node.disk()
+    node.system.failing["chown"] = PermissionError("nope")
+
+    response = node.request("POST", valid_form(hostname="new-name"))
+    response.finish()
+    node.tick()
+
+    assert response.code == 400
+    assert "could not be saved" in response.body
+    assert node.disk() == before
+    assert node.state is S.AP_UP
+    assert node.listener() is not None
+    assert node.store().load().hostname == "old-name"
+
+    # The operator can try again and succeed.
+    del node.system.failing["chown"]
+    node.submit(valid_form(hostname="new-name"))
+    node.tick()
+    assert node.state is S.JOINING
+    assert node.store().load().hostname == "new-name"
+
+
+def test_the_bridge_config_is_chowned_to_the_service_user_before_it_lands(node: Node) -> None:
+    node.boot()
+
+    node.submit()
+
+    assert len(node.system.chowned) == 1
+    assert node.system.chowned[0].parent == node.paths.bridge_config.parent
+    assert node.system.chowned[0] != node.paths.bridge_config
+
+
+def test_the_written_config_loads_through_the_real_bridge(node: Node) -> None:
+    node.boot()
+    node.submit()
+
+    loaded = bridge_cli.load_config(str(node.paths.bridge_config))
+
+    assert loaded["node_id"] == "cam-01"
+
+
+def test_fallback_repair_changes_only_the_wifi(node: Node) -> None:
+    node.seed_config(node_config(hostname="kept-name", covered_zones=["kept-zone"]))
+    node.boot()
+    node.tick(JOIN_TIMEOUT)
+    assert node.state is S.FALLBACK_AP
+    bridge = node.paths.bridge_config.read_bytes()
+
+    # Everything but the WiFi fields must be ignored, whatever a client posts.
+    node.submit(
+        valid_form(
+            wifi_ssid="Fixed-WiFi",
+            wifi_psk=NEW_WIFI_PSK,
+            broker_host="evil.example",
+            node_id="evil",
+            hostname="evil",
+        )
+    )
+    node.tick()
+
+    assert node.state is S.JOINING
+    assert node.paths.bridge_config.read_bytes() == bridge
+    saved = node.store().load()
+    assert saved.wifi_ssid == "Fixed-WiFi"
+    assert saved.hostname == "kept-name"
+    keyfile = node.paths.nm_keyfile.read_text()
+    assert f"psk={NEW_WIFI_PSK}" in keyfile and "ssid=Fixed-WiFi" in keyfile
+    assert "dhcp-hostname=kept-name" in keyfile
+    assert not node.paths.tailscale_key.exists()
+
+
+def test_fallback_repair_succeeds_after_the_tailscale_key_is_gone(node: Node) -> None:
+    """The node logged in, so its key is deleted. A repair must still reach JOINING."""
+    node.boot()
+    node.submit()
+    node.tick()
+    node.system.link_up()
+    node.tick(1)
+    assert node.state is S.PROVISIONED and not node.paths.tailscale_key.exists()
+    node.daemon.shutdown()
+    node.system.boot = "boot-2"
+    node.system.link_down()
+    node.boot()
+    node.tick(JOIN_TIMEOUT)
+    assert node.state is S.FALLBACK_AP
+    bridge = node.paths.bridge_config.read_bytes()
+
+    response = node.request("POST", {"wifi_ssid": "Fixed-WiFi", "wifi_psk": NEW_WIFI_PSK})
+    assert response.code == 200
+    response.finish()
+    node.tick()
+
+    assert node.state is S.JOINING
+    assert f"psk={NEW_WIFI_PSK}" in node.paths.nm_keyfile.read_text()
+    assert node.paths.bridge_config.read_bytes() == bridge
+    assert not node.paths.tailscale_key.exists()
+    node.system.link_up()
+    node.tick(1)
+    assert node.state is S.PROVISIONED
+    assert node.system.count("tailscale_up") == 1  # no second login is owed
+
+
+def test_fallback_repair_keeps_a_pending_tailscale_key(node: Node) -> None:
+    node.boot()
+    node.submit()
+    node.tick()
+    node.tick(JOIN_TIMEOUT)
+    assert node.state is S.FALLBACK_AP
+
+    node.submit({"wifi_ssid": "Fixed-WiFi", "wifi_psk": NEW_WIFI_PSK})
+
+    assert node.paths.tailscale_key.read_text() == TAILSCALE_KEY
+
+
+def test_fallback_with_no_config_gets_a_new_full_server(node: Node) -> None:
+    """Nothing to repair, so a WiFi-only form would leave the node stuck."""
+    node.seed_config()
+    node.boot()
+    node.tick(JOIN_TIMEOUT)
+    wifi_only = node.listener()
+    node.paths.bridge_config.unlink()
+    before = node.disk()
+
+    # The old server has not been replaced yet, and refuses without writing.
+    refused = Node.request_app(
+        wifi_only.app, "POST", {"wifi_ssid": "Fixed-WiFi", "wifi_psk": NEW_WIFI_PSK}
+    )
+    refused.finish()
+    assert refused.code == 400
+    assert node.disk() == before
+
+    node.tick()
+
+    assert node.state is S.FALLBACK_AP
+    assert wifi_only.closed
+    assert node.listener() is not wifi_only
+    assert node.system.count("start_ap") == 1  # the same AP stays up
+    assert 'name="broker_host"' in node.request().body
+
+    node.submit()
+    node.tick()
+    assert node.state is S.JOINING
+
+
+def test_a_full_save_in_fallback_is_not_cut_off_by_the_mode_change(node: Node) -> None:
+    """The save makes a config exist, which would pick WIFI_ONLY before the response is out."""
+    node.seed_config()
+    node.boot()
+    node.tick(JOIN_TIMEOUT)
+    node.paths.bridge_config.unlink()
+    node.tick()
+    full = node.listener()
+    response = node.request("POST", valid_form())
+    assert response.code == 200
+
+    node.tick()
+
+    assert node.listener() is full
+    response.finish()
+    node.tick()
+    assert node.state is S.JOINING
+
+
+def test_a_saved_config_restores_wifi_only_mode_in_fallback(node: Node) -> None:
+    """A config that returns while the full form is up, with nothing submitted to it."""
+    node.seed_config()
+    node.boot()
+    node.tick(JOIN_TIMEOUT)
+    content = node.paths.bridge_config.read_bytes()
+    node.paths.bridge_config.unlink()
+    node.tick()
+    assert 'name="broker_host"' in node.request().body
+
+    node.paths.bridge_config.write_bytes(content)
+    node.tick()
+
+    assert 'name="broker_host"' not in node.request().body
+    assert len(node.open_listeners()) == 1
+
+
+def test_an_invalid_wifi_repair_writes_nothing(node: Node) -> None:
+    node.seed_config()
+    node.boot()
+    node.tick(JOIN_TIMEOUT)
+    before = node.disk()
+
+    response = node.request("POST", {"wifi_ssid": "Fixed-WiFi", "wifi_psk": "short"})
+    response.finish()
+    node.tick()
+
+    assert response.code == 400
+    assert node.disk() == before
+    assert node.state is S.FALLBACK_AP
+
+
+def test_post_in_flight_at_shutdown_cannot_apply(node: Node) -> None:
+    """A real socket: the body is still arriving when the node leaves the AP state."""
+    node.seed_config(node_config(hostname="old-name"))
+    node.system.button = True
+    in_handler = threading.Event()
+    bound: list[Any] = []
+
+    def factory(app: Any, ip: str, port: int, interface: str) -> Any:
+        def noting(environ: Any, start_response: Any) -> Any:
+            in_handler.set()
+            return app(environ, start_response)
+
+        server = make_server(noting, "127.0.0.1", 0, "lo")
+        bound.append(server)
+        return server
+
+    node.boot(server_factory=factory)
+    before = node.disk()
+    body = urlencode(valid_form(hostname="new-name")).encode()
+
+    with socket.create_connection(bound[0].server_address, timeout=5) as client:
+        client.sendall(
+            b"POST / HTTP/1.1\r\n"
+            + f"Host: {AP_IP}\r\nContent-Type: {FORM_TYPE}\r\n".encode()
+            + f"Accept: {BROWSER_ACCEPT}\r\nContent-Length: {len(body)}\r\n\r\n".encode()
+            + body[:10]
+        )
+        assert in_handler.wait(5)
+
+        node.tick(AP_WINDOW)  # the window elapses, so the portal closes
+        assert node.state is S.JOINING
+
+        client.sendall(body[10:])
+        reply = b""
+        while chunk := client.recv(65536):
+            reply += chunk
+
+    assert reply.startswith(b"HTTP/1.0 400") or reply.startswith(b"HTTP/1.1 400")
+    assert node.disk() == before
+    node.tick()
+    assert node.state is S.JOINING
+
+
+def test_response_finishing_after_the_portal_closed_fires_nothing(node: Node) -> None:
+    """A stale config_received must not pull a later fallback AP back into JOINING."""
+    node.seed_config()
+    node.system.button = True
+    node.boot()
+    response = node.request("POST", valid_form())
+    assert response.code == 200
+
+    node.tick(AP_WINDOW)
+    assert node.state is S.JOINING
+    response.finish()
+    node.tick(JOIN_TIMEOUT)
+    assert node.state is S.FALLBACK_AP
+
+    node.tick()
+
+    assert node.state is S.FALLBACK_AP
+
+
+def test_a_late_form_request_on_a_closed_portal_does_not_move_the_new_window(node: Node) -> None:
+    node.seed_config()
+    node.boot()
+    node.tick(JOIN_TIMEOUT)
+    stale_app = node.listener().app
+    node.tick(AP_WINDOW)
+    assert node.state is S.JOINING
+    node.tick(JOIN_TIMEOUT)
+    assert node.state is S.FALLBACK_AP
+
+    node.tick(AP_WINDOW - 1)
+    Node.request_app(stale_app, "GET").finish()
+    node.tick(1)
+
+    assert node.state is S.JOINING
+
+
+# --- Tailscale --------------------------------------------------------------------------
+
+
+def provisioned_with_vpn(node: Node) -> None:
+    node.boot()
+    node.submit()
+    node.tick()
+    assert node.state is S.JOINING
+    node.system.link_up()
+
+
+def test_tailscale_is_not_run_before_provisioned(node: Node) -> None:
+    provisioned_with_vpn(node)
+    assert node.paths.tailscale_key.read_text() == TAILSCALE_KEY
+    assert node.system.count("tailscale_up") == 0
+
+
+def test_tailscale_runs_after_provisioned_and_the_key_is_deleted(node: Node) -> None:
+    provisioned_with_vpn(node)
+    key_file = node.paths.tailscale_key
+    assert key_file.stat().st_mode & 0o777 == 0o600
+
+    node.tick(1)
+
+    assert node.state is S.PROVISIONED
+    assert node.system.tailscale_args == [(key_file, "edge-7")]
+    assert not key_file.exists()
+
+    node.tick(100000)
+    assert node.system.count("tailscale_up") == 1
+
+
+def test_tailscale_failure_does_not_fall_back_and_retries_with_backoff(
+    node: Node, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    provisioned_with_vpn(node)
+    node.system.failing["tailscale_up"] = SystemCommandError(
+        f"tailscale up failed {TAILSCALE_KEY}"
+    )
+
+    node.tick(1)  # attempt 1
+    assert node.system.count("tailscale_up") == 1
+    node.tick(1)
+    assert node.system.count("tailscale_up") == 1  # backing off
+    node.tick(29)
+    assert node.system.count("tailscale_up") == 2  # 30 s
+    node.tick(59)
+    assert node.system.count("tailscale_up") == 2
+    node.tick(1)
+    assert node.system.count("tailscale_up") == 3  # 60 s
+
+    assert node.state is S.PROVISIONED
+    assert node.system.count("start_ap") == 1  # only the first install's
+    assert node.open_listeners() == []
+    assert node.paths.tailscale_key.exists()
+    assert "tailscale" in caplog.text
+    assert TAILSCALE_KEY not in caplog.text
+
+    del node.system.failing["tailscale_up"]
+    node.tick(10000)
+    assert node.system.count("tailscale_up") == 4
+    assert not node.paths.tailscale_key.exists()
+
+
+def test_tailscale_backoff_is_capped(node: Node) -> None:
+    provisioned_with_vpn(node)
+    node.system.failing["tailscale_up"] = SystemCommandError("no route")
+    node.tick(1)
+    node.tick(100000)  # a long way in, attempts keep going
+    attempts = node.system.count("tailscale_up")
+
+    for _ in range(12):
+        node.tick(3600)
+
+    assert node.system.count("tailscale_up") == attempts + 12
+
+
+def test_a_failed_login_never_counts_as_a_daemon_failure(node: Node) -> None:
+    provisioned_with_vpn(node)
+    node.system.failing["tailscale_up"] = SystemCommandError("no route")
+    for _ in range(500):
+        node.tick(30)
+    assert node.state is S.PROVISIONED
+
+
+def test_tailscale_retries_after_a_restart_while_the_key_remains(node: Node) -> None:
+    provisioned_with_vpn(node)
+    node.system.failing["tailscale_up"] = SystemCommandError("no route")
+    node.tick(1)
+    node.daemon.shutdown()
+    del node.system.failing["tailscale_up"]
+
+    node.boot()
+    node.tick()
+
+    assert not node.paths.tailscale_key.exists()
+
+
+def test_failing_to_delete_the_key_does_not_repeat_the_login(
+    node: Node, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provisioned_with_vpn(node)
+    real_delete = NodeStore.delete_tailscale_key
+    monkeypatch.setattr(
+        NodeStore, "delete_tailscale_key", lambda self: (_ for _ in ()).throw(OSError("busy"))
+    )
+
+    node.tick(1)
+    node.tick(1)
+    assert node.system.count("tailscale_up") == 1
+    assert node.paths.tailscale_key.exists()
+
+    monkeypatch.setattr(NodeStore, "delete_tailscale_key", real_delete)
+    node.tick(1)
+
+    assert node.system.count("tailscale_up") == 1
+    assert not node.paths.tailscale_key.exists()
+
+
+def test_no_vpn_means_no_tailscale(node: Node) -> None:
+    node.boot()
+    form = valid_form()
+    del form["vpn_requested"]
+    node.submit(form)
+    node.tick()
+    node.system.link_up()
+    node.tick(1)
+
+    assert node.state is S.PROVISIONED
+    assert node.system.count("tailscale_up") == 0
+
+
+# --- crash safety -----------------------------------------------------------------------
+
+
+def test_a_failed_join_is_retried(node: Node) -> None:
+    node.seed_config()
+    node.system.failing["join"] = SystemCommandError("nmcli failed")
+
+    node.boot()
+    assert node.system.count("join") == 1
+    node.tick(1)
+    assert node.system.count("join") == 2
+
+    del node.system.failing["join"]
+    node.tick(1)
+    node.tick(1)
+    assert node.system.count("join") == 3  # no more once one succeeded
+
+
+def test_a_failed_ap_stop_is_retried_and_the_join_still_happens(node: Node) -> None:
+    node.seed_config()
+    node.system.failing["stop_ap"] = SystemCommandError("nmcli failed")
+    node.boot()
+    assert node.system.count("join") == 0
+
+    del node.system.failing["stop_ap"]
+    node.tick(1)
+
+    assert node.system.count("join") == 1
+
+
+def test_a_failing_join_still_reaches_fallback(node: Node) -> None:
+    node.seed_config()
+    node.system.failing["join"] = SystemCommandError("nmcli failed")
+    node.boot()
+
+    node.tick(JOIN_TIMEOUT)
+
+    assert node.state is S.FALLBACK_AP
+    assert len(node.open_listeners()) == 1
+
+
+def test_a_failing_probe_counts_as_no_uplink(node: Node) -> None:
+    node.seed_config()
+    node.boot()
+    node.system.failing["wifi_associated"] = SystemCommandError("nmcli failed")
+
+    node.tick(JOIN_TIMEOUT)
+
+    assert node.state is S.FALLBACK_AP
+
+
+def test_ap_start_failure_is_retried_and_no_listener_opens_early(node: Node) -> None:
+    node.system.failing["start_ap"] = SystemCommandError("nmcli failed")
+    node.boot()
+    assert node.listeners == []
+
+    node.tick(1)
+    assert node.system.count("start_ap") == 2
+    assert node.listeners == []
+
+    del node.system.failing["start_ap"]
+    node.tick(1)
+    assert len(node.open_listeners()) == 1
+    assert node.system.count("start_ap") == 3
+
+
+def test_a_listener_that_fails_to_bind_is_retried_without_restarting_the_ap(node: Node) -> None:
+    attempts = {"left": 2}
+
+    def flaky(app: Any, ip: str, port: int, interface: str) -> Any:
+        if attempts["left"]:
+            attempts["left"] -= 1
+            raise OSError("cannot assign requested address")
+        return node._listen(app, ip, port, interface)
+
+    node.boot(server_factory=flaky)
+    assert node.open_listeners() == []
+    node.tick(1)
+    node.tick(1)
+
+    assert len(node.open_listeners()) == 1
+    assert node.system.count("start_ap") == 1
+
+
+def test_a_dead_portal_thread_is_replaced(node: Node) -> None:
+    node.boot()
+    first = node.listener()
+
+    first.was_shut_down.set()  # serve_forever returns, as if its thread died
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        node.tick(1)
+        if len(node.listeners) == 2:
+            break
+        time.sleep(0.01)
+
+    assert first.closed
+    assert len(node.open_listeners()) == 1
+    assert node.listener() is not first
+
+
+def test_persistent_failure_exits_and_takes_the_ap_down(node: Node) -> None:
+    """An AP with no portal is useless: exit nonzero so systemd restarts the daemon."""
+
+    def broken(app: Any, ip: str, port: int, interface: str) -> Any:
+        raise OSError("cannot bind")
+
+    node.boot(server_factory=broken, max_consecutive_failures=3)
+
+    with pytest.raises(ProvisionerFailed):
+        for _ in range(3):
+            node.tick(1)
+
+    node.daemon.shutdown()
+    assert node.system.count("stop_ap") >= 1
+    assert after(node.calls[::-1], "stop_ap", "start_ap")  # stopped after it started
+
+
+def test_one_recovery_resets_the_failure_count(node: Node) -> None:
+    node.seed_config()
+    node.system.failing["join"] = SystemCommandError("nmcli failed")
+    node.boot(max_consecutive_failures=3)
+    node.tick(1)
+    node.tick(1)  # two failed ticks in a row
+    del node.system.failing["join"]
+    node.tick(1)  # clean
+
+    node.system.failing["start_ap"] = SystemCommandError("nmcli failed")
+    node.tick(JOIN_TIMEOUT)
+    node.tick(1)  # two more, which would be four without the reset
+
+    assert node.state is S.FALLBACK_AP
+
+
+def test_shutdown_stops_the_portal_and_the_ap(node: Node) -> None:
+    node.boot()
+    listener = node.listener()
+
+    node.daemon.shutdown()
+
+    assert listener.closed
+    assert node.system.count("stop_ap") == 1
+    node.daemon.shutdown()  # idempotent
+    assert node.system.count("stop_ap") == 1
+
+
+def test_shutdown_survives_a_failing_ap_stop(node: Node) -> None:
+    node.boot()
+    node.system.failing["stop_ap"] = SystemCommandError("nmcli failed")
+
+    node.daemon.shutdown()
+
+    assert node.open_listeners() == []
+
+
+def test_startup_recovers_an_interrupted_apply_and_clears_stale_temp_files(node: Node) -> None:
+    node.seed_config()
+    stale = node.paths.bridge_config.parent / ".bridge.yaml.abc123.tmp"
+    stale.write_text("half a config")
+
+    node.boot()
+
+    assert not stale.exists()
+
+
+def test_start_fails_loudly_without_a_boot_id(node: Node) -> None:
+    node.system.failing["boot_id"] = OSError("no proc")
+
+    with pytest.raises(OSError):
+        node.boot()
+
+
+def test_a_failing_gpio_read_counts_as_not_held(node: Node) -> None:
+    node.seed_config()
+    node.system.failing["gpio"] = SystemCommandError("gpiofind failed")
+
+    node.boot()
+
+    assert node.state is S.JOINING
+
+
+def test_a_state_file_write_failure_does_not_stop_the_join(
+    node: Node, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    node.seed_config()
+    monkeypatch.setattr(
+        "cameraprovision.daemon._write_private_atomic",
+        lambda path, text: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    node.boot()
+
+    assert node.system.count("join") == 1
+
+
+# --- secrets ----------------------------------------------------------------------------
+
+
+def test_secrets_stay_out_of_logs_and_of_files_that_do_not_need_them(
+    node: Node, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    node.boot()
+    node.submit()
+    node.tick()
+    node.system.link_up()
+    node.tick(1)
+
+    for secret in SECRETS:
+        assert secret not in caplog.text
+        for path in (node.paths.state_file, node.paths.node_file, node.paths.mediamtx_env):
+            assert secret not in path.read_text()
+
+
+# --- end to end -------------------------------------------------------------------------
+
+
+def test_end_to_end_blank_boot_to_provisioned_and_vpn(node: Node) -> None:
+    """A whole first install, with real WSGI calls and only the OS faked."""
+    # First boot, no config: the AP comes up and a phone finds the form.
+    node.boot()
+    assert node.state is S.AP_UP
+    probe = node.request("GET", host="connectivitycheck.gstatic.com", accept="*/*")
+    assert probe.code == 302 and probe.headers["Location"] == f"http://{AP_IP}/"
+    form_page = node.request("GET")
+    assert form_page.code == 200 and 'value="Site-WiFi"' in form_page.body
+
+    # A typo gets a page back, and nothing is written.
+    bad = node.request("POST", valid_form(node_id="NOT VALID"))
+    assert bad.code == 400 and node.disk() == {}
+    assert WIFI_PSK not in bad.body
+
+    # The real submission.
+    saved = node.request("POST", valid_form())
+    assert saved.code == 200 and "Settings saved" in saved.body
+    saved.finish()
+
+    # The wrong password: joining times out and the setup AP returns, WiFi fields only.
+    node.tick()
+    assert node.state is S.JOINING and node.open_listeners() == []
+    node.tick(JOIN_TIMEOUT)
+    assert node.state is S.FALLBACK_AP
+    repair_page = node.request("GET")
+    assert 'name="broker_host"' not in repair_page.body
+    fixed = node.request("POST", {"wifi_ssid": "Site-WiFi", "wifi_psk": NEW_WIFI_PSK})
+    assert fixed.code == 200
+    fixed.finish()
+
+    # This time it joins, and the VPN comes up once the node has real connectivity.
+    node.tick()
+    assert node.state is S.JOINING
+    assert node.system.count("tailscale_up") == 0
+    node.system.link_up()
+    node.tick(1)
+    assert node.state is S.PROVISIONED
+    assert node.open_listeners() == []
+    assert not node.paths.tailscale_key.exists()
+    assert node.system.tailscale_args[0][1] == "edge-7"
+
+    # Everything is where the rest of the node expects it.
+    assert f"psk={NEW_WIFI_PSK}" in node.paths.nm_keyfile.read_text()
+    assert node.bridge_yaml()["broker"]["password"] == BROKER_PASSWORD
+    assert bridge_cli.load_config(str(node.paths.bridge_config))["node_id"] == "cam-01"
+    assert node.paths.mediamtx_env.read_text() == "MEDIAMTX_ADDRESS=10.0.0.2:8554\n"
+    assert node.paths.mediamtx_env.stat().st_mode & 0o777 == 0o644
+    assert node.paths.bridge_config.stat().st_mode & 0o777 == 0o600
+
+    # Daemon restart, then a reboot with the router down: it rejoins alone.
+    node.daemon.shutdown()
+    node.boot()
+    assert node.state is S.PROVISIONED
+    node.daemon.shutdown()
+    node.system.boot = "boot-2"
+    node.system.link_down()
+    node.boot()
+    assert node.state is S.JOINING
+    node.tick(JOIN_TIMEOUT)
+    assert node.state is S.FALLBACK_AP
+    node.tick(AP_WINDOW)
+    assert node.state is S.JOINING
+    node.system.link_up()
+    node.tick(1)
+    assert node.state is S.PROVISIONED
+
+
+# --- run loop and CLI -------------------------------------------------------------------
+
+
+def test_run_loops_until_stopped_then_shuts_down(node: Node) -> None:
+    daemon = Provisioner(
+        system=node.system,
+        paths=node.paths,
+        clock=node.clock,
+        settings=Settings(tick_s=0.001),
+        server_factory=node._listen,
+    )
+    stop = threading.Event()
+    thread = threading.Thread(target=daemon.run, args=(stop,))
+    thread.start()
+    deadline = time.monotonic() + 5
+    while not node.listeners and time.monotonic() < deadline:
+        time.sleep(0.001)
+
+    stop.set()
+    thread.join(5)
+
+    assert not thread.is_alive()
+    assert node.listeners[0].closed
+    assert node.system.count("stop_ap") == 1
+
+
+def test_run_shuts_down_when_a_tick_fails_for_good(node: Node) -> None:
+    def broken(app: Any, ip: str, port: int, interface: str) -> Any:
+        raise OSError("cannot bind")
+
+    daemon = Provisioner(
+        system=node.system,
+        paths=node.paths,
+        clock=node.clock,
+        settings=Settings(tick_s=0.001, max_consecutive_failures=2),
+        server_factory=broken,
+    )
+
+    with pytest.raises(ProvisionerFailed):
+        daemon.run(threading.Event())
+
+    assert node.system.count("stop_ap") == 1
+
+
+def run_cli(
+    monkeypatch: pytest.MonkeyPatch, run: Callable[[Any, threading.Event], None], *args: str
+) -> tuple[int, list[Provisioner]]:
+    made: list[Provisioner] = []
+
+    def fake_run(self: Provisioner, stop: threading.Event) -> None:
+        made.append(self)
+        run(self, stop)
+
+    monkeypatch.setattr(Provisioner, "run", fake_run)
+    monkeypatch.setattr(signal, "signal", lambda *a: None)
+    return cli.main(["run", *args]), made
+
+
+def test_cli_run_exits_zero_on_a_clean_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    code, made = run_cli(monkeypatch, lambda daemon, stop: None)
+
+    assert code == 0
+    assert len(made) == 1
+
+
+def test_cli_run_exits_nonzero_on_an_unrecoverable_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(daemon: Any, stop: threading.Event) -> None:
+        raise ProvisionerFailed("gave up")
+
+    code, _ = run_cli(monkeypatch, fail)
+
+    assert code == 1
+
+
+def test_cli_run_exits_nonzero_without_logging_an_exception_message(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def fail(daemon: Any, stop: threading.Event) -> None:
+        raise RuntimeError(f"oops {WIFI_PSK}")
+
+    code, _ = run_cli(monkeypatch, fail)
+
+    assert code == 1
+    assert "RuntimeError" in caplog.text
+    assert WIFI_PSK not in caplog.text
+
+
+def test_cli_passes_paths_and_settings_through(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    code, made = run_cli(
+        monkeypatch,
+        lambda daemon, stop: None,
+        "--bridge-config",
+        str(tmp_path / "b.yaml"),
+        "--state-dir",
+        str(tmp_path / "state"),
+        "--ap-ip",
+        "10.9.9.1",
+        "--join-timeout",
+        "77",
+        "--ap-window",
+        "88",
+    )
+
+    assert code == 0
+    assert made[0].paths.bridge_config == tmp_path / "b.yaml"
+    assert made[0].paths.state_dir == tmp_path / "state"
+    assert made[0].settings.ap_ip == "10.9.9.1"
+    assert made[0].settings.join_timeout_s == 77
+    assert made[0].settings.ap_window_s == 88
+
+
+def test_cli_requires_a_command() -> None:
+    with pytest.raises(SystemExit) as raised:
+        cli.main([])
+    assert raised.value.code != 0
