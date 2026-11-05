@@ -202,7 +202,6 @@ def test_login_success_without_a_token_is_an_api_error():
         urllib.error.URLError(ConnectionRefusedError(111, "Connection refused")),
         urllib.error.URLError("no route"),
         TimeoutError("timed out"),
-        TimeoutError("timed out"),
         http.client.RemoteDisconnected("closed"),
         http.client.IncompleteRead(b""),
     ],
@@ -723,7 +722,9 @@ def test_real_baichuan_has_the_calls_we_make():
     # Constructing Host opens no connection, but needs a running loop. This catches
     # a reolink_aio API drift that the fake above could not.
     async def build():
-        return Host(HOST, "admin", "").baichuan
+        host = Host(HOST, "admin", "")
+        await host.logout()  # closes the session the constructor opened
+        return host.baichuan
 
     baichuan = asyncio.run(build())
     for name in ("login", "set_port_enabled", "logout"):
