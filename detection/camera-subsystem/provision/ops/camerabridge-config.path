@@ -1,0 +1,12 @@
+# Install as /etc/systemd/system/camerabridge-config.path.
+# The portal saves bridge.yaml and does not touch the bridge, so this starts the bridge on
+# first provisioning and restarts it on a re-provision. A WiFi repair leaves the file alone.
+[Unit]
+Description=Watch the camera bridge config
+
+[Path]
+PathChanged=/etc/camerabridge/bridge.yaml
+Unit=camerabridge-config-changed.service
+
+[Install]
+WantedBy=multi-user.target

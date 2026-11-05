@@ -1,0 +1,8 @@
+# Install as /etc/systemd/system/camerabridge-config-changed.service.
+# Started only by camerabridge-config.path.
+[Unit]
+Description=Restart the camera bridge after its config changed
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl restart --no-block camerabridge.service

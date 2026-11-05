@@ -1,0 +1,83 @@
+#!/usr/sbin/nft -f
+# Black Relay camera node firewall. Install as /etc/nftables.conf (nftables.service loads it).
+# See README, "Firewall policy".
+#
+# Replaces only its own table, with no "flush ruleset", because a reload must not remove
+# the tables that NetworkManager and tailscaled own. A drop here is final, even if another
+# table's chain on the same hook accepts the packet.
+# Output is not filtered: the node reaches the camera, site LAN and tailnet by itself.
+# Interfaces are matched by name, because tailscale0 and wlan0 may not exist at load time.
+
+define WIFI_IF = "wlan0"
+define CAMERA_IF = "eth0"
+define TAILSCALE_IF = "tailscale0"
+define AP_NET = 10.42.0.0/24
+define AP_IP = 10.42.0.1
+define SSH_PORT = 22
+define FRIGATE_UI_PORTS = { 5000, 8971 }
+define TAILSCALE_UDP_PORT = 41641
+
+table inet black_relay
+delete table inet black_relay
+
+table inet black_relay {
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        # Node-local services: mosquitto, and the Frigate container under host networking.
+        iifname "lo" accept
+
+        # The broker is loopback-only. These enforce that if a listener ever widens.
+        ip daddr 127.0.0.0/8 counter drop
+        ip6 daddr ::1 counter drop
+        meta l4proto { tcp, udp } th dport 1883 counter drop
+
+        # IPv6 neighbor discovery on the site LAN. Ahead of the conntrack check.
+        iifname $WIFI_IF icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert, mld-listener-query } accept
+
+        ct state invalid counter drop
+        # Replies to what the node started, including RTSP it pulls from the camera.
+        ct state established,related accept
+
+        # wlan0 as the setup AP: the portal, DNS and DHCP, and nothing else.
+        iifname $WIFI_IF ip saddr $AP_NET ip daddr $AP_IP tcp dport 80 counter accept
+        iifname $WIFI_IF ip saddr $AP_NET ip daddr $AP_IP meta l4proto { tcp, udp } th dport 53 counter accept
+        iifname $WIFI_IF ip saddr { 0.0.0.0, $AP_NET } ip daddr { 255.255.255.255, $AP_IP } udp sport 68 udp dport 67 counter accept
+        iifname $WIFI_IF ip saddr $AP_NET counter drop
+        iifname $WIFI_IF ip daddr $AP_IP counter drop
+
+        # wlan0 on the site LAN. AP traffic never gets here: the two rules above end it.
+        iifname $WIFI_IF udp sport 67 udp dport 68 counter accept
+        iifname $WIFI_IF ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept
+        iifname $WIFI_IF udp dport $TAILSCALE_UDP_PORT accept
+        iifname $WIFI_IF ip daddr 224.0.0.251 udp dport 5353 accept
+        iifname $WIFI_IF ip6 daddr ff02::fb udp dport 5353 accept
+        iifname $WIFI_IF icmp type echo-request accept
+        iifname $WIFI_IF icmpv6 type echo-request accept
+        iifname $WIFI_IF tcp dport $SSH_PORT counter accept
+        iifname $WIFI_IF tcp dport $FRIGATE_UI_PORTS counter accept
+        iifname $WIFI_IF counter drop
+
+        # tailscale0: remote ops only. Never the portal, DNS or DHCP.
+        iifname $TAILSCALE_IF tcp dport $SSH_PORT counter accept
+        iifname $TAILSCALE_IF tcp dport $FRIGATE_UI_PORTS counter accept
+        iifname $TAILSCALE_IF icmp type echo-request accept
+        iifname $TAILSCALE_IF icmpv6 type echo-request accept
+        iifname $TAILSCALE_IF counter drop
+
+        # eth0: the camera may ask a camera-link DHCP server for a lease. Nothing else
+        # starts from this side. The AP's dnsmasq listens on wlan0 only.
+        iifname $CAMERA_IF udp sport 68 udp dport 67 counter accept
+        iifname $CAMERA_IF counter drop
+    }
+
+    # ipv4.method=shared turns on IP forwarding. This node routes nothing, so an AP client
+    # cannot reach the camera, the site LAN or the tailnet. The named rules count camera
+    # attempts for the field checks; the policy drops all the rest.
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+
+        iifname $CAMERA_IF counter drop
+        oifname $CAMERA_IF counter drop
+    }
+}

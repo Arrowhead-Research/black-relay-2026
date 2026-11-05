@@ -1,0 +1,55 @@
+# Sample unit for the Plan 1 bridge. Install as /etc/systemd/system/camerabridge.service.
+# See README, "Service ordering".
+[Unit]
+Description=Black Relay camera bridge (Frigate events to the central broker)
+Documentation=file:/opt/black-relay/ops/README.md
+# Ordering only, and no network-online.target: detect and record continue with WiFi down,
+# so the bridge must too, queueing durable events in its outbox. It retries both brokers.
+# No tailscaled or camera-provision dependency: fusion traffic uses the site LAN, and
+# Tailscale and provisioning outages are separate from it.
+After=NetworkManager.service mosquitto.service
+Wants=mosquitto.service
+# Skipped on a blank node. camerabridge-config.path starts it once the portal saves.
+ConditionPathExists=/etc/camerabridge/bridge.yaml
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=camerabridge
+Group=camerabridge
+ExecStart=/opt/black-relay/bridge/bin/camerabridge run --config /etc/camerabridge/bridge.yaml
+Restart=always
+RestartSec=5
+UMask=0077
+
+# Holds outbox.jsonl.
+StateDirectory=camerabridge
+StateDirectoryMode=0700
+
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+# AF_UNIX: timedatectl over D-Bus for the NTP check.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

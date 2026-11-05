@@ -1,0 +1,61 @@
+# Install as /etc/systemd/system/camera-provision.service. See README, "Service ordering".
+[Unit]
+Description=Black Relay camera node provisioning (setup AP, portal, uplink watchdog)
+Documentation=file:/opt/black-relay/ops/README.md
+# NetworkManager runs the AP and the joins. The daemon retries if it is not ready.
+# No network-online.target: this unit must run when there is no network at all.
+# No tailscaled ordering: the daemon only calls tailscale once provisioned, retries with
+# backoff, and must not wait on it, because the setup button is read once at startup.
+After=NetworkManager.service nftables.service
+Wants=NetworkManager.service nftables.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Never open the AP without its firewall: ipv4.method=shared turns on IP forwarding.
+ExecStartPre=/bin/sh -c '/usr/sbin/nft list table inet black_relay >/dev/null'
+ExecStart=/opt/black-relay/provision/bin/camera-provision run --button-line GPIO17 --service-user camerabridge
+Restart=always
+RestartSec=5
+# Shutdown closes the portal and stops the AP, and nmcli may wait up to 30 s.
+TimeoutStopSec=45
+UMask=0077
+
+# Runs as root: nmcli and tailscale authorize root over D-Bus and their sockets.
+# CHOWN: gives bridge.yaml to the service user. DAC_OVERRIDE and FOWNER: read, replace and
+# hard-link it afterwards, when root no longer owns it. NET_BIND_SERVICE: port 80.
+# NET_RAW: SO_BINDTODEVICE on wlan0. NET_ADMIN: the nft check above.
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=yes
+
+ProtectSystem=strict
+StateDirectory=camera-provision
+StateDirectoryMode=0700
+# 0755 so the bridge user can reach its own 0600 file and go2rtc can read mediamtx.env.
+ConfigurationDirectory=camerabridge
+ConfigurationDirectoryMode=0755
+ReadWritePaths=/etc/camerabridge /etc/NetworkManager/system-connections
+ProtectHome=yes
+PrivateTmp=yes
+
+# The setup button is read through libgpiod, so PrivateDevices= would hide it.
+DevicePolicy=closed
+DeviceAllow=char-gpiochip rw
+
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
