@@ -3,12 +3,20 @@ name = "cameraprovision"
 version = "0.0.0"
 description = "Black Relay camera subsystem edge-node onboarding: setup AP, captive portal, uplink watchdog, and the state machine that ties them together."
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "pyyaml>=6.0",
+]
 
 [dependency-groups]
 dev = [
+    # Test-only: proves the written YAML loads through the bridge's real config
+    # path. Never a runtime dependency of the provisioner.
+    "camerabridge",
     "pytest>=8.0",
 ]
+
+[tool.uv.sources]
+camerabridge = { path = "../bridge", editable = true }
 
 # Only pure logic exists so far; Task 6 adds the CLI and [build-system], as the
 # bridge did in its own service-wiring task. Until then keep the project
