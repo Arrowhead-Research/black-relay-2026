@@ -1,0 +1,43 @@
+{
+  "request": [
+    {
+      "cmd": "GetUser",
+      "action": 1,
+      "param": {}
+    }
+  ],
+  "http_status": 200,
+  "seconds": 0.08,
+  "response": [
+    {
+      "cmd": "GetUser",
+      "code": 0,
+      "initial": {
+        "User": {
+          "level": "guest"
+        }
+      },
+      "range": {
+        "User": {
+          "level": [
+            "guest",
+            "admin"
+          ],
+          "password": "<redacted>",
+          "userName": {
+            "maxLen": 31,
+            "minLen": 1
+          }
+        }
+      },
+      "value": {
+        "User": [
+          {
+            "level": "admin",
+            "userName": "admin"
+          }
+        ]
+      }
+    }
+  ]
+}

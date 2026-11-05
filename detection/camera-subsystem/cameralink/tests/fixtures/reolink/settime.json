@@ -1,0 +1,33 @@
+{
+  "request": [
+    {
+      "cmd": "SetTime",
+      "action": 0,
+      "param": {
+        "Dst": {
+          "enable": 0
+        },
+        "Time": {
+          "year": 2026,
+          "mon": 11,
+          "day": 5,
+          "hour": 16,
+          "min": 58,
+          "sec": 42,
+          "timeZone": 0
+        }
+      }
+    }
+  ],
+  "http_status": 200,
+  "seconds": 0.16,
+  "response": [
+    {
+      "cmd": "SetTime",
+      "code": 0,
+      "value": {
+        "rspCode": 200
+      }
+    }
+  ]
+}

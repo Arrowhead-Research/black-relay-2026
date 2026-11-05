@@ -1,0 +1,2 @@
+{"before": {"server": {"port": 9000, "enable": true}, "http": {"port": 80, "enable": false}, "https": {"port": 443, "enable": false}, "rtsp": {"port": 554, "enable": false}, "rtmp": {"port": 1935, "enable": false}, "onvif": {"port": 8000, "enable": false}},
+ "after_enabling_http_and_rtsp": {"server": {"port": 9000, "enable": true}, "http": {"port": 80, "enable": true}, "https": {"port": 443, "enable": false}, "rtsp": {"port": 554, "enable": true}, "rtmp": {"port": 1935, "enable": false}, "onvif": {"port": 8000, "enable": false}}}

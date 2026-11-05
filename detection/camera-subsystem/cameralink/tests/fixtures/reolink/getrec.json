@@ -1,0 +1,23 @@
+{
+  "request": [
+    {
+      "cmd": "GetRec",
+      "action": 1,
+      "param": {
+        "channel": 0
+      }
+    }
+  ],
+  "http_status": 200,
+  "seconds": 0.04,
+  "response": [
+    {
+      "cmd": "Unknown",
+      "code": 1,
+      "error": {
+        "detail": "not support",
+        "rspCode": -9
+      }
+    }
+  ]
+}

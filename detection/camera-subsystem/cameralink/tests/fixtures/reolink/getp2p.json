@@ -1,0 +1,33 @@
+{
+  "request": [
+    {
+      "cmd": "GetP2p",
+      "action": 1,
+      "param": {}
+    }
+  ],
+  "http_status": 200,
+  "seconds": 0.07,
+  "response": [
+    {
+      "cmd": "GetP2p",
+      "code": 0,
+      "initial": {
+        "P2p": {
+          "enable": 1
+        }
+      },
+      "range": {
+        "P2p": {
+          "enable": "boolean"
+        }
+      },
+      "value": {
+        "P2p": {
+          "enable": 1,
+          "uid": "<redacted>"
+        }
+      }
+    }
+  ]
+}

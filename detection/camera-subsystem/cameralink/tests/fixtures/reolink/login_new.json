@@ -1,0 +1,29 @@
+{
+  "request": [
+    {
+      "cmd": "Login",
+      "action": 0,
+      "param": {
+        "User": {
+          "Version": "0",
+          "userName": "admin",
+          "password": "<redacted>"
+        }
+      }
+    }
+  ],
+  "http_status": 200,
+  "seconds": 0.09,
+  "response": [
+    {
+      "cmd": "Login",
+      "code": 0,
+      "value": {
+        "Token": {
+          "leaseTime": 3600,
+          "name": "<redacted>"
+        }
+      }
+    }
+  ]
+}

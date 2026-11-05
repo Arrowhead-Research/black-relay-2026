@@ -174,15 +174,17 @@ Owner decision: **a kit accepts any factory-fresh camera and configures it with 
 operator action.** The camera's reset button is the operator's way to re-adopt one.
 
 1. The node gives the camera its address over DHCP on the camera link.
-2. The node logs in with the factory login (`admin`, blank password), **once per link
-   or address change**. It never guesses other passwords, so it cannot trigger a
-   lockout.
-3. On success it generates a random password unique to this camera and saves it
+2. A factory-reset camera has only port 9000 open, so the node uses Reolink's Baichuan
+   protocol there to turn on HTTP and RTSP.
+3. The node logs in with the factory login (`admin`, blank password), **once per link
+   or address change**, and only once the camera's port answers. It never guesses other
+   passwords. The camera reports 10 remaining attempts after a failure.
+4. On success it generates a random password unique to this camera and saves it
    root-only on the node **before** sending it to the camera, so a power cut during the
    change cannot lose it.
-4. It turns off P2P and any other unneeded service, sets the camera's name, clock and
+5. It turns off P2P and any other unneeded service, sets the camera's name, clock and
    stream settings, and turns on RTSP.
-5. It records the camera's MAC address, renders the Frigate config from `node_id`,
+6. It records the camera's MAC address, renders the Frigate config from `node_id`,
    `covered_zones` and that password, and starts Frigate.
 
 A camera with an unknown password is never touched. The node reports that it needs a
@@ -562,10 +564,9 @@ contracts, not exhaustive coverage.
   against the shared zone names from section 6.
 - Retention policy and record storage medium (microSD vs USB SSD).
 - Which Hailo model / `.hef` (Frigate's bundled Hailo YOLO is the default start).
-- RLC-520A bring-up is automatic (4.4). Target settings: sub-stream 640×480@5fps,
-  main ≤5MP@15fps, RTSP enabled. Observed on the first unit, firmware
-  `v3.2.0.5180_2507241369`: HTTP API, RTSP and ONVIF enabled at the factory, P2P on,
-  blank `admin` password. Other firmware may ship HTTP or RTSP disabled, reachable only
-  over Baichuan on port 9000 (`reolink_aio`). Such a camera is reported, not adopted, in
-  v0.
+- RLC-520A bring-up is automatic (4.4). Target settings: sub-stream 640×480 at 7 fps,
+  the closest this camera offers (15, 10, 7, 4), with Frigate processing 5 fps; main at
+  most 5 MP at 15 fps; RTSP enabled. Measured on firmware `v3.2.0.5180_2507241369`
+  after a factory reset: only port 9000 open, HTTP, RTSP and ONVIF off, P2P on, blank
+  `admin` password. `reolink_aio` 0.22.0 turned HTTP and RTSP on over Baichuan.
 ```

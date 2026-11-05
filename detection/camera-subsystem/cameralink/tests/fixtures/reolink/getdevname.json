@@ -1,0 +1,35 @@
+{
+  "request": [
+    {
+      "cmd": "GetDevName",
+      "action": 1,
+      "param": {}
+    }
+  ],
+  "http_status": 200,
+  "seconds": 0.04,
+  "response": [
+    {
+      "cmd": "GetDevName",
+      "code": 0,
+      "initial": {
+        "DevName": {
+          "name": "RLC-520A"
+        }
+      },
+      "range": {
+        "DevName": {
+          "name": {
+            "maxLen": 31,
+            "minLen": 0
+          }
+        }
+      },
+      "value": {
+        "DevName": {
+          "name": "RLC-520A"
+        }
+      }
+    }
+  ]
+}
