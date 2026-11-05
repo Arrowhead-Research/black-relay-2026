@@ -1555,7 +1555,7 @@ def test_i1_identity_values_derive_from_the_last_six_of_the_serial() -> None:
 
     assert values["node_id"] == "cam-cdef12"
     assert values["hostname"] == "cam-cdef12"
-    assert values["frigate_base_url"] == "http://cam-cdef12.local:5000"
+    assert values["frigate_base_url"] == "https://cam-cdef12.local:8971"
 
 
 def test_i1_identity_values_keep_the_first_render_defaults() -> None:

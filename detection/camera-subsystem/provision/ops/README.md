@@ -26,7 +26,7 @@ Builds the SD image for a camera edge node and defines how to check it in the fi
 
 ### AP stack
 
-NetworkManager already owns `wlan0` on Bookworm, so the AP is a NetworkManager profile with
+NetworkManager already owns `wlan0` on Raspberry Pi OS, so the AP is a NetworkManager profile with
 `ipv4.method=shared`, not separate hostapd and dnsmasq. NetworkManager starts its own dnsmasq
 for the AP, which needs the `dnsmasq-base` package. Do not install the full `dnsmasq` package:
 its system service would take port 53.
@@ -74,19 +74,20 @@ roles, told apart by address: anything from `10.42.0.0/24` or to `10.42.0.1` is 
 |---|---|
 | `lo` | Everything, including the broker and Frigate's internal ports |
 | `wlan0`, AP client | Portal (TCP 80), DNS (TCP/UDP 53), and DHCP (UDP 67), to `10.42.0.1` only |
-| `wlan0`, site LAN | SSH (22), Frigate (5000, 8971), DHCP replies, Tailscale direct (UDP 41641), mDNS (so `<host>.local` in `snapshot_url` resolves), ping, IPv6 neighbor discovery. Link-local IPv6 cannot reach SSH or Frigate, and only addresses held on `wlan0` itself are reachable |
-| `tailscale0` | SSH (22), Frigate (5000, 8971), ping |
+| `wlan0`, site LAN | SSH (22), Frigate (8971), DHCP replies, Tailscale direct (UDP 41641), mDNS (so `<host>.local` in `snapshot_url` resolves), ping, IPv6 neighbor discovery. Link-local IPv6 cannot reach SSH or Frigate, and only addresses held on `wlan0` itself are reachable |
+| `tailscale0` | SSH (22), Frigate (8971), ping |
 | `eth0` | Nothing |
 | Forwarding | Nothing. Explicit drops to and from `eth0`, and a default drop for everything else |
 
 - **Camera link:** the camera is statically addressed (DESIGN 11), so `eth0` needs no DHCP. The node
   opens RTSP to the camera, so the reply is accepted. RTSP must use TCP: UDP RTP from the camera
   starts a new flow and is dropped.
-- **Port 5000 has no authentication.** Any host on the site LAN and any tailnet peer gets Frigate's
-  unauthenticated API on port 5000. That may include writing Frigate's config: this is unverified,
-  and C24 records the answer. `frigate.base_url` and DESIGN 5.6 use this port for snapshots, so it
-  is open today. **Whether it stays open is an owner decision that is still open.** Port 8971 is the
-  authenticated UI.
+- **Only Frigate's authenticated port is open (owner decision, 2026-11-05).** Port 8971 is open to the
+  site LAN and the tailnet. `frigate.base_url` and DESIGN 5.6 use it, so a client opening a
+  `snapshot_url` must log in to Frigate. Frigate's v0.18.2 documentation says 8971 requires a login and
+  serves HTTPS with a self-signed certificate by default, and C24 checks that on the node. A client must
+  then trust that certificate. Port 5000 has no authentication, so it stays
+  reachable only from the node itself.
 - **Other Frigate ports:** the firewall leaves go2rtc (1984), RTSP (8554), and WebRTC (8555) closed
   from outside the node.
 - **Reloads:** the file replaces only its own table, so `systemctl reload nftables` keeps the tables
@@ -205,13 +206,16 @@ central outage, if the server is the default. Until `timedatectl show -p NTPSync
 10. The central node serves NTP on the site LAN, at its broker address, from its own clock and with
     no dependency on the WAN. It is every node's default time server, so without this no node
     syncs, and none sends a heartbeat or fills its outbox.
+11. Frigate's own login is off, and a proxy secret shared with the central node protects port 8971, which
+    only the central node's IP can reach (DESIGN 5.6). Nothing outside the node depends on port 5000.
 
 ## Build the image
 
 Use a small card for the build, since the image is the size of the card. Commands run on the Pi
 unless marked. `<CC>`, `<build-pi>`, and `<sdX>` are placeholders.
 
-1. **Flash** Raspberry Pi OS Lite (64-bit), Bookworm. In Raspberry Pi Imager set a user and SSH
+1. **Flash** Raspberry Pi OS (64-bit), Trixie. Lite is preferred. On a Desktop image, also run
+   `sudo systemctl set-default multi-user.target`. In Raspberry Pi Imager set a user and SSH
    key, and **no WiFi**, since Imager's WiFi setting leaves a `preconfigured` profile behind. Boot
    with `eth0` on a network with internet access.
 
@@ -221,9 +225,9 @@ unless marked. `<CC>`, `<build-pi>`, and `<sdX>` are placeholders.
    sudo apt-get update
    sudo apt-get install -y network-manager dnsmasq-base nftables gpiod python3-venv \
      mosquitto mosquitto-clients systemd-timesyncd avahi-daemon iw rsync curl
-   curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg \
+   curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg \
      | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
-   curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.tailscale-keyring.list \
+   curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.tailscale-keyring.list \
      | sudo tee /etc/apt/sources.list.d/tailscale.list
    sudo apt-get update
    sudo apt-get install -y tailscale
@@ -308,6 +312,8 @@ unless marked. `<CC>`, `<build-pi>`, and `<sdX>` are placeholders.
 
     ```bash
     sudo rm -f /etc/NetworkManager/system-connections/preconfigured.nmconnection
+    # Stops first-boot setup from running again on a clone.
+    sudo touch /etc/cloud/cloud-init.disabled
     # Left by any bench test of the build card. Every clone would share them.
     sudo rm -f /etc/NetworkManager/system-connections/black-relay-uplink.nmconnection \
       /etc/NetworkManager/system-connections/black-relay-setup-ap.nmconnection \
@@ -444,8 +450,8 @@ mosquitto_sub -h <central> -u <typed-user> -P <typed-password> -t detection/came
 | `SO_BINDTODEVICE` on `wlan0` | C20 |
 | `getfqdn` delay | C26 |
 | Real nmcli output against the parsers | C03 |
-| Keyfile round trips on Bookworm | C05 |
-| Full suites on Python 3.11 and Bookworm's NetworkManager | C02 |
+| Keyfile round trips on Trixie | C05 |
+| Full suites on the Pi's Python and NetworkManager | C02 |
 | Frigate publish QoS | C32 |
 | `camera_fps` on a dead camera | C33 |
 | `detector_ok` idle values | C34 |
@@ -464,7 +470,9 @@ mosquitto_sub -h <central> -u <typed-user> -P <typed-password> -t detection/came
 
 ### Static checks and adapters
 
-**C01. Artifacts parse on Bookworm's tool versions. NOT YET RUN.**
+**C01. Artifacts parse on the Pi's tool versions. PASSED 2026-11-05, kit 1, Trixie:** nftables 1.1.3,
+NetworkManager 1.52.1, systemd 257, dnsmasq 2.91; `nft rc=0`, `verify rc=0`, `syntax check OK`,
+and `network-pre.target` in `Before=`.
 
 ```bash
 sudo nft --version; nmcli --version; systemctl --version | head -1; sudo dnsmasq --version | head -1
@@ -479,9 +487,10 @@ Expect: NetworkManager at least 1.40 (1.28 for `ap-isolation`, 1.40 for `nmcli -
 `verify rc=0` with no errors about these units, `syntax check OK`, and `network-pre.target` in the
 nftables `Before=`. The `nft` check also proves the kernel has the `fib` expression the rule set
 uses: without it the whole table fails to load.
-Earlier offline checks used newer versions than Bookworm ships.
 
-**C02. Full suites on Bookworm's Python 3.11. NOT YET RUN.** Run on a build card, before step 10.
+**C02. Full suites on the Pi's Python. PASSED 2026-11-05, kit 1, Python 3.13.5, with one skip:** provision
+965 passed and 1 skipped, bridge 244 passed. The skip is `test_packaging.py`, because the commands below
+leave `uv` off `PATH`. It passes on the build host. Run on a build card, before step 10.
 
 ```bash
 python3 --version
@@ -492,11 +501,12 @@ cd /tmp/suite/bridge && /tmp/uv/bin/uv run --python /usr/bin/python3 pytest -rs
 sudo rm -rf /tmp/uv /tmp/suite
 ```
 
-Expect: Python 3.11, and every test passing with no skips. Compare the counts with `uv run pytest -rs`
+Expect: every test passing, and only the `uv` skip. Compare the counts with `uv run pytest -rs`
 in each package on the build host, at the same commit; when this line was written they were
-provision 963 and bridge 244. A skip of the real-broker tests means mosquitto is missing.
+provision 966 and bridge 244. A skip of the real-broker tests means mosquitto is missing.
 
-**C03. Real nmcli output against the parsers. NOT YET RUN.** This is the highest risk: a format
+**C03. Real nmcli output against the parsers. PARTLY RUN 2026-11-05, kit 1:** the activated uplink case
+parsed and the node reached `provisioned`, on nmcli 1.52.1. Activating, inactive, and AP cases are not run. This is the highest risk: a format
 difference means the probe never sees an uplink and the node never reaches `provisioned`.
 
 ```bash
@@ -511,9 +521,9 @@ than `activated`; no `GENERAL.STATE` line; and mode `ap`. Also run the AP livene
 up and down: `nmcli --terse --mode multiline --fields GENERAL.STATE connection show black-relay-setup-ap`
 prints `GENERAL.STATE:activated`, then nothing.
 
-Compare all of it with `tests/fixtures/nmcli/`, which was recorded on a laptop with nmcli 1.52.1, not
-on Bookworm. Its `README.md` lists the commands. If the text differs, replace the fixtures with the
-Bookworm output and re-run the suite.
+Compare all of it with `tests/fixtures/nmcli/`, which was recorded on a laptop with nmcli 1.52.1, the
+same version as Trixie on the Pi. Its `README.md` lists the commands. If the text differs, replace the fixtures with the
+Pi's output and re-run the suite.
 
 **C04. Other nmcli behavior. NOT YET RUN.**
 
@@ -527,7 +537,7 @@ Expect: `rc=10`, a near-instant return with `rc=0`, and one SSID per line with `
 colon. Run the scan again while the uplink is activating, and record whether it works. A failure
 leaves the list empty or stale, and typing the SSID must still work.
 
-**C05. Keyfile round trips on Bookworm. NOT YET RUN.** Submit the portal once for each WiFi name
+**C05. Keyfile round trips on Trixie. NOT YET RUN.** Submit the portal once for each WiFi name
 and password pair below, using a router configured to match. Pairs: a name with a leading space;
 a name with `;`; a name with a backslash; a non-ASCII name; a password with `#`, `\`, and `;`.
 
@@ -564,9 +574,9 @@ proof.
 **C06. Button and libgpiod. NOT YET RUN.** With the AI HAT+ fitted.
 
 ```bash
-gpiofind GPIO17
-gpioget --active-low --bias=pull-up $(gpiofind GPIO17)   # released
-gpioget --active-low --bias=pull-up $(gpiofind GPIO17)   # held
+gpioinfo GPIO17
+gpioget --numeric --active-low --bias=pull-up GPIO17   # released
+gpioget --numeric --active-low --bias=pull-up GPIO17   # held
 ```
 
 Expect: a chip and offset, then `0`, then `1`. Also expect no `reading the setup button failed` in
@@ -574,7 +584,9 @@ Expect: a chip and offset, then `0`, then `1`. Also expect no `reading the setup
 
 ### Onboarding
 
-**C07. Blank boot opens the AP. NOT YET RUN.** Freshly seeded kit, no config.
+**C07. Blank boot opens the AP. MOSTLY PASSED 2026-11-05, kit 1:** `ap_up`, full-mode portal, WPA2 SSID
+visible within 30 s, joined with the label passphrase, and the form opened. The wrong-passphrase case is
+not run. Freshly seeded kit, no config.
 
 ```bash
 journalctl -b -u camera-provision --no-pager -g ' -> |portal'
@@ -587,11 +599,14 @@ Expect: `unprovisioned + boot -> ap_up`, `portal listening in full mode`, the pr
 visible and advertises WPA2, joined with the label passphrase. The wrong passphrase is refused.
 
 Open the form. Expect `node_id` and hostname to read `cam-` plus the last 6 characters of the SSID's
-serial, in lowercase, the Frigate address to read `http://<that name>.local:5000`, all three
+serial, in lowercase, the Frigate address to read `https://<that name>.local:8971`, all three
 editable, and no `reading the serial failed` in the journal.
 
-**C08. Valid submit joins and persists across reboot. NOT YET RUN.** Submit from a phone with
-valid values.
+**C08. Valid submit joins and persists across reboot. MOSTLY PASSED 2026-11-05, kit 1, Ethernet unplugged:**
+saved, joined in 10 s, and after a reboot rejoined in 7 s with no `ap_up`, no setup SSID in any scan,
+`NRestarts` 0, and heartbeats resuming once NTP synced over WiFi, 60 s after the bridge started. The
+first save used a mistyped broker address, so `bridge.yaml` was corrected by hand before the heartbeat
+check. A form save reaching a live broker is not yet shown. Submit from a phone with valid values.
 
 ```bash
 sudo cat /var/lib/camera-provision/state.json
@@ -634,7 +649,7 @@ sudo ls -la /etc/camerabridge /var/lib/camera-provision /etc/NetworkManager/syst
 ```bash
 # On the laptop. Each must end in HTTP 400, with an errors block naming the field:
 post() { curl -s -w '\nHTTP %{http_code}\n' -d "$1" http://10.42.0.1/; }
-GOOD='wifi_psk=password123&node_id=cam-01&hostname=cam-01&covered_zones=driveway&frigate_base_url=http://cam-01.local:5000&broker_host=10.0.0.2&broker_port=1883&broker_username=u&broker_password=p&mediamtx_address=10.0.0.2:8554'
+GOOD='wifi_psk=password123&node_id=cam-01&hostname=cam-01&covered_zones=driveway&frigate_base_url=https://cam-01.local:8971&broker_host=10.0.0.2&broker_port=1883&broker_username=u&broker_password=p&mediamtx_address=10.0.0.2:8554'
 post "$GOOD"                                                   # missing SSID
 post "wifi_ssid=site&$GOOD&vpn_requested=on"                   # VPN with empty key
 post "wifi_ssid=site&${GOOD/node_id=cam-01/node_id=-bad}"
@@ -891,7 +906,7 @@ from a laptop on the AP, using `<camera-ip>` and `<pi-eth0-ip>` from Plan 3's ad
 sudo ip route add <camera-ip>/32 via 10.42.0.1
 ping -c 3 -W 2 <camera-ip>
 nc -zv -w 3 <camera-ip> 554
-nc -zv -w 3 <pi-eth0-ip> 5000
+nc -zv -w 3 <pi-eth0-ip> 8971
 ```
 
 ```bash
@@ -909,31 +924,32 @@ differs, and run `ffprobe` from the Frigate container if it is not on the host.
 
 ```bash
 # From a site LAN host:
-curl -s -o /dev/null -w '%{http_code}\n' http://<node-lan-ip>:5000/api/version
+curl -sk -o /dev/null -w '%{http_code}\n' https://<node-lan-ip>:8971/api/config
+nc -zv -w 3 <node-lan-ip> 5000
 nc -zv -w 3 <node-lan-ip> 1883; nc -zv -w 3 <node-lan-ip> 1984; nc -zv -w 3 <node-lan-ip> 8554
 ssh <user>@<node-lan-ip> true; echo "ssh rc=$?"
 ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password <user>@<node-lan-ip> true
 ping -c 3 <hostname>.local
 # From a tailnet peer:
-curl -s -o /dev/null -w '%{http_code}\n' http://<node-tailscale-ip>:5000/api/version
+curl -sk -o /dev/null -w '%{http_code}\n' https://<node-tailscale-ip>:8971/api/config
+nc -zv -w 3 <node-tailscale-ip> 5000
 ssh <user>@<node-tailscale-ip> true; echo "ssh rc=$?"
 # From an AP client, with the AP up, and from a laptop on eth0:
-nc -zv -w 3 10.42.0.1 22; nc -zv -w 3 10.42.0.1 5000; nc -zv -w 3 10.42.0.1 1883
+nc -zv -w 3 10.42.0.1 22; nc -zv -w 3 10.42.0.1 8971; nc -zv -w 3 10.42.0.1 1883
 ```
 
-Expect: `200` from the LAN and the tailnet; the broker, go2rtc, and RTSP ports refused or timed out
-from the LAN; key SSH passing and password SSH refused; `.local` resolving; all ports failing from
+Expect: `401` from the LAN and the tailnet, since no login was sent; port 5000 timing out from both;
+the broker, go2rtc, and RTSP ports refused or timed out from the LAN; key SSH passing and password SSH refused; `.local` resolving; all ports failing from
 the AP and `eth0`. Also from the AP, with two clients: one cannot ping the other. That depends on
 the `brcmfmac` driver honoring `ap-isolation`, and this test is the proof that it does.
 
-Record what port 5000 exposes, from a site LAN host on the bench. The endpoint is from memory of
-Frigate's API, so confirm it against the deployed version. Report the result to the owner, for the
-[open decision](#firewall-policy):
+Then confirm a snapshot needs a login, and that 8971 serves TLS. The endpoints and the `401` are from
+memory of Frigate's API, so confirm them against the deployed version. If 8971 answers without a login,
+stop and raise it: the [port decision](#firewall-policy) depends on it.
 
 ```bash
-curl -s http://<node-lan-ip>:5000/api/config | head -c 300; echo
-curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{}' \
-  http://<node-lan-ip>:5000/api/config/set
+curl -sk -o /dev/null -w '%{http_code}\n' https://<node-lan-ip>:8971/api/events/none/snapshot.jpg
+curl -skv https://<node-lan-ip>:8971/ 2>&1 | grep -E 'subject:|issuer:'
 ```
 
 Then test the IPv6 and strong-host rules:
@@ -942,10 +958,10 @@ Then test the IPv6 and strong-host rules:
 # On the node, with the AP up. Expect no output:
 ip -6 addr show wlan0
 # From a site LAN host, with the node provisioned. All must fail:
-nc -6 -zv -w 3 <node-link-local>%<nic> 5000
+nc -6 -zv -w 3 <node-link-local>%<nic> 8971
 nc -6 -zv -w 3 <node-link-local>%<nic> 22
 sudo ip route add <pi-eth0-ip>/32 via <node-lan-ip>
-nc -zv -w 3 <pi-eth0-ip> 5000
+nc -zv -w 3 <pi-eth0-ip> 8971
 sudo ip route del <pi-eth0-ip>/32
 ```
 
@@ -961,7 +977,9 @@ sudo systemctl reload nftables && sudo nft list tables
 Expect: `127.0.0.1:1883` only, `host`, `online`, and the same tables, including
 `inet black_relay`, before and after the reload.
 
-**C25. Real phone captive webviews. NOT YET RUN.** On an iPhone and an Android phone, in each
+**C25. Real phone captive webviews. FAILED ONCE 2026-11-05, Pixel 9a:** no captive sheet appeared, and
+the form opened and submitted from `http://10.42.0.1/`. Cause unknown, because the journal does not survive
+a reboot. iPhone is not run. On an iPhone and an Android phone, in each
 one's captive sheet and in its full browser.
 
 From a laptop on the AP first:
@@ -973,7 +991,7 @@ curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' -H 'Host: captive.apple
 ```
 
 Expect: `10.42.0.1`, `status: NOERROR` with no answer, and `302 http://10.42.0.1/`. These results
-come from dnsmasq 2.92 here, so confirm them on Bookworm's version, under NetworkManager's real
+come from dnsmasq 2.92 here, so confirm them on the Pi's version (2.91), under NetworkManager's real
 arguments.
 
 On each phone, expect:

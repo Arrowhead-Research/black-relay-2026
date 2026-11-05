@@ -14,7 +14,8 @@ define TAILSCALE_IF = "tailscale0"
 define AP_NET = 10.42.0.0/24
 define AP_IP = 10.42.0.1
 define SSH_PORT = 22
-define FRIGATE_UI_PORTS = { 5000, 8971 }
+# Frigate's authenticated port only. Its unauthenticated port 5000 stays node-local.
+define FRIGATE_UI_PORTS = { 8971 }
 define TAILSCALE_UDP_PORT = 41641
 
 table inet black_relay
@@ -41,7 +42,7 @@ table inet black_relay {
 
         # The Frigate and SSH rules below must not be reachable over link-local IPv6, or
         # through an address this node holds on another interface.
-        iifname $WIFI_IF ip6 daddr fe80::/10 tcp dport { 22, 5000, 8971 } drop
+        iifname $WIFI_IF ip6 daddr fe80::/10 tcp dport { 22, 8971 } drop
         iifname $WIFI_IF fib daddr . iif type != { local, broadcast, multicast } drop
 
         # wlan0 as the setup AP: the portal, DNS and DHCP, and nothing else.

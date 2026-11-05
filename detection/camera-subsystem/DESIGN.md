@@ -116,6 +116,10 @@ RLC-520A ──wired P2P──▶ Pi 5 + Hailo-8 (26 TOPS)
                         Pi ──Wi-Fi (site LAN)──▶ central node (events + video, best-effort)
 ```
 
+- **Camera link:** the node owns the camera. `eth0` is a point-to-point link with a
+  static node address, and the node serves one DHCP address on it with no gateway and
+  no DNS, so the camera cannot reach anything but the node. Any factory-fresh camera
+  plugged in is configured automatically (4.4).
 - **Detect:** Frigate pulls the camera sub-stream (640×480@5fps), runs the Hailo
   detector, tracks objects, applies zones.
 - **Record:** Frigate records the main stream locally. **Local storage is the
@@ -141,10 +145,50 @@ The camera subsystem owns the central receiving side:
   all cameras from one endpoint.
 - Camera nodes publish `detection/camera/*` to the central MQTT broker (the broker
   itself is the shared compute node's; the camera subsystem is a publisher and
-  provides the relay config, not the broker software).
-- Deliverable: the MediaMTX config, the node→relay restream convention (paths,
-  auth), and how fusion/clients address streams. This is new work pulled in by the
-  ownership decision.
+  provides the relay config, not the broker software). Until that broker exists, the
+  relay bundle includes one, which can be turned off.
+- **Time:** the central node serves NTP on the site LAN from its own clock, with no
+  dependency on the WAN (7.5).
+- **Host:** the central node is undecided: a Pi, a laptop, or a server, possibly a TAK
+  server. The relay is therefore a container bundle for any Linux host on arm64 or
+  amd64, and assumes nothing else about that host.
+- **Central API (FastAPI):** the one way in for users and clients. Nodes still publish
+  over MQTT, because the outbox, replay and RF cues are built on it. The API subscribes
+  to the broker and serves events, node status, and proxied Frigate pages and snapshots.
+  It requires a login. Node addresses come from heartbeats on the authenticated broker,
+  and the proxy only reaches addresses learned that way.
+- **Remote access:** owner decision: **only the central node reaches the nodes.** It
+  runs Tailscale, and nodes do not. Users outside the site connect to the central API
+  over Tailscale. SSH to a node uses the central node as a jump host. No Tailscale
+  subnet route is advertised, because that would expose the whole site LAN. Local
+  delivery never depends on this path (7.3).
+- **Fixed address:** the central node needs a stable site LAN IP, such as a DHCP
+  reservation. Nodes accept SSH and Frigate connections only from that IP.
+- Deliverable: the relay bundle, the node→relay restream convention (paths, auth), and
+  how fusion/clients address streams. This is new work pulled in by the ownership
+  decision.
+
+### 4.4 Camera auto-configuration
+
+Owner decision: **a kit accepts any factory-fresh camera and configures it with no
+operator action.** The camera's reset button is the operator's way to re-adopt one.
+
+1. The node gives the camera its address over DHCP on the camera link.
+2. The node logs in with the factory login (`admin`, blank password), **once per link
+   or address change**. It never guesses other passwords, so it cannot trigger a
+   lockout.
+3. On success it generates a random password unique to this camera and saves it
+   root-only on the node **before** sending it to the camera, so a power cut during the
+   change cannot lose it.
+4. It turns off P2P and any other unneeded service, sets the camera's name, clock and
+   stream settings, and turns on RTSP.
+5. It records the camera's MAC address, renders the Frigate config from `node_id`,
+   `covered_zones` and that password, and starts Frigate.
+
+A camera with an unknown password is never touched. The node reports that it needs a
+factory reset, and adopts it automatically after the reset. Replacing a camera is the
+same flow, so a field swap needs no tools. This is safe because the link is
+point-to-point: anyone who can plug into it already has physical access to the kit.
 
 ### 4.3 Degradation behavior
 
@@ -338,8 +382,12 @@ the bound is shed oldest-first rather than growing the queue without limit.
 ### 5.6 Snapshot / clip references
 
 `snapshot_url` and `clip_url` reference the **edge node's Frigate** (the footage
-owner). Local clients reach them over the site LAN; remote operators reach them
-over Tailscale. Edge Frigate is **not** exposed to the WAN directly. v0 does not
+owner), on port 8971. Local clients reach them over the site LAN; remote operators reach them over
+Tailscale. Both go through the central API (4.2), which fetches the footage from the
+node. Only the central node's IP can reach port 8971. Frigate's own login is off, and a
+proxy secret shared with the central node protects it instead, so users log in once, to
+the central API. Frigate's unauthenticated port 5000 is reachable only from the node
+itself. Edge Frigate is **not** exposed to the WAN directly. v0 does not
 copy footage to the central node; central-side event-clip upload is a later-phase
 option.
 
@@ -370,17 +418,18 @@ reach the camera.
 The portal collects, and writes to node config:
 - Wi-Fi client SSID + password (scanned via `nmcli dev wifi`) → a NetworkManager
   profile.
-- VPN (Tailscale auth key only) and hostname.
-- **Central endpoints:** MQTT broker address + credentials/TLS, MediaMTX address. A
-  broker address in Tailscale's `100.64.0.0/10` is rejected, because fusion traffic
-  must not depend on Tailscale (7.3).
+- Hostname. There is no VPN field: nodes do not run Tailscale (4.2).
+- **Central endpoints:** MQTT broker address + credentials/TLS, MediaMTX address. The
+  broker address must be an IP, because the node's firewall admits only that address
+  for SSH and Frigate. An address in Tailscale's `100.64.0.0/10` is rejected, because
+  fusion traffic must not depend on Tailscale (7.3).
 - **Time server** (`ntp_server`), on the full form only. Blank means the broker host.
   It is written to a timesyncd drop-in as part of the same atomic save, and is not in
   the bridge config (7.5).
 - **Covered zones** (section 6) and the **Frigate address** (`frigate.base_url`, 5.6).
 - **`node_id`:** on a blank node's form, `node_id` and hostname default to
   `cam-<last 6 of the serial, lowercase>`, and the Frigate address to
-  `http://<hostname>.local:5000`. All three stay editable. If the serial cannot be
+  `https://<hostname>.local:8971`. All three stay editable. If the serial cannot be
   read they start blank, and the failure is logged. Two kits must not share a
   `node_id`, because it is also their MQTT client ID.
 
@@ -392,9 +441,9 @@ a successful join the portal closes. It opens again only as described in 7.4.
 ### 7.3 Traffic paths
 - **Fusion traffic (events + restream, node→central) goes over the site LAN/Wi-Fi
   (local).** It must not depend on the WAN.
-- **Tailscale is only for the remote-ops consumer class** reaching the site over
-  the WAN, and for remote operators reaching edge Frigate (5.6). A WAN loss must
-  not break local event delivery.
+- **Tailscale runs only on the central node**, for users outside the site (4.2, 5.6).
+  A WAN loss must not break local event delivery. With the central node down, the only
+  access to a node is a local console. The node keeps detecting and recording.
 
 ### 7.4 AP-fallback watchdog (required)
 "Uplink established" means **Wi-Fi associated + a DHCP lease on the site network
@@ -485,6 +534,10 @@ contracts, not exhaustive coverage.
   fields and the shared zone vocabulary are hard dependencies before freeze.
 - **Fusion standard not yet defined.** The camera contract is v0 and self-consistent;
   it changes in one module when the fusion standard lands.
+- **Hailo driver coupling.** Frigate v0.18.2 needs HailoRT and driver 4.21.0, while
+  Trixie's `hailo-all` is 5.1.1. Never install `hailo-all` on a node, and pin the Frigate
+  image and driver together. The Pi 5 kernel uses 16 KB pages, which may need a Hailo
+  driver option or the 4 KB kernel.
 - **microSD endurance.** Continuous recording to microSD wears it out; a USB SSD
   for the record volume is the likely answer (section 11).
 
@@ -509,11 +562,10 @@ contracts, not exhaustive coverage.
   against the shared zone names from section 6.
 - Retention policy and record storage medium (microSD vs USB SSD).
 - Which Hailo model / `.hef` (Frigate's bundled Hailo YOLO is the default start).
-- RLC-520A bring-up: v0 pre-configures each camera at the bench as a documented
-  assembly step (sub-stream 640×480@5fps, main ≤5MP@15fps, RTSP + ONVIF enabled,
-  admin password, NTP) plus the Pi-side static addressing on the point-to-point
-  link. Note: current RLC-520A firmware ships RTSP/ONVIF **disabled** (reachable
-  only over Baichuan/port 9000), so enabling is mandatory at the bench; automatic
-  enable-on-first-boot over Baichuan (`reolink_aio`) is a proven, feasible
-  enhancement, not v0.
+- RLC-520A bring-up is automatic (4.4). Target settings: sub-stream 640×480@5fps,
+  main ≤5MP@15fps, RTSP enabled. Observed on the first unit, firmware
+  `v3.2.0.5180_2507241369`: HTTP API, RTSP and ONVIF enabled at the factory, P2P on,
+  blank `admin` password. Other firmware may ship HTTP or RTSP disabled, reachable only
+  over Baichuan on port 9000 (`reolink_aio`). Such a camera is reported, not adopted, in
+  v0.
 ```

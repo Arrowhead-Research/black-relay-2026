@@ -59,7 +59,7 @@ status_interval_s: 30
 # reached by clients over the site LAN / by remote ops over Tailscale, never the WAN.
 frigate:
   topic: frigate/events
-  base_url: http://cam-01.local:5000
+  base_url: https://cam-01.local:8971
   # The camera's name in Frigate's config: selects its entry in frigate/stats and its
   # frigate/<camera>/recordings/state topic. If unset, camera_online and recording_ok
   # always report false.

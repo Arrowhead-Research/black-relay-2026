@@ -2254,7 +2254,7 @@ def test_i1_a_blank_nodes_form_is_filled_from_the_serial(node: Node) -> None:
 
     assert field_value(body, "node_id") == "cam-cdef12"
     assert field_value(body, "hostname") == "cam-cdef12"
-    assert field_value(body, "frigate_base_url") == "http://cam-cdef12.local:5000"
+    assert field_value(body, "frigate_base_url") == "https://cam-cdef12.local:8971"
 
 
 def test_i1_two_kits_get_different_defaults(tmp_path: Path) -> None:

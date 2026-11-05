@@ -104,7 +104,7 @@ def identity_values(serial: str) -> dict[str, str]:
     return {
         "node_id": name,
         "hostname": name,
-        "frigate_base_url": f"http://{name}.local:5000",
+        "frigate_base_url": f"https://{name}.local:8971",
         "broker_port": str(BrokerConfig.port),
         "vpn_requested": "on",
     }
