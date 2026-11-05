@@ -1,0 +1,21 @@
+[project]
+name = "cameraprovision"
+version = "0.0.0"
+description = "Black Relay camera subsystem edge-node onboarding: setup AP, captive portal, uplink watchdog, and the state machine that ties them together."
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+# Only pure logic exists so far; Task 6 adds the CLI and [build-system], as the
+# bridge did in its own service-wiring task. Until then keep the project
+# non-packaged and expose src/ to pytest.
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
