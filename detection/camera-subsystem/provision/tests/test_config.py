@@ -25,6 +25,7 @@ from cameraprovision.config import (
     FrigateConfig,
     NodeConfig,
     OutboxConfig,
+    effective_ntp_server,
     validate,
     validate_wifi,
     write_bridge_config,
@@ -648,3 +649,67 @@ def test_unserializable_value_error_never_carries_secret_values(tmp_path: Path) 
     assert BROKER_PASSWORD not in str(raised.value)
     assert raised.value.__context__ is None
     assert not path.exists()
+
+
+# --- M4: the broker must not depend on Tailscale ---------------------------------
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["100.64.0.0", "100.64.0.1", "100.100.100.100", "100.127.255.255", "::ffff:100.64.0.1"],
+)
+def test_m4_a_tailscale_range_broker_is_rejected_with_a_clear_error(host: str) -> None:
+    errors = validate(make_config(broker=broker(host=host)))
+
+    assert len(errors) == 1
+    assert "broker.host" in errors[0]
+    assert "100.64.0.0/10" in errors[0]
+    assert "site LAN" in errors[0]
+
+
+@pytest.mark.parametrize(
+    "host", ["100.63.255.255", "100.128.0.0", "10.0.0.2", "fd00::2", "::ffff:10.0.0.2", "broker.lan"]
+)
+def test_m4_addresses_outside_the_tailscale_range_are_accepted(host: str) -> None:
+    assert validate(make_config(broker=broker(host=host))) == []
+
+
+def test_m4_a_tailscale_range_broker_is_never_written(tmp_path: Path) -> None:
+    path = tmp_path / "bridge.yaml"
+
+    with pytest.raises(ValueError, match="100.64.0.0/10"):
+        write_bridge_config(make_config(broker=broker(host="100.64.0.1")), path)
+
+    assert not path.exists()
+
+
+# --- owner decision: the NTP source comes from the portal -------------------------
+
+
+def test_ntp_defaults_to_the_broker_host() -> None:
+    assert effective_ntp_server(make_config(broker=broker(host="10.0.0.2"))) == "10.0.0.2"
+
+
+def test_an_explicit_ntp_server_is_used() -> None:
+    cfg = make_config(ntp_server="time.site.local")
+
+    assert validate(cfg) == []
+    assert effective_ntp_server(cfg) == "time.site.local"
+
+
+@pytest.mark.parametrize(
+    "server", ["   ", "ntp://10.0.0.2", "10.0.0.2:123", "two words", "bad\nNTP=evil", "10.0.0.999", None]
+)
+def test_an_invalid_ntp_server_is_rejected_by_name(server: Any) -> None:
+    errors = validate(make_config(ntp_server=server))
+
+    assert any("ntp_server" in e for e in errors)
+
+
+def test_ntp_server_never_reaches_the_bridge_config(tmp_path: Path) -> None:
+    path = tmp_path / "bridge.yaml"
+
+    write_bridge_config(make_config(ntp_server="time.site.local"), path)
+
+    assert "ntp" not in path.read_text().lower().replace("mediamtx", "")
+    assert "time.site.local" not in path.read_text()

@@ -107,6 +107,8 @@ class FakeSystem:
         self.associated = False
         self.lease = False
         self.ssids = ["Site-WiFi", "Neighbour"]
+        self.scan_failures = 0
+        self.serial = "10000000ABCDEF12"
         self.failing: dict[str, Exception] = {}
         self.tailscale_args: list[tuple[Path, str]] = []
         self.chowned: list[Path] = []
@@ -129,7 +131,17 @@ class FakeSystem:
 
     def scan_ssids(self) -> list[str]:
         self._do("scan")
+        if self.scan_failures:
+            self.scan_failures -= 1
+            raise SystemCommandError("nmcli failed")
         return list(self.ssids)
+
+    def restart_timesync(self) -> None:
+        self._do("restart_timesync")
+
+    def read_serial(self) -> str:
+        self._do("read_serial")
+        return self.serial
 
     def start_ap(self) -> None:
         self._do("start_ap")
@@ -227,6 +239,7 @@ class Node:
             mediamtx_env=root / "etc/camerabridge/mediamtx.env",
             nm_connections_dir=root / "etc/NetworkManager/system-connections",
             state_dir=root / "var/lib/camera-provision",
+            ntp_dropin=root / "etc/systemd/timesyncd.conf.d/black-relay.conf",
         )
         self.listeners: list[FakeListener] = []
         self.daemon: Provisioner | None = None
@@ -337,6 +350,7 @@ class Node:
             self.paths.nm_keyfile,
             self.paths.node_file,
             self.paths.tailscale_key,
+            self.paths.ntp_dropin,
         ]
         return {str(path): path.read_bytes() for path in files if path.exists()}
 
@@ -2183,3 +2197,343 @@ def test_cli_requires_a_command() -> None:
     with pytest.raises(SystemExit) as raised:
         cli.main([])
     assert raised.value.code != 0
+
+
+# --- M7: a failed scan is retried once ----------------------------------------------
+
+
+def test_m7_a_failed_scan_is_retried_and_its_result_used(node: Node) -> None:
+    node.system.scan_failures = 1
+
+    node.boot()
+
+    assert node.system.count("scan") == 2
+    assert 'value="Neighbour"' in node.request().body
+
+
+def test_m7_a_scan_that_fails_twice_is_not_tried_a_third_time(node: Node) -> None:
+    node.system.scan_failures = 2
+
+    node.boot()
+    node.tick()
+
+    assert node.system.count("scan") == 2
+    assert node.state is S.AP_UP
+    assert node.system.count("start_ap") == 1
+    assert 'value="Neighbour"' not in node.request().body
+
+
+def test_m7_a_good_scan_runs_once(node: Node) -> None:
+    node.boot()
+    node.tick()
+
+    assert node.system.count("scan") == 1
+
+
+def test_m7_a_retry_happens_before_the_ap_starts(node: Node) -> None:
+    node.system.scan_failures = 1
+
+    node.boot()
+
+    last_scan = max(i for i, call in enumerate(node.calls) if call == "scan")
+    assert last_scan < node.calls.index("start_ap")
+
+
+# --- I1: the identity a blank node's form starts with ------------------------------
+
+
+def field_value(body: str, name: str) -> str | None:
+    found = re.search(rf'name="{name}"[^>]*? value="([^"]*)"', body)
+    return found.group(1) if found else None
+
+
+def test_i1_a_blank_nodes_form_is_filled_from_the_serial(node: Node) -> None:
+    node.boot()
+
+    body = node.request().body
+
+    assert field_value(body, "node_id") == "cam-cdef12"
+    assert field_value(body, "hostname") == "cam-cdef12"
+    assert field_value(body, "frigate_base_url") == "http://cam-cdef12.local:5000"
+
+
+def test_i1_two_kits_get_different_defaults(tmp_path: Path) -> None:
+    first, second = Node(tmp_path / "a"), Node(tmp_path / "b")
+    second.system.serial = "10000000ABC00001"
+    try:
+        first.boot()
+        second.boot()
+
+        assert field_value(first.request().body, "node_id") != field_value(
+            second.request().body, "node_id"
+        )
+    finally:
+        for kit in (first, second):
+            assert kit.daemon is not None
+            kit.daemon.shutdown()
+            for response in kit.responses:
+                response.finish()
+
+
+def test_i1_the_defaults_can_be_changed_before_saving(node: Node) -> None:
+    node.boot()
+
+    node.submit(valid_form(node_id="gate-1", hostname="gate", frigate_base_url="http://gate:5000"))
+    node.tick()
+
+    assert node.bridge_yaml()["node_id"] == "gate-1"
+    assert node.bridge_yaml()["frigate"]["base_url"] == "http://gate:5000"
+    assert node.store().hostname() == "gate"
+
+
+def test_i1_an_unreadable_serial_leaves_the_fields_blank_and_is_logged(
+    node: Node, caplog: pytest.LogCaptureFixture
+) -> None:
+    node.system.failing["read_serial"] = OSError("no such file")
+
+    node.boot()
+    body = node.request().body
+
+    assert node.state is S.AP_UP
+    assert field_value(body, "node_id") == ""
+    assert field_value(body, "hostname") == ""
+    assert field_value(body, "frigate_base_url") == ""
+    assert field_value(body, "broker_port") == "1883"
+    assert "reading the serial failed" in caplog.text and "OSError" in caplog.text
+
+
+def test_i1_a_malformed_serial_leaves_the_fields_blank_and_is_logged(
+    node: Node, caplog: pytest.LogCaptureFixture
+) -> None:
+    node.system.failing["read_serial"] = ValueError("unexpected serial format")
+
+    node.boot()
+
+    assert field_value(node.request().body, "node_id") == ""
+    assert "reading the serial failed" in caplog.text
+
+
+def test_i1_a_fallback_with_no_config_also_gets_the_defaults(node: Node) -> None:
+    node.seed_config()
+    node.boot()
+    node.tick(JOIN_TIMEOUT)
+    assert node.state is S.FALLBACK_AP
+    node.paths.nm_keyfile.unlink()
+    node.tick()
+
+    assert field_value(node.request().body, "node_id") == "cam-cdef12"
+
+
+# --- M5: a button re-provision starts from what is saved ---------------------------
+
+
+def test_m5_the_button_form_shows_the_saved_settings_and_no_secret(node: Node) -> None:
+    node.seed_config(
+        node_config(
+            node_id="cam-07",
+            hostname="edge-7",
+            vpn_requested=True,
+            tailscale_auth_key=TAILSCALE_KEY,
+        )
+    )
+    node.system.button = True
+    node.boot()
+
+    body = node.request().body
+
+    assert field_value(body, "wifi_ssid") == "Site-WiFi"
+    assert field_value(body, "node_id") == "cam-07"
+    assert field_value(body, "hostname") == "edge-7"
+    assert field_value(body, "broker_host") == "10.0.0.2"
+    assert field_value(body, "broker_username") == "camera-cam-01"
+    assert field_value(body, "covered_zones") == "perimeter-north"
+    assert field_value(body, "mediamtx_address") == "10.0.0.2:8554"
+    assert all(secret not in body for secret in SECRETS)
+    assert "read_serial" not in node.calls
+
+
+def test_m5_the_saved_form_cannot_be_resubmitted_without_its_secrets(node: Node) -> None:
+    node.seed_config()
+    before = node.disk()
+    node.system.button = True
+    node.boot()
+
+    response = node.submit(
+        valid_form(wifi_psk="", broker_password="", vpn_requested="", tailscale_auth_key="")
+    )
+
+    assert response.code == 400
+    assert "wifi_psk" in response.body and "broker.password" in response.body
+    assert node.disk() == before
+
+
+def test_m5_the_vpn_box_is_ticked_only_while_a_login_is_owed(node: Node) -> None:
+    node.seed_config(node_config(vpn_requested=True, tailscale_auth_key=TAILSCALE_KEY))
+    node.system.button = True
+    node.boot()
+    assert re.search(r'name="vpn_requested"[^>]* checked', node.request().body)
+    node.daemon.shutdown()
+
+    node.paths.tailscale_key.unlink()
+    node.system.boot = "boot-2"
+    node.boot()
+
+    assert not re.search(r'name="vpn_requested"[^>]* checked', node.request().body)
+
+
+def test_m5_a_wifi_only_portal_prefills_nothing(node: Node) -> None:
+    node.seed_config()
+    node.boot()
+    node.tick(JOIN_TIMEOUT)
+    assert node.state is S.FALLBACK_AP
+    node.tick()
+
+    response = node.request()
+
+    assert 'name="wifi_ssid" list="scanned-ssids" value=""' in response.body
+    assert 'name="node_id"' not in response.body
+
+
+def test_m5_a_damaged_config_prefills_nothing_rather_than_a_new_identity(node: Node) -> None:
+    node.seed_config()
+    node.paths.bridge_config.write_text("not: [valid")
+    node.system.button = True
+    node.boot()
+
+    body = node.request().body
+
+    assert field_value(body, "node_id") == ""
+    assert "read_serial" not in node.calls
+
+
+# --- owner decision: NTP from the portal -------------------------------------------
+
+
+def test_submit_writes_the_drop_in_and_restarts_timesyncd_on_joining(node: Node) -> None:
+    node.boot()
+    assert node.system.count("restart_timesync") == 0
+
+    node.submit()
+    node.tick()
+
+    assert node.paths.ntp_dropin.read_text() == "[Time]\nNTP=10.0.0.2\n"
+    assert node.state is S.JOINING
+    assert node.system.count("restart_timesync") == 1
+    assert after(node.calls, "restart_timesync", "join")
+
+
+def test_a_reboot_with_a_saved_config_restarts_timesyncd_once(node: Node) -> None:
+    node.seed_config()
+    node.boot()
+    node.tick()
+    node.tick()
+
+    assert node.state is S.JOINING
+    assert node.system.count("restart_timesync") == 1
+
+
+def test_a_failed_timesyncd_restart_does_not_block_the_join_and_is_retried(
+    node: Node, caplog: pytest.LogCaptureFixture
+) -> None:
+    node.seed_config()
+    node.system.failing["restart_timesync"] = SystemCommandError("systemctl failed")
+
+    node.boot()
+
+    assert node.state is S.JOINING
+    assert node.system.count("join") == 1
+    assert "restarting systemd-timesyncd failed" in caplog.text
+
+    node.system.link_up()
+    node.tick()
+    assert node.state is S.PROVISIONED
+    assert node.system.count("start_ap") == 0
+
+    # Spaced out, and carried on after the link came up.
+    before = node.system.count("restart_timesync")
+    node.tick(1)
+    assert node.system.count("restart_timesync") == before
+    node.tick(30)
+    assert node.system.count("restart_timesync") == before + 1
+
+    del node.system.failing["restart_timesync"]
+    node.tick(30)
+    settled = node.system.count("restart_timesync")
+    node.tick(30)
+    assert node.system.count("restart_timesync") == settled
+
+
+def test_a_failing_timesyncd_restart_never_counts_as_a_daemon_failure(node: Node) -> None:
+    node.seed_config()
+    node.system.failing["restart_timesync"] = SystemCommandError("systemctl failed")
+    node.system.link_up()
+    node.boot()
+
+    for _ in range(JOIN_TICKS_PAST_EXIT_LIMIT):
+        node.tick(30)
+
+    assert node.state is S.PROVISIONED
+
+
+def test_a_failed_timesyncd_restart_does_not_itself_open_the_ap(node: Node) -> None:
+    node.seed_config()
+    node.system.failing["restart_timesync"] = SystemCommandError("systemctl failed")
+    node.boot()
+
+    node.tick(JOIN_TIMEOUT - 1)
+
+    assert node.state is S.JOINING
+    assert node.system.count("start_ap") == 0
+
+
+def test_a_daemon_restart_during_joining_still_owes_the_timesyncd_restart(node: Node) -> None:
+    node.seed_config()
+    node.system.failing["restart_timesync"] = SystemCommandError("systemctl failed")
+    node.boot()
+    node.daemon.shutdown()
+    del node.system.failing["restart_timesync"]
+    before = node.system.count("restart_timesync")
+
+    node.boot()
+
+    assert node.state is S.JOINING
+    assert node.system.count("restart_timesync") == before + 1
+
+
+def test_a_wifi_repair_does_not_change_the_ntp_dropin(node: Node) -> None:
+    node.seed_config(node_config(ntp_server="time.site.local"))
+    before = node.paths.ntp_dropin.read_bytes()
+    node.boot()
+    node.tick(JOIN_TIMEOUT)
+    assert node.state is S.FALLBACK_AP
+    node.tick()
+    assert 'name="ntp_server"' not in node.request().body
+
+    response = node.submit({"wifi_ssid": "Site-WiFi", "wifi_psk": NEW_WIFI_PSK, "ntp_server": "evil.example"})
+
+    assert response.code == 200
+    assert node.paths.ntp_dropin.read_bytes() == before
+
+
+def test_a_button_move_to_another_broker_moves_a_defaulted_ntp_server(node: Node) -> None:
+    node.seed_config()
+    assert node.paths.ntp_dropin.read_text() == "[Time]\nNTP=10.0.0.2\n"
+    node.system.button = True
+    node.boot()
+    assert field_value(node.request().body, "ntp_server") == "10.0.0.2"
+
+    saved = node.submit(valid_form(broker_host="10.0.0.9", ntp_server="10.0.0.2"))
+
+    assert "Time server: 10.0.0.9" in saved.body
+    assert node.paths.ntp_dropin.read_text() == "[Time]\nNTP=10.0.0.9\n"
+
+
+def test_a_button_move_to_another_broker_keeps_an_explicit_ntp_server(node: Node) -> None:
+    node.seed_config(node_config(ntp_server="time.site.local"))
+    node.system.button = True
+    node.boot()
+    assert field_value(node.request().body, "ntp_server") == "time.site.local"
+
+    node.submit(valid_form(broker_host="10.0.0.9", ntp_server="time.site.local"))
+
+    assert node.paths.ntp_dropin.read_text() == "[Time]\nNTP=time.site.local\n"

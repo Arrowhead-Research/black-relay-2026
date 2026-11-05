@@ -9,6 +9,7 @@ What lives where:
 * ``node.json`` (0600): provisioning-only fields the bridge YAML does not hold. A WiFi
   repair needs the hostname from here.
 * ``tailscale.key`` (0600): exists only while a login is owed.
+* the timesyncd drop-in (0644, root): the time server, read by ``systemd-timesyncd``.
 
 A save stages every file beside its target, then commits. A failure before the commit
 changes nothing, and a failure during it is rolled back from hard-linked backups. A
@@ -33,6 +34,7 @@ from cameraprovision.config import (
     NodeConfig,
     OutboxConfig,
     _write_private_atomic,
+    effective_ntp_server,
     validate,
     validate_wifi,
     write_bridge_config,
@@ -58,6 +60,7 @@ class Paths:
     mediamtx_env: Path = Path("/etc/camerabridge/mediamtx.env")
     nm_connections_dir: Path = Path("/etc/NetworkManager/system-connections")
     state_dir: Path = Path("/var/lib/camera-provision")
+    ntp_dropin: Path = Path("/etc/systemd/timesyncd.conf.d/black-relay.conf")
 
     @property
     def nm_keyfile(self) -> Path:
@@ -85,6 +88,7 @@ class Paths:
             self.bridge_config,
             self.mediamtx_env,
             self.tailscale_key,
+            self.ntp_dropin,
             self.nm_keyfile,
             self.node_file,
         )
@@ -204,6 +208,7 @@ class NodeStore:
             tailscale_auth_key=key,
             vpn_requested=bool(key),
             broker_anonymous=node["broker_anonymous"],
+            ntp_server=node.get("ntp_server", ""),
         )
 
     # --- writing ------------------------------------------------------------------
@@ -214,11 +219,13 @@ class NodeStore:
         if errors:
             raise ValueError("invalid node config: " + "; ".join(errors))
         paths = self._paths
+        ntp_server = effective_ntp_server(cfg)
         node = {
             "hostname": cfg.hostname,
             "wifi_ssid": cfg.wifi_ssid,
             "vpn_requested": cfg.vpn_requested,
             "broker_anonymous": cfg.broker_anonymous,
+            "ntp_server": ntp_server,
         }
 
         def stage_bridge(staged: Path) -> None:
@@ -229,12 +236,17 @@ class NodeStore:
             _write_private_atomic(staged, f"MEDIAMTX_ADDRESS={cfg.mediamtx_address}\n")
             staged.chmod(0o644)
 
+        def stage_ntp(staged: Path) -> None:
+            _write_private_atomic(staged, f"[Time]\nNTP={ntp_server}\n")
+            staged.chmod(0o644)
+
         key = cfg.tailscale_auth_key if cfg.vpn_requested else None
         self._transact(
             [
                 (paths.bridge_config, stage_bridge),
                 (paths.mediamtx_env, stage_mediamtx),
                 (paths.tailscale_key, None if key is None else self._text(key)),
+                (paths.ntp_dropin, stage_ntp),
                 (
                     paths.nm_keyfile,
                     self._text(self._keyfile(cfg.wifi_ssid, cfg.wifi_psk, cfg.hostname)),
@@ -247,8 +259,8 @@ class NodeStore:
         """Repair the WiFi alone: re-render the keyfile from these and the saved hostname.
 
         Reads ``node.json`` directly and never builds a ``NodeConfig``, so a repair works
-        with the bridge config missing or invalid. That file and any pending Tailscale
-        key are not touched.
+        with the bridge config missing or invalid. That file, the time server and any
+        pending Tailscale key are not touched.
         """
         errors = validate_wifi(ssid, psk)
         if errors:
@@ -385,8 +397,10 @@ class NodeStore:
         journal remains, because a later start needs the file to finish that commit.
         """
         paths = self._paths
-        if not paths.node_file.exists() and not paths.journal.exists():
-            paths.bridge_config.unlink(missing_ok=True)
+        if paths.node_file.exists() or paths.journal.exists() or not paths.bridge_config.exists():
+            return
+        paths.bridge_config.unlink()
+        logger.warning("removed a bridge config found on a blank node, so the bridge stays off")
 
     def _sweep(self) -> None:
         paths = self._paths
@@ -401,17 +415,21 @@ class NodeStore:
         """Run at startup: settle an interrupted save and remove stale working files.
 
         Never raises for a disk problem. The node has to keep joining or serving the AP,
-        and exiting would only repeat this on the same disk.
+        and exiting would only repeat this on the same disk. The sweep is skipped if settling
+        failed, because a later start needs the backups to finish that rollback.
         """
         paths = self._paths
-        steps = (
-            lambda: paths.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True),
-            self._settle_interrupted_save,
-            self._remove_stray_bridge_config,
-            self._sweep,
-        )
-        for step in steps:
-            try:
-                step()
-            except OSError as exc:
-                logger.error("recovering the saved config failed: %s", type(exc).__name__)
+        self._recovery_step(lambda: paths.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True))
+        settled = self._recovery_step(self._settle_interrupted_save)
+        self._recovery_step(self._remove_stray_bridge_config)
+        if settled:
+            self._recovery_step(self._sweep)
+
+    @staticmethod
+    def _recovery_step(step: Callable[[], None]) -> bool:
+        try:
+            step()
+        except OSError as exc:
+            logger.error("recovering the saved config failed: %s", type(exc).__name__)
+            return False
+        return True

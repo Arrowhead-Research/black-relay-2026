@@ -241,6 +241,7 @@ def test_tailscale_args_are_exact() -> None:
         "up",
         "--auth-key=file:/run/camera/ts.key",
         "--hostname=edge-7",
+        "--accept-dns=false",
     ]
 
 

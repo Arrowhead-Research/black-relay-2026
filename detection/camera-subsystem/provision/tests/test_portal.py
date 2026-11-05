@@ -12,6 +12,7 @@ import http.client
 import inspect
 import io
 import logging
+import re
 import socket
 import threading
 import time
@@ -43,7 +44,9 @@ from cameraprovision.portal import (
     handle_wifi_submit,
     make_app,
     make_server,
+    identity_values,
     render_form,
+    saved_values,
 )
 
 WIFI_PSK = "w1fi-s3cret-Psk"
@@ -63,6 +66,7 @@ REDISPLAYED_FIELDS = (
     "broker_port",
     "broker_username",
     "mediamtx_address",
+    "ntp_server",
     "frigate_base_url",
     "covered_zones",
 )
@@ -227,7 +231,7 @@ def test_errors_are_shown() -> None:
 
 
 def test_redisplay_keeps_non_secret_values_and_checkbox_state() -> None:
-    values = valid_form()
+    values = valid_form(ntp_server="time.site.local")
     del values["vpn_requested"]
     controls = Page(render_form([], values=values)).controls()
 
@@ -326,6 +330,7 @@ def test_valid_form_applies_the_parsed_config_once() -> None:
             tailscale_auth_key=TAILSCALE_KEY,
             vpn_requested=True,
             mediamtx_address="10.0.0.2:8554",
+            ntp_server="10.0.0.2",
             covered_zones=["perimeter-north", "driveway"],
             broker=BrokerConfig(
                 host="10.0.0.2",
@@ -1521,3 +1526,260 @@ def test_a_silent_socket_prints_no_traceback(
 
     assert "Traceback" not in capfd.readouterr().err
     assert "TimeoutError" in caplog.text
+
+
+# --- I1 and M5: what a form starts with ---------------------------------------------
+
+
+def saved_config(**overrides: Any) -> NodeConfig:
+    values: dict[str, Any] = {
+        "node_id": "cam-07",
+        "hostname": "edge-7",
+        "wifi_ssid": "Site-WiFi",
+        "wifi_psk": WIFI_PSK,
+        "tailscale_auth_key": TAILSCALE_KEY,
+        "vpn_requested": True,
+        "mediamtx_address": "10.0.0.2:8554",
+        "covered_zones": ["perimeter-north", "driveway"],
+        "broker": BrokerConfig(
+            host="10.0.0.2", port=8883, username="camera-cam-07", password=BROKER_PASSWORD, tls=True
+        ),
+        "frigate": FrigateConfig(base_url="http://edge-7.local:5000"),
+    }
+    values.update(overrides)
+    return NodeConfig(**values)
+
+
+def test_i1_identity_values_derive_from_the_last_six_of_the_serial() -> None:
+    values = identity_values("10000000ABCDEF12")
+
+    assert values["node_id"] == "cam-cdef12"
+    assert values["hostname"] == "cam-cdef12"
+    assert values["frigate_base_url"] == "http://cam-cdef12.local:5000"
+
+
+def test_i1_identity_values_keep_the_first_render_defaults() -> None:
+    controls = Page(render_form([], values=identity_values("10000000ABCDEF12"))).controls()
+
+    assert controls["broker_port"]["value"] == str(BrokerConfig.port)
+    assert "checked" in controls["vpn_requested"]
+    assert "checked" not in controls["broker_tls"]
+    assert "checked" not in controls["broker_anonymous"]
+
+
+def test_i1_identity_values_pass_validation() -> None:
+    values = identity_values("10000000ABCDEF12")
+
+    form = valid_form(
+        node_id=values["node_id"],
+        hostname=values["hostname"],
+        frigate_base_url=values["frigate_base_url"],
+    )
+
+    assert handle_submit(form, apply=lambda cfg: None).ok
+
+
+def test_i1_identity_fields_stay_editable() -> None:
+    controls = Page(render_form([], values=identity_values("10000000ABCDEF12"))).controls()
+
+    for name in ("node_id", "hostname", "frigate_base_url"):
+        assert "readonly" not in controls[name] and "disabled" not in controls[name]
+
+
+def test_m5_saved_values_fill_every_non_secret_field() -> None:
+    controls = Page(render_form([], values=saved_values(saved_config()))).controls()
+
+    assert controls["wifi_ssid"]["value"] == "Site-WiFi"
+    assert controls["node_id"]["value"] == "cam-07"
+    assert controls["hostname"]["value"] == "edge-7"
+    assert controls["covered_zones"]["value"] == "perimeter-north, driveway"
+    assert controls["frigate_base_url"]["value"] == "http://edge-7.local:5000"
+    assert controls["broker_host"]["value"] == "10.0.0.2"
+    assert controls["broker_port"]["value"] == "8883"
+    assert controls["broker_username"]["value"] == "camera-cam-07"
+    assert controls["mediamtx_address"]["value"] == "10.0.0.2:8554"
+    assert "checked" in controls["broker_tls"]
+    assert "checked" not in controls["broker_anonymous"]
+
+
+def test_m5_saved_values_hold_no_secret() -> None:
+    values = saved_values(saved_config())
+
+    assert not {"wifi_psk", "broker_password", "tailscale_auth_key"} & set(values)
+    assert not {WIFI_PSK, BROKER_PASSWORD, TAILSCALE_KEY} & set(values.values())
+
+
+def test_m5_saved_values_reflect_each_box() -> None:
+    anonymous = saved_config(
+        broker=BrokerConfig(host="10.0.0.2", username="", password=""),
+        broker_anonymous=True,
+        vpn_requested=False,
+        tailscale_auth_key="",
+    )
+
+    controls = Page(render_form([], values=saved_values(anonymous))).controls()
+
+    assert "checked" in controls["broker_anonymous"]
+    assert "checked" not in controls["broker_tls"]
+    assert "checked" not in controls["vpn_requested"]
+
+
+def test_m5_a_saved_value_is_escaped() -> None:
+    payload = '"><script>alert(1)</script>'
+
+    page = Page(render_form([], values=saved_values(saved_config(covered_zones=[payload]))))
+
+    assert page.controls()["covered_zones"]["value"] == payload
+    assert "script" not in page.tags()
+
+
+def test_m5_the_form_says_passwords_must_be_typed_again() -> None:
+    text = re.sub(r"\s+", " ", render_form([]))
+
+    assert "Never filled in. Type it again each time you save." in text
+    assert "Never filled in. Type it again each time you save, unless" in text
+
+
+def test_m6_the_form_says_unticking_keeps_a_tailscale_login() -> None:
+    assert "does not log this node out" in re.sub(r"\s+", " ", render_form([]))
+
+
+def test_a_form_get_shows_the_prefill() -> None:
+    app = make_app(
+        scan_ssids=lambda: [],
+        apply=lambda change: None,
+        portal_host=PORTAL_HOST,
+        mode=PortalMode.FULL,
+        prefill=identity_values("10000000ABCDEF12"),
+    )
+
+    response = request(app)
+
+    assert Page(response.text).controls()["node_id"]["value"] == "cam-cdef12"
+
+
+def test_a_rejected_post_redisplays_what_was_typed_not_the_prefill() -> None:
+    app = make_app(
+        scan_ssids=lambda: [],
+        apply=lambda change: None,
+        portal_host=PORTAL_HOST,
+        mode=PortalMode.FULL,
+        prefill=identity_values("10000000ABCDEF12"),
+    )
+
+    response = request(app, "POST", body=urlencode(valid_form(node_id="BAD")).encode())
+
+    assert Page(response.text).controls()["node_id"]["value"] == "BAD"
+
+
+# --- owner decision: the NTP field --------------------------------------------------
+
+
+def built(form: dict[str, str], **kwargs: Any) -> NodeConfig:
+    configs: list[NodeConfig] = []
+    assert handle_submit(form, apply=configs.append, **kwargs).ok
+    return configs[0]
+
+
+def test_ntp_left_blank_defaults_to_the_broker_host() -> None:
+    assert built(valid_form(ntp_server="")).ntp_server == "10.0.0.2"
+    assert built(valid_form()).ntp_server == "10.0.0.2"
+
+
+def test_an_explicit_ntp_server_is_kept_and_trimmed() -> None:
+    assert built(valid_form(ntp_server=" time.site.local ")).ntp_server == "time.site.local"
+
+
+def test_an_invalid_ntp_server_is_rejected_and_apply_is_not_called() -> None:
+    apply = Mock()
+
+    result = handle_submit(valid_form(ntp_server="bad_name"), apply=apply)
+
+    assert not result.ok and any("ntp_server" in error for error in result.errors)
+    apply.assert_not_called()
+
+
+def test_ntp_left_at_the_old_broker_follows_a_moved_broker() -> None:
+    form = valid_form(broker_host="10.0.0.9", ntp_server="10.0.0.2")
+
+    assert built(form, previous_broker="10.0.0.2").ntp_server == "10.0.0.9"
+
+
+def test_an_explicit_ntp_server_survives_a_moved_broker() -> None:
+    form = valid_form(broker_host="10.0.0.9", ntp_server="time.site.local")
+
+    assert built(form, previous_broker="10.0.0.2").ntp_server == "time.site.local"
+
+
+def test_ntp_typed_as_the_old_broker_is_kept_on_a_blank_node() -> None:
+    form = valid_form(broker_host="10.0.0.9", ntp_server="10.0.0.2")
+
+    assert built(form).ntp_server == "10.0.0.2"
+
+
+def test_the_saved_form_shows_the_ntp_server_in_use() -> None:
+    explicit = saved_config(ntp_server="time.site.local")
+
+    assert saved_values(saved_config())["ntp_server"] == "10.0.0.2"
+    assert saved_values(explicit)["ntp_server"] == "time.site.local"
+    controls = Page(render_form([], values=saved_values(explicit))).controls()
+    assert controls["ntp_server"]["value"] == "time.site.local"
+
+
+def test_the_ntp_field_is_optional_and_says_what_blank_means() -> None:
+    html = re.sub(r"\s+", " ", render_form([]))
+
+    assert "required" not in Page(render_form([])).controls()["ntp_server"]
+    assert "Blank, or left at the saved broker address, uses the broker address saved here." in html
+
+
+def test_wifi_only_has_no_ntp_field_and_ignores_a_posted_one() -> None:
+    values = {"ntp_server": "time.site.local"}
+
+    assert "ntp_server" not in Page(render_form([], values=values, mode=PortalMode.WIFI_ONLY)).controls()
+    assert "time.site.local" not in render_form([], values=values, mode=PortalMode.WIFI_ONLY)
+    changes: list[Any] = []
+    handle_wifi_submit(valid_form(ntp_server="time.site.local"), apply=changes.append)
+    assert not hasattr(changes[0], "ntp_server")
+
+
+def app_with(prefill: dict[str, str] | None, *applied: list[Any]) -> Any:
+    return make_app(
+        scan_ssids=lambda: [],
+        apply=(applied[0].append if applied else lambda change: None),
+        portal_host=PORTAL_HOST,
+        mode=PortalMode.FULL,
+        prefill=prefill,
+    )
+
+
+def test_the_app_compares_against_the_broker_it_prefilled() -> None:
+    applied: list[Any] = []
+    app = app_with(saved_values(saved_config()), applied)
+    form = valid_form(broker_host="10.0.0.9", ntp_server="10.0.0.2")
+
+    response = request(app, "POST", body=urlencode(form).encode())
+
+    assert response.status.startswith("200") and applied[0].ntp_server == "10.0.0.9"
+
+
+def test_the_saved_page_shows_the_time_server_used() -> None:
+    app = app_with(saved_values(saved_config()))
+    form = valid_form(broker_host="10.0.0.9", ntp_server="10.0.0.2")
+
+    response = request(app, "POST", body=urlencode(form).encode())
+
+    assert "Time server: 10.0.0.9" in response.text
+
+
+def test_a_wifi_repairs_saved_page_names_no_time_server() -> None:
+    app = make_app(
+        scan_ssids=lambda: [],
+        apply=lambda change: None,
+        portal_host=PORTAL_HOST,
+        mode=PortalMode.WIFI_ONLY,
+    )
+
+    response = request(app, "POST", body=urlencode(valid_form()).encode())
+
+    assert response.status.startswith("200") and "Time server" not in response.text

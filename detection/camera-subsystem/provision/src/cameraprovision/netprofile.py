@@ -96,13 +96,16 @@ def tailscale_up_args(
 ) -> list[str]:
     """Return the ``tailscale up`` argv, naming the key by file so it stays out of argv.
 
-    ``force_reauth`` makes a node that is already logged in take a new key.
+    ``--accept-dns=false`` keeps the tailnet's DNS away from the node's resolver, because
+    fusion must not depend on Tailscale. ``force_reauth`` makes a node that is already
+    logged in take a new key.
     """
     return [
         "tailscale",
         "up",
         f"--auth-key=file:{os.fspath(auth_key_file)}",
         f"--hostname={hostname}",
+        "--accept-dns=false",
         *(["--force-reauth"] if force_reauth else []),
     ]
 

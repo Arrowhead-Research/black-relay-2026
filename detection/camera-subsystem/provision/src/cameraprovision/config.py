@@ -29,6 +29,7 @@ __all__ = [
     "FrigateConfig",
     "NodeConfig",
     "OutboxConfig",
+    "effective_ntp_server",
     "validate",
     "validate_wifi",
     "write_bridge_config",
@@ -44,6 +45,8 @@ _SSID_FORBIDDEN_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\ud800-\udfff]")
 _SSID_MAX_BYTES = 32
 # ASCII and bounded: int() accepts other scripts' digits and raises on very long strings.
 _PORT_DIGITS_RE = re.compile(r"[0-9]{1,5}")
+# Where Tailscale numbers its nodes. Fusion traffic must stay on the site LAN (DESIGN 7.3).
+_TAILSCALE_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -102,6 +105,8 @@ class NodeConfig:
     vpn_requested: bool = True
     # Credentials are required unless this says the broker takes none.
     broker_anonymous: bool = False
+    # Empty means the broker host. See effective_ntp_server.
+    ntp_server: str = ""
 
 
 def _has_text(value: Any) -> bool:
@@ -128,6 +133,14 @@ def _is_host(value: Any) -> bool:
             and not labels[-1].isdigit()
         )
     return True
+
+
+def _is_tailscale_address(value: Any) -> bool:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return (getattr(address, "ipv4_mapped", None) or address) in _TAILSCALE_NETWORK
 
 
 def _is_port(value: Any) -> bool:
@@ -219,7 +232,16 @@ def validate(cfg: NodeConfig) -> list[str]:
             "node_id must be lowercase letters, digits and hyphens, with no leading hyphen",
         ),
         (_is_host(broker.host), "broker.host must be a plain hostname or IP address"),
+        (
+            not _is_tailscale_address(broker.host),
+            "broker.host must not be in Tailscale's 100.64.0.0/10: "
+            "use the broker's site LAN address, because fusion must not depend on Tailscale",
+        ),
         (_is_port(broker.port), "broker.port must be a whole number from 1 to 65535"),
+        (
+            cfg.ntp_server == "" or _is_host(cfg.ntp_server),
+            "ntp_server must be a plain hostname or IP address, or blank to use the broker",
+        ),
         *_credential_checks(cfg),
         (isinstance(broker.tls, bool), "broker.tls must be true or false"),
         (_zones_valid(cfg.covered_zones), "covered_zones needs at least one non-empty zone"),
@@ -253,6 +275,11 @@ def validate(cfg: NodeConfig) -> list[str]:
         ),
     ]
     return [message for ok, message in checks if not ok]
+
+
+def effective_ntp_server(cfg: NodeConfig) -> str:
+    """The time server this node uses: the one given, or else the broker host."""
+    return cfg.ntp_server or cfg.broker.host
 
 
 def _bridge_mapping(cfg: NodeConfig) -> dict[str, Any]:

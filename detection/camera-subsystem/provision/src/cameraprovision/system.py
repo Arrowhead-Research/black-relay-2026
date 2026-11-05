@@ -28,6 +28,8 @@ _AP_WAIT_S = 30
 _QUICK_TIMEOUT_S = 15.0
 _SCAN_TIMEOUT_S = 30.0
 _TAILSCALE_TIMEOUT_S = 60.0
+# The same rule seed-kit.sh applies, since this is the same value.
+_SERIAL_RE = re.compile(r"[0-9a-fA-F]{8,16}")
 
 
 class SystemCommandError(Exception):
@@ -101,14 +103,27 @@ class RealSystem:
         button_line: str = "GPIO17",
         service_user: str = "camerabridge",
         boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id"),
+        serial_path: Path = Path("/sys/firmware/devicetree/base/serial-number"),
     ) -> None:
         self._interface = interface
         self._button_line = button_line
         self._service_user = service_user
         self._boot_id_path = boot_id_path
+        self._serial_path = serial_path
 
     def boot_id(self) -> str:
         return self._boot_id_path.read_text(encoding="ascii").strip()
+
+    def read_serial(self) -> str:
+        """Return the Pi's serial, from the file ``seed-kit.sh`` names the AP after.
+
+        The device tree value ends in a NUL. Raises ``OSError`` or ``ValueError`` if it
+        cannot be read or is not a serial.
+        """
+        serial = self._serial_path.read_bytes().replace(b"\0", b"").decode("ascii").rstrip("\n")
+        if not _SERIAL_RE.fullmatch(serial):
+            raise ValueError("unexpected serial format")
+        return serial
 
     def scan_ssids(self) -> list[str]:
         return parse_ssids(
@@ -148,7 +163,22 @@ class RealSystem:
         )
 
     def set_hostname(self, hostname: str) -> None:
+        """Set the hostname, then restart avahi so ``<hostname>.local`` follows it.
+
+        A failed restart only costs mDNS until the next boot, so it is logged and ignored.
+        ``--no-block`` keeps it from holding up the join.
+        """
         _run(["hostnamectl", "set-hostname", hostname])
+        if shutil.which("avahi-daemon") is None:
+            return
+        try:
+            _run(["systemctl", "--no-block", "try-restart", "avahi-daemon.service"])
+        except SystemCommandError as exc:
+            logger.warning("restarting avahi failed: %s", type(exc).__name__)
+
+    def restart_timesync(self) -> None:
+        """Make timesyncd read the saved time server. ``--no-block`` keeps the join moving."""
+        _run(["systemctl", "--no-block", "restart", "systemd-timesyncd.service"])
 
     def reload_connections(self) -> None:
         _run(["nmcli", "connection", "reload"])

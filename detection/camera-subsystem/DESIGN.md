@@ -1,7 +1,7 @@
 # Camera Subsystem Design (v0)
 
 Owner: Dmitri Warner (Camera Subsystem Lead)
-Status: Draft for review. No build has started.
+Status: Plans 1 and 2 built, not hardware-verified.
 Related: `../rf-subsystem/` (RF contract this mirrors — see dependency note in 1.1),
 `./README.md` (operating instructions, filled after build),
 `../camera-relay-servive/` (central relay, now in this subsystem's scope — section 4.2).
@@ -370,14 +370,24 @@ reach the camera.
 The portal collects, and writes to node config:
 - Wi-Fi client SSID + password (scanned via `nmcli dev wifi`) → a NetworkManager
   profile.
-- VPN (Tailscale auth key or login) and hostname.
-- **Central endpoints:** MQTT broker address + credentials/TLS, MediaMTX address.
-- **`node_id`:** defaults to a value derived from the hostname/serial, editable.
+- VPN (Tailscale auth key only) and hostname.
+- **Central endpoints:** MQTT broker address + credentials/TLS, MediaMTX address. A
+  broker address in Tailscale's `100.64.0.0/10` is rejected, because fusion traffic
+  must not depend on Tailscale (7.3).
+- **Time server** (`ntp_server`), on the full form only. Blank means the broker host.
+  It is written to a timesyncd drop-in as part of the same atomic save, and is not in
+  the bridge config (7.5).
+- **Covered zones** (section 6) and the **Frigate address** (`frigate.base_url`, 5.6).
+- **`node_id`:** on a blank node's form, `node_id` and hostname default to
+  `cam-<last 6 of the serial, lowercase>`, and the Frigate address to
+  `http://<hostname>.local:5000`. All three stay editable. If the serial cannot be
+  read they start blank, and the failure is logged. Two kits must not share a
+  `node_id`, because it is also their MQTT client ID.
 
 One unified Python portal collects all of these on one page. Balena wifi-connect
 is not used, because its fixed UI collects only Wi-Fi credentials. balenaCloud is
 not used, because it puts a third party in the device-management trust path. After
-a successful join the portal is disabled.
+a successful join the portal closes. It opens again only as described in 7.4.
 
 ### 7.3 Traffic paths
 - **Fusion traffic (events + restream, node→central) goes over the site LAN/Wi-Fi
@@ -394,13 +404,35 @@ node back into setup-AP mode (that would defeat survivability and start every no
 emitting a setup AP). If no L3 uplink is established within a timeout after boot,
 the node relaunches the setup AP. A node that has a saved config alternates
 between the setup AP and rejoin attempts, so it recovers by itself when the router
-returns after a power cut. Re-provisioning an already-configured node (e.g.
-the site Wi-Fi password changed) is triggered **physically** — a GPIO button held
-during boot — not automatically.
+returns after a power cut.
+
+A reboot with no uplink therefore opens a **Wi-Fi-only repair portal, with no button
+press**, so a changed site Wi-Fi password can be repaired on the spot. Changing the
+broker, VPN, or identity needs the **physical button**, a GPIO button held during
+boot, which opens the full portal. A node that loses its link while running does not
+open the AP at all.
+
+**`FALLBACK_AP` scope rule.** In `FALLBACK_AP` the portal accepts Wi-Fi fields only and
+ignores any others, because the AP's passphrase is on the kit's label and the AP can be
+forced by jamming the router. The one exception is a node with no saved config to repair
+(no Wi-Fi profile or no hostname), which gets the full form.
 
 ### 7.5 Time
-Once an uplink exists, the node syncs NTP from the central node or the site
-gateway. Because the Pi 5 has no battery RTC, events created before NTP sync carry
+Once an uplink exists, the node syncs NTP from the server set in the portal.
+
+**Decided (owner): the source comes from the portal, and defaults to the broker host.**
+The central node serves NTP on the site LAN, so a site needs no WAN to keep time. The
+value is saved atomically with the rest of the config to
+`/etc/systemd/timesyncd.conf.d/black-relay.conf` (root, 0644), and `systemd-timesyncd`
+is restarted whenever a saved config enters `JOINING`. A failed restart is logged and
+retried, and never holds up the join or opens the AP. The Wi-Fi-only repair portal
+cannot change the value. On a button re-provision, a value left at the old broker
+address follows the new broker, and the form and the saved page show what will be used.
+
+A node that cannot reach its server never syncs, so the bridge holds events as below and
+sends no heartbeat. By default that includes a node booting during a central outage.
+
+Because the Pi 5 has no battery RTC, events created before NTP sync carry
 an untrusted clock, so the bridge holds them instead of stamping them:
 
 - **Held:** `object_start`, `object_end`, and `cue-ack` wait in a bounded in-memory
@@ -429,8 +461,9 @@ contracts, not exhaustive coverage.
   (object_start/update/end, zones assignment, confidence pass-through), RF-cue
   matching (zone + time window) and cue-ack emission (matched and unmatched).
 - **Durable delivery:** outbox acknowledges, survives a restart, resends after a
-  disconnect, preserves order, drops only `object_update` on overflow, and fusion
-  dedupe on `event_id` holds (mirrors RF's `test_outbound.py`).
+  disconnect, preserves order, never writes `object_update`, sheds only the oldest
+  durable entries on hard overflow (5.5), and fusion dedupe on `event_id` holds
+  (mirrors RF's `test_outbound.py`).
 - **Onboarding:** AP comes up on blank config; a valid profile joins and persists
   across reboot; an invalid profile falls back to AP within the timeout; a central
   or broker outage does **not** trigger AP fallback.

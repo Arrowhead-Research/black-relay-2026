@@ -76,6 +76,7 @@ def every_adapter(system: RealSystem, tmp_path: Path) -> None:
     system.gpio_reprovision_held()
     system.ap_active()
     system.set_hostname("edge-7")
+    system.restart_timesync()
 
 
 def test_every_adapter_uses_an_argv_list_with_a_timeout_and_no_shell(
@@ -260,6 +261,91 @@ def test_set_hostname_uses_hostnamectl(run: FakeRun, system: RealSystem) -> None
     assert run.calls[0][0] == ["hostnamectl", "set-hostname", "edge-7"]
 
 
+AVAHI_RESTART = ["systemctl", "--no-block", "try-restart", "avahi-daemon.service"]
+
+
+@pytest.fixture
+def avahi(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "shutil.which", lambda name: f"/usr/sbin/{name}" if name == "avahi-daemon" else None
+    )
+
+
+def test_m2_set_hostname_restarts_avahi_after_hostnamectl(
+    run: FakeRun, system: RealSystem, avahi: None
+) -> None:
+    system.set_hostname("edge-7")
+
+    assert [argv for argv, _ in run.calls] == [
+        ["hostnamectl", "set-hostname", "edge-7"],
+        AVAHI_RESTART,
+    ]
+
+
+def test_m2_set_hostname_leaves_avahi_alone_when_it_is_absent(
+    run: FakeRun, system: RealSystem, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("shutil.which", lambda name: None)
+
+    system.set_hostname("edge-7")
+
+    assert [argv for argv, _ in run.calls] == [["hostnamectl", "set-hostname", "edge-7"]]
+
+
+def test_m2_a_failed_avahi_restart_is_logged_and_ignored(
+    run: FakeRun, system: RealSystem, avahi: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    run.results["try-restart"] = subprocess.CalledProcessError(5, "systemctl")
+
+    system.set_hostname("edge-7")
+
+    assert "restarting avahi failed" in caplog.text
+
+
+def test_m2_a_failed_hostnamectl_raises_and_does_not_touch_avahi(
+    run: FakeRun, system: RealSystem, avahi: None
+) -> None:
+    run.results["set-hostname"] = subprocess.CalledProcessError(1, "hostnamectl")
+
+    with pytest.raises(SystemCommandError):
+        system.set_hostname("edge-7")
+
+    assert AVAHI_RESTART not in [argv for argv, _ in run.calls]
+
+
+# --- I1: read_serial --------------------------------------------------------------
+
+
+def test_i1_read_serial_strips_the_device_tree_nul(tmp_path: Path) -> None:
+    serial = tmp_path / "serial-number"
+    serial.write_bytes(b"10000000ABCDEF12\x00")
+
+    assert RealSystem(serial_path=serial).read_serial() == "10000000ABCDEF12"
+
+
+def test_i1_read_serial_raises_when_unreadable(tmp_path: Path) -> None:
+    with pytest.raises(OSError):
+        RealSystem(serial_path=tmp_path / "absent").read_serial()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b"", b"\x00", b"1234567", b"12345678901234567", b"not-a-serial", b"1000000\xff", b"12345678 "],
+)
+def test_i1_read_serial_rejects_what_seed_kit_rejects(tmp_path: Path, content: bytes) -> None:
+    serial = tmp_path / "serial-number"
+    serial.write_bytes(content)
+
+    with pytest.raises(ValueError):
+        RealSystem(serial_path=serial).read_serial()
+
+
+def test_i1_read_serial_uses_the_same_source_as_seed_kit(system: RealSystem) -> None:
+    script = (Path(__file__).parents[1] / "ops" / "seed-kit.sh").read_text()
+
+    assert f"SERIAL_FILE:-{system._serial_path}}}" in script
+
+
 def missing(program: str) -> FileNotFoundError:
     return FileNotFoundError(program)
 
@@ -381,6 +467,7 @@ def test_real_system_drives_the_daemon_through_recorded_output(
         mediamtx_env=tmp_path / "etc/camerabridge/mediamtx.env",
         nm_connections_dir=tmp_path / "etc/NetworkManager/system-connections",
         state_dir=tmp_path / "var/lib/camera-provision",
+        ntp_dropin=tmp_path / "etc/systemd/timesyncd.conf.d/black-relay.conf",
     )
     now = [1000.0]
     daemon = Provisioner(
@@ -426,3 +513,31 @@ def test_real_system_drives_the_daemon_through_recorded_output(
         assert daemon.state is S.PROVISIONED
     finally:
         daemon.shutdown()
+
+
+# --- owner decision: the NTP drop-in and timesyncd ---------------------------------
+
+
+def test_restart_timesync_does_not_wait_for_the_restart(run: FakeRun, system: RealSystem) -> None:
+    system.restart_timesync()
+
+    assert run.calls[0][0] == ["systemctl", "--no-block", "restart", "systemd-timesyncd.service"]
+
+
+def test_restart_timesync_reports_a_failure(run: FakeRun, system: RealSystem) -> None:
+    run.results["restart"] = subprocess.CalledProcessError(1, "systemctl")
+
+    with pytest.raises(SystemCommandError):
+        system.restart_timesync()
+
+
+def test_the_unit_lets_the_daemon_write_the_ntp_dropin_with_a_readable_directory() -> None:
+    unit = (Path(__file__).parents[1] / "ops" / "camera-provision.service").read_text()
+    directories = next(
+        line for line in unit.splitlines() if line.startswith("ConfigurationDirectory=")
+    )
+
+    # Under UMask=0077 the store's own mkdir would leave a directory timesyncd cannot read.
+    assert "systemd/timesyncd.conf.d" in directories
+    assert "ConfigurationDirectoryMode=0755" in unit
+    assert Paths().ntp_dropin == Path("/etc/systemd/timesyncd.conf.d/black-relay.conf")

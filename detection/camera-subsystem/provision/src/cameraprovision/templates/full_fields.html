@@ -27,9 +27,14 @@
 </label>
 <label>Broker password
 <input type="password" name="broker_password" autocomplete="off">
+<small>Never filled in. Type it again each time you save, unless the broker takes none.</small>
 </label>
 <label><input type="checkbox" name="broker_anonymous" value="on" $anonymous_checked> Broker takes no username or password</label>
 <label><input type="checkbox" name="broker_tls" value="on" $tls_checked> Use TLS <small>Usually port 8883; the certificate must chain to a system CA.</small></label>
+<label>Time server (NTP)
+<input type="text" name="ntp_server" value="$ntp_server" placeholder="Same as the broker address" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+<small>Blank, or left at the saved broker address, uses the broker address saved here. The page after saving shows the one used.</small>
+</label>
 <label>MediaMTX address
 <input type="text" name="mediamtx_address" value="$mediamtx_address" required placeholder="10.0.0.2:8554" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
 </label>
@@ -39,6 +44,6 @@
 <label><input type="checkbox" name="vpn_requested" value="on" $vpn_checked> Join Tailscale</label>
 <label>Tailscale auth key
 <input type="password" name="tailscale_auth_key" autocomplete="off">
-<small>Needed only when joining Tailscale.</small>
+<small>Never filled in. Needed only when joining Tailscale. Unticking the box does not log this node out.</small>
 </label>
 </fieldset>

@@ -21,12 +21,19 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Protocol
+from typing import Any, Callable, Iterable, Iterator, Mapping, Protocol
 from wsgiref.types import StartResponse, WSGIEnvironment
 
 from cameraprovision.config import _RFC1123_LABEL_RE as RFC1123_LABEL_RE
 from cameraprovision.config import _write_private_atomic
-from cameraprovision.portal import PortalMode, WifiChange, make_app, make_server
+from cameraprovision.portal import (
+    PortalMode,
+    WifiChange,
+    identity_values,
+    make_app,
+    make_server,
+    saved_values,
+)
 from cameraprovision.state import ProvisionEvent as E
 from cameraprovision.state import ProvisionState as S
 from cameraprovision.state import next_state
@@ -39,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 _AP_STATES = (S.AP_UP, S.FALLBACK_AP)
 _THREAD_JOIN_S = 2.0
+_SCAN_ATTEMPTS = 2
 
 
 class ProvisionerFailed(Exception):
@@ -51,11 +59,13 @@ class PortalClosed(Exception):
 
 class System(Protocol):
     def boot_id(self) -> str: ...
+    def read_serial(self) -> str: ...
     def gpio_reprovision_held(self) -> bool: ...
     def scan_ssids(self) -> list[str]: ...
     def start_ap(self) -> None: ...
     def ap_active(self) -> bool: ...
     def set_hostname(self, hostname: str) -> None: ...
+    def restart_timesync(self) -> None: ...
     def stop_ap(self) -> None: ...
     def reload_connections(self) -> None: ...
     def join_uplink(self) -> None: ...
@@ -80,6 +90,7 @@ class Settings:
     ap_check_s: float = 10.0
     rejoin_s: float = 180.0
     hostname_retry_s: float = 30.0
+    timesync_retry_s: float = 30.0
     tailscale_backoff_s: float = 30.0
     tailscale_backoff_max_s: float = 3600.0
 
@@ -149,6 +160,8 @@ class Provisioner:
         self._window_awaits_first_open = False
         self._hostname_owed = False
         self._hostname_next = 0.0
+        self._timesync_owed = False
+        self._timesync_next = 0.0
         self._ap_check_next = 0.0
         self._rejoin_next = 0.0
         self._failures = 0
@@ -236,7 +249,7 @@ class Provisioner:
         self._state = state
         self._entered_at = entered_at
         self._window_started = window_started
-        self._hostname_owed = state is S.JOINING
+        self._hostname_owed = self._timesync_owed = state is S.JOINING
         self._rejoin_next = self._clock() + self.settings.rejoin_s
         logger.info("restored state %s after a daemon restart", state.value)
         return True
@@ -272,8 +285,8 @@ class Provisioner:
         self._window_awaits_first_open = True
         self._check_bridge_config()
         if new is S.JOINING:
-            self._hostname_owed = True
-            self._hostname_next = now
+            self._hostname_owed = self._timesync_owed = True
+            self._hostname_next = self._timesync_next = now
         if new is S.PROVISIONED:
             self._rejoin_next = now + self.settings.rejoin_s
             self._tailscale_settled = False
@@ -370,6 +383,7 @@ class Provisioner:
             self._system.stop_ap()
             self._ap_stop_owed = False
         self._reconcile_hostname()
+        self._reconcile_timesync()
         if self._state is S.JOINING and not self._join_issued:
             self._system.reload_connections()
             # A link NetworkManager already joined must not be torn down and re-activated.
@@ -398,6 +412,19 @@ class Provisioner:
             self._hostname_next = now + self.settings.hostname_retry_s
             return
         self._hostname_owed = False
+
+    def _reconcile_timesync(self) -> None:
+        """Make timesyncd read the saved time server. A failure must not hold up the join."""
+        now = self._clock()
+        if not self._timesync_owed or now < self._timesync_next:
+            return
+        try:
+            self._system.restart_timesync()
+        except Exception as exc:
+            logger.warning("restarting systemd-timesyncd failed: %s", type(exc).__name__)
+            self._timesync_next = now + self.settings.timesync_retry_s
+            return
+        self._timesync_owed = False
 
     def _reconcile_rejoin(self) -> None:
         """Nudge NetworkManager, which can stop autoconnecting after a no-secrets failure.
@@ -465,19 +492,37 @@ class Provisioner:
         return PortalMode.FULL
 
     def _scan(self) -> None:
-        try:
-            found = self._system.scan_ssids()
-        except Exception as exc:
-            logger.warning("scanning for WiFi failed: %s", type(exc).__name__)
+        for _ in range(_SCAN_ATTEMPTS):
+            try:
+                found = self._system.scan_ssids()
+            except Exception as exc:
+                logger.warning("scanning for WiFi failed: %s", type(exc).__name__)
+                continue
+            if found:
+                with self._ssids_lock:
+                    self._ssids = list(found)
             return
-        if found:
-            with self._ssids_lock:
-                self._ssids = list(found)
 
     def _cached_ssids(self) -> list[str]:
         """What the portal lists. Called from its request threads, and never touches the radio."""
         with self._ssids_lock:
             return list(self._ssids)
+
+    def _form_prefill(self, mode: PortalMode) -> Mapping[str, str] | None:
+        """What the form starts with. A damaged config gets nothing, not a new identity."""
+        if mode is not PortalMode.FULL:
+            return None
+        if self._store.has_config():
+            saved = self._store.load()
+            return None if saved is None else saved_values(saved)
+        try:
+            return identity_values(self._system.read_serial())
+        except Exception as exc:
+            logger.warning(
+                "reading the serial failed, so node_id and hostname start blank: %s",
+                type(exc).__name__,
+            )
+            return None
 
     def _open_portal(self, mode: PortalMode) -> None:
         settings = self.settings
@@ -488,6 +533,7 @@ class Provisioner:
             portal_host=settings.ap_ip,
             mode=mode,
             on_form_request=lambda: self._restart_window(session),
+            prefill=self._form_prefill(mode),
         )
         session.server = self._server_factory(
             self._reporting_completion(session, app),

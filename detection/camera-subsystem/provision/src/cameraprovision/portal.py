@@ -23,7 +23,7 @@ import re
 import socket
 import sys
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib import resources
 from socketserver import ThreadingMixIn
 from string import Template
@@ -36,6 +36,7 @@ from cameraprovision.config import (
     BrokerConfig,
     FrigateConfig,
     NodeConfig,
+    effective_ntp_server,
     validate,
     validate_wifi,
 )
@@ -46,9 +47,11 @@ __all__ = [
     "WifiChange",
     "handle_submit",
     "handle_wifi_submit",
+    "identity_values",
     "make_app",
     "make_server",
     "render_form",
+    "saved_values",
 ]
 
 logger = logging.getLogger(__name__)
@@ -78,6 +81,7 @@ _FULL_ONLY_REDISPLAYED_FIELDS = (
     "broker_port",
     "broker_username",
     "mediamtx_address",
+    "ntp_server",
     "frigate_base_url",
     "covered_zones",
 )
@@ -91,6 +95,48 @@ _WIFI_ONLY_INTRO = (
 )
 
 
+def identity_values(serial: str) -> dict[str, str]:
+    """What a blank node's form starts with: an identity unique to this kit, and editable.
+
+    The node_id is also the MQTT client ID, so two kits sharing one disconnect each other.
+    """
+    name = f"cam-{serial[-6:].lower()}"
+    return {
+        "node_id": name,
+        "hostname": name,
+        "frigate_base_url": f"http://{name}.local:5000",
+        "broker_port": str(BrokerConfig.port),
+        "vpn_requested": "on",
+    }
+
+
+def saved_values(cfg: NodeConfig) -> dict[str, str]:
+    """What a re-provisioning form starts with: the saved config, leaving out every secret.
+
+    The VPN box is ticked only while a login is owed. A node already logged in keeps that
+    login with the box unticked, and ticking it asks for a new key.
+    """
+    broker = cfg.broker
+    values = {
+        "wifi_ssid": cfg.wifi_ssid,
+        "hostname": cfg.hostname,
+        "node_id": cfg.node_id,
+        "broker_host": broker.host,
+        "broker_port": str(broker.port),
+        "broker_username": broker.username,
+        "mediamtx_address": cfg.mediamtx_address,
+        "ntp_server": effective_ntp_server(cfg),
+        "frigate_base_url": cfg.frigate.base_url,
+        "covered_zones": ", ".join(cfg.covered_zones),
+    }
+    boxes = {
+        "broker_tls": broker.tls,
+        "broker_anonymous": cfg.broker_anonymous,
+        "vpn_requested": cfg.vpn_requested,
+    }
+    return values | {name: "on" for name, ticked in boxes.items() if ticked}
+
+
 def _load_template(name: str) -> Template:
     return Template(
         resources.files(__package__).joinpath("templates", name).read_text(encoding="utf-8")
@@ -100,7 +146,7 @@ def _load_template(name: str) -> Template:
 _FORM_TEMPLATE = _load_template("index.html")
 _FULL_FIELDS_TEMPLATE = _load_template("full_fields.html")
 
-_SAVED_PAGE = """<!doctype html>
+_SAVED_PAGE = Template("""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -113,9 +159,10 @@ _SAVED_PAGE = """<!doctype html>
 <p>The node is now joining the site WiFi, and this setup network will close.</p>
 <p>If the setup network comes back after a few minutes, the node could not join.
 Reconnect to it and check the WiFi name and password.</p>
+$time_server
 </body>
 </html>
-"""
+""")
 
 _CSP = (
     "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; "
@@ -125,6 +172,12 @@ _CSP = (
 
 def _escape(value: str) -> str:
     return html.escape(value, quote=True)
+
+
+def _saved_page(ntp_server: str) -> str:
+    """The page for a saved form. A WiFi repair leaves the time server alone, so has none."""
+    line = f"<p>Time server: {_escape(ntp_server)}</p>" if ntp_server else ""
+    return _SAVED_PAGE.substitute(time_server=line)
 
 
 def _errors_html(errors: Sequence[str]) -> str:
@@ -161,8 +214,9 @@ def render_form(
 ) -> str:
     """Return the setup page, listing ``ssids`` and showing any ``errors``.
 
-    ``values`` is a previous submission to redisplay. Only the non-secret fields the
-    ``mode`` offers are read from it, so passing a whole submitted form is safe.
+    ``values`` is a previous submission to redisplay, or a prefill from
+    :func:`identity_values` or :func:`saved_values`. Only the non-secret fields the ``mode``
+    offers are read from it, so passing a whole submitted form is safe.
     """
     wifi_only = mode is PortalMode.WIFI_ONLY
     # Each substitution is a single pass, so a value holding "$errors" stays literal text.
@@ -182,6 +236,8 @@ class SubmitResult:
 
     ok: bool
     errors: list[str] = field(default_factory=list)
+    # The time server a full save will use, for the page to confirm.
+    ntp_server: str = field(default="", compare=False)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -201,7 +257,18 @@ def _parse_port(text: str) -> int | str:
     return int(text) if _PORT_RE.fullmatch(text) else text
 
 
-def _build_config(form: Mapping[str, str]) -> NodeConfig:
+def _ntp_server(form: Mapping[str, str], previous_broker: str | None) -> str:
+    """The time server a form means. Blank, or still the old broker, follows the broker.
+
+    The form has no script to update the field when the broker changes, so a value left
+    at the old broker must not strand the node on a server that has moved.
+    """
+    typed = form.get("ntp_server", "").strip()
+    broker = form.get("broker_host", "").strip()
+    return broker if not typed or typed == previous_broker else typed
+
+
+def _build_config(form: Mapping[str, str], previous_broker: str | None = None) -> NodeConfig:
     def raw(name: str) -> str:
         return form.get(name, "")
 
@@ -221,6 +288,7 @@ def _build_config(form: Mapping[str, str]) -> NodeConfig:
         tailscale_auth_key=trimmed("tailscale_auth_key") if vpn_requested else "",
         vpn_requested=vpn_requested,
         mediamtx_address=trimmed("mediamtx_address"),
+        ntp_server=_ntp_server(form, previous_broker),
         covered_zones=[z.strip() for z in raw("covered_zones").split(",") if z.strip()],
         broker=BrokerConfig(
             host=trimmed("broker_host"),
@@ -244,13 +312,22 @@ def _apply_safely(apply: Callable[[Any], None], change: NodeConfig | WifiChange)
     return SubmitResult(ok=True)
 
 
-def handle_submit(form: Mapping[str, str], *, apply: Callable[[NodeConfig], None]) -> SubmitResult:
-    """Validate a submitted form, and call ``apply`` once only if it is valid."""
-    cfg = _build_config(form)
+def handle_submit(
+    form: Mapping[str, str],
+    *,
+    apply: Callable[[NodeConfig], None],
+    previous_broker: str | None = None,
+) -> SubmitResult:
+    """Validate a submitted form, and call ``apply`` once only if it is valid.
+
+    ``previous_broker`` is the saved broker host the form was filled with, if any.
+    """
+    cfg = _build_config(form, previous_broker)
     errors = validate(cfg)
     if errors:
         return SubmitResult(ok=False, errors=errors)
-    return _apply_safely(apply, cfg)
+    result = _apply_safely(apply, cfg)
+    return replace(result, ntp_server=effective_ntp_server(cfg)) if result.ok else result
 
 
 def handle_wifi_submit(
@@ -392,6 +469,7 @@ def make_app(
     portal_host: str,
     mode: PortalMode,
     on_form_request: Callable[[], None] | None = None,
+    prefill: Mapping[str, str] | None = None,
 ) -> WSGIApplication:
     """Return the portal's WSGI app.
 
@@ -407,10 +485,17 @@ def make_app(
     It never runs for a redirect, a HEAD, or a refused POST, so a phone's connectivity
     checks cannot hold the AP open. ``scan_ssids`` may be called from several threads
     at once.
+
+    ``prefill`` is what a GET's form starts with. A rejected POST shows what was typed.
     """
     notify = _guarded_hook(on_form_request)
     submit_lock = threading.Lock()
-    submit = handle_wifi_submit if mode is PortalMode.WIFI_ONLY else handle_submit
+    previous_broker = (prefill or {}).get("broker_host")
+
+    def submit(form: Mapping[str, str]) -> SubmitResult:
+        if mode is PortalMode.WIFI_ONLY:
+            return handle_wifi_submit(form, apply=apply)
+        return handle_submit(form, apply=apply, previous_broker=previous_broker)
 
     def notify_if_browser(environ: WSGIEnvironment) -> None:
         if "text/html" in _media_types(environ.get("HTTP_ACCEPT", "")):
@@ -425,9 +510,9 @@ def make_app(
             return refused.response
         notify_if_browser(environ)
         with submit_lock:
-            result = submit(form, apply=apply)
+            result = submit(form)
         if result.ok:
-            return _html_response("200 OK", _SAVED_PAGE)
+            return _html_response("200 OK", _saved_page(result.ntp_server))
         page = render_form(_scan(scan_ssids), values=form, errors=result.errors, mode=mode)
         return _html_response("400 Bad Request", page)
 
@@ -448,7 +533,7 @@ def make_app(
             return _Response("302 Found", _REDIRECT_BODY, extra_headers=(("Location", "/"),))
         if method == "GET":
             notify_if_browser(environ)
-        return _html_response("200 OK", render_form(_scan(scan_ssids), mode=mode))
+        return _html_response("200 OK", render_form(_scan(scan_ssids), values=prefill, mode=mode))
 
     def app(environ: WSGIEnvironment, start_response: StartResponse) -> Iterable[bytes]:
         response = route(environ)

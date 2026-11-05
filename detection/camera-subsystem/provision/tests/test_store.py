@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Any
 import pytest
 
 from cameraprovision import store as store_module
-from cameraprovision.config import BrokerConfig, FrigateConfig, NodeConfig
+from cameraprovision.config import BrokerConfig, FrigateConfig, NodeConfig, effective_ntp_server
 from cameraprovision.store import NodeStore, Paths
 
 WIFI_PSK = "w1fi-s3cret-Psk"
@@ -49,6 +50,7 @@ def paths(tmp_path: Path) -> Paths:
         mediamtx_env=tmp_path / "etc/camerabridge/mediamtx.env",
         nm_connections_dir=tmp_path / "etc/NetworkManager/system-connections",
         state_dir=tmp_path / "var/lib/camera-provision",
+        ntp_dropin=tmp_path / "etc/systemd/timesyncd.conf.d/black-relay.conf",
     )
 
 
@@ -62,6 +64,7 @@ def snapshot(paths: Paths) -> dict[str, bytes]:
         paths.bridge_config.parent,
         paths.nm_connections_dir,
         paths.state_dir,
+        paths.ntp_dropin.parent,
     }
     found: dict[str, bytes] = {}
     for root in roots:
@@ -86,7 +89,7 @@ def fail_nth_replace(monkeypatch: pytest.MonkeyPatch, n: int, error: BaseExcepti
     monkeypatch.setattr(store_module.os, "replace", replace)
 
 
-COMMIT_STEPS = [1, 2, 3, 4, 5]
+COMMIT_STEPS = [1, 2, 3, 4, 5, 6]
 
 
 def test_save_writes_every_file_with_the_right_mode(store: NodeStore, paths: Paths) -> None:
@@ -111,6 +114,7 @@ def test_save_leaves_no_working_files(store: NodeStore, paths: Paths) -> None:
         "black-relay-uplink.nmconnection",
         "node.json",
         "tailscale.key",
+        "black-relay.conf",
     }
 
 
@@ -857,3 +861,178 @@ def test_m5_a_wifi_repair_keeps_naming_the_interface(paths: Paths) -> None:
     store.save_wifi("Fixed-WiFi", "new-wifi-psk")
 
     assert "interface-name=wlan7" in paths.nm_keyfile.read_text()
+
+
+# --- M3: a removed stray bridge config is reported ----------------------------------
+
+
+def test_m3_removing_a_stray_bridge_config_logs_a_warning(
+    store: NodeStore, paths: Paths, caplog: pytest.LogCaptureFixture
+) -> None:
+    paths.bridge_config.parent.mkdir(parents=True)
+    paths.bridge_config.write_text("node_id: stray\nbroker:\n  password: stray-s3cret\n")
+
+    store.recover()
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "bridge" in warnings[0].getMessage() and "removed" in warnings[0].getMessage()
+    assert "stray-s3cret" not in caplog.text
+
+
+def test_m3_nothing_is_logged_when_there_is_no_stray_bridge_config(
+    store: NodeStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    store.recover()
+
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+def test_m3_a_saved_nodes_bridge_config_is_not_reported_as_stray(
+    store: NodeStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    store.save(config())
+
+    store.recover()
+
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+def test_m3_the_example_config_warns_that_a_hand_placed_file_is_removed() -> None:
+    example = Path(__file__).parents[2] / "bridge" / "config" / "bridge.example.yaml"
+
+    assert "blank node" in example.read_text() and "removed" in example.read_text()
+
+
+# --- tracker: a failed settle leaves the backups for the next start -----------------
+
+
+def test_a_failed_settle_keeps_the_backups_a_later_start_needs(
+    store: NodeStore, paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.save(config())
+    backup = paths.bridge_config.with_name(".bridge.yaml.prev.tmp")
+    backup.write_text("the previous config")
+
+    def fail() -> None:
+        raise OSError("disk trouble")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_settle_interrupted_save", fail)
+        store.recover()
+
+    assert backup.read_text() == "the previous config"
+
+    # With the disk back, the next start finishes the rollback and tidies up.
+    store.recover()
+
+    assert paths.bridge_config.read_text() == "the previous config"
+    assert not backup.exists()
+
+
+def test_a_successful_settle_still_sweeps(store: NodeStore, paths: Paths) -> None:
+    store.save(config())
+    stale = paths.bridge_config.with_name(".bridge.yaml.abc.tmp")
+    stale.write_text("partial")
+
+    store.recover()
+
+    assert not stale.exists()
+
+
+# --- owner decision: the NTP drop-in is part of the atomic save ----------------------
+
+
+def test_save_writes_the_ntp_dropin_defaulting_to_the_broker(
+    store: NodeStore, paths: Paths
+) -> None:
+    store.save(config())
+
+    assert paths.ntp_dropin.read_text() == "[Time]\nNTP=10.0.0.2\n"
+    assert stat.S_IMODE(paths.ntp_dropin.stat().st_mode) == 0o644
+
+
+def test_save_writes_an_explicit_ntp_server(store: NodeStore, paths: Paths) -> None:
+    store.save(config(ntp_server="time.site.local"))
+
+    assert paths.ntp_dropin.read_text() == "[Time]\nNTP=time.site.local\n"
+    saved = store.load()
+    assert saved is not None and saved.ntp_server == "time.site.local"
+
+
+def test_the_ntp_dropin_is_not_given_to_the_service_user(paths: Paths) -> None:
+    chowned: list[Path] = []
+
+    NodeStore(paths, chown=chowned.append).save(config())
+
+    assert all(path.parent != paths.ntp_dropin.parent for path in chowned)
+
+
+def test_a_failed_save_keeps_the_old_ntp_dropin(
+    store: NodeStore, paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.save(config(ntp_server="old.site.local"))
+    with monkeypatch.context() as patch:
+        fail_nth_replace(patch, 5, OSError("disk trouble"))
+        with pytest.raises(OSError):
+            store.save(config(ntp_server="new.site.local"))
+
+    assert paths.ntp_dropin.read_text() == "[Time]\nNTP=old.site.local\n"
+
+
+@pytest.mark.parametrize("step", range(1, 7))
+def test_a_power_cut_during_commit_finishes_the_ntp_dropin_on_recovery(
+    store: NodeStore, paths: Paths, monkeypatch: pytest.MonkeyPatch, step: int
+) -> None:
+    store.save(config(ntp_server="old.site.local"))
+    with monkeypatch.context() as patch:
+        fail_nth_replace(patch, step, SimulatedPowerCut())
+        with pytest.raises(SimulatedPowerCut):
+            store.save(config(ntp_server="new.site.local"))
+
+    store.recover()
+
+    assert paths.ntp_dropin.read_text() == "[Time]\nNTP=new.site.local\n"
+    assert stat.S_IMODE(paths.ntp_dropin.stat().st_mode) == 0o644
+    assert not list(paths.ntp_dropin.parent.glob(".*.tmp"))
+
+
+def test_a_power_cut_while_staging_keeps_the_old_ntp_dropin(paths: Paths) -> None:
+    store = NodeStore(paths, chown=lambda path: None)
+    store.save(config(ntp_server="old.site.local"))
+
+    def cut(path: Path) -> None:
+        raise SimulatedPowerCut()
+
+    with pytest.raises(SimulatedPowerCut):
+        NodeStore(paths, chown=cut).save(config(ntp_server="new.site.local"))
+
+    store.recover()
+
+    assert paths.ntp_dropin.read_text() == "[Time]\nNTP=old.site.local\n"
+
+
+def test_a_wifi_repair_changes_neither_the_ntp_dropin_nor_the_saved_value(
+    store: NodeStore, paths: Paths
+) -> None:
+    store.save(config(ntp_server="time.site.local"))
+    before = paths.ntp_dropin.read_bytes()
+
+    store.save_wifi("Other-WiFi", "another-psk")
+
+    assert paths.ntp_dropin.read_bytes() == before
+    saved = store.load()
+    assert saved is not None and saved.ntp_server == "time.site.local"
+
+
+def test_a_config_saved_before_the_ntp_field_loads_as_following_the_broker(
+    store: NodeStore, paths: Paths
+) -> None:
+    store.save(config())
+    node = json.loads(paths.node_file.read_text())
+    del node["ntp_server"]
+    paths.node_file.write_text(json.dumps(node))
+
+    saved = store.load()
+
+    assert saved is not None and effective_ntp_server(saved) == "10.0.0.2"

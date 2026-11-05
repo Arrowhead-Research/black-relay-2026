@@ -7,6 +7,10 @@
 # This file contains NO real secrets — the placeholders below must be replaced at
 # onboarding (DESIGN.md 7.2). Keep the deployed copy readable only by the service
 # user.
+#
+# On a camera node the setup portal writes this file. A copy placed by hand on a
+# blank node (one with no saved portal config) is removed when camera-provision
+# starts, so the bridge stays off until the portal is submitted.
 
 # This node's identity. Must match ^[a-z0-9][a-z0-9-]*$. In v0 camera_id == node_id
 # (one RLC-520A per node), so this is also the camera id on every detection.

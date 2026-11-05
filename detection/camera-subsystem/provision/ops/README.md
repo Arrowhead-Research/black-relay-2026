@@ -5,7 +5,7 @@ Builds the SD image for a camera edge node and defines how to check it in the fi
 **Nothing here has been verified on hardware.** Every check in the
 [field verification checklist](#field-verification-checklist) is labeled NOT YET RUN.
 
-**Covered by Plan 3, not here:** Frigate, go2rtc, camera link setup (the `eth0` static address), and bench configuration of the camera. Plan 3 must meet
+**Covered by Plan 3, not here:** Frigate, go2rtc, camera link setup (the `eth0` static address), bench configuration of the camera, and the central relay. Plan 3 must meet
 [these requirements](#requirements-on-plan-3).
 
 ## Files
@@ -33,7 +33,7 @@ its system service would take port 53.
 
 Balena wifi-connect could run the WiFi-join flow, but its fixed UI collects only WiFi
 credentials. This plan runs its own portal because it also collects VPN, hostname, `node_id`,
-and central endpoints (DESIGN 7.2).
+covered zones, the Frigate address, the time server, and central endpoints (DESIGN 7.2).
 
 NetworkManager must be at least 1.28 for `802-11-wireless.ap-isolation`, and at least 1.40 for the
 `nmcli --offline` call in `seed-kit.sh`. C01 checks the installed version.
@@ -106,6 +106,24 @@ roles, told apart by address: anything from `10.42.0.0/24` or to `10.42.0.1` is 
   and USB keyboard).
 - **Authentication:** keys only, with root login off (image build step 7).
 
+### Tailscale keys and expiry
+
+Fusion never uses Tailscale. The portal rejects a broker address in `100.64.0.0/10`, and the
+login passes `--accept-dns=false`, so the tailnet's DNS never replaces the node's resolver.
+
+- **Key type:** a pre-authorized auth key with a tag. **Verify:** that tagged keys disable node-key
+  expiry is from memory of Tailscale's documentation, so confirm it in the admin console during
+  C42. A one-off key is enough, since the daemon uses it once and deletes it.
+- **Auth key already expired at first login:** the daemon logs `tailscale login failed, retrying`
+  and keeps trying, backing off from 30 s to at most once an hour. The key stays on disk, 0600,
+  until a login succeeds. Nothing else is affected. To recover, hold the setup button at boot and
+  submit a new key (C42).
+- **Node key expires later:** remote access is lost **silently**. Nothing on the node logs it as a
+  failure, the daemon does not retry, and LAN fusion carries on, so the node looks healthy to the
+  central node. Recover from a console or site LAN SSH, as in C42.
+- **Unticking Join Tailscale does not log the node out.** It only stops a new login. To take a node
+  off the tailnet, run `sudo tailscale logout`.
+
 ### Service ordering
 
 | Unit | Starts after | Why |
@@ -117,7 +135,7 @@ roles, told apart by address: anything from `10.42.0.0/24` or to `10.42.0.1` is 
 | `camerabridge.service` | `NetworkManager`, `mosquitto`, ordering only | Wants mosquitto but does not require it |
 | `tailscaled.service` | Independent | Enabled on its own |
 
-- **No `network-online.target` wait:** image build step 9 masks
+- **No `network-online.target` wait:** image build step 8 masks
   `NetworkManager-wait-online.service`. Otherwise, on a boot with WiFi down, the Debian mosquitto unit
   and the bridge behind it wait up to 60 s, while detect and record should continue. Docker's own
   unit would wait the same way. Disabling is not enough: `NetworkManager.service` has
@@ -129,37 +147,39 @@ roles, told apart by address: anything from `10.42.0.0/24` or to `10.42.0.1` is 
   bridge once `bridge.yaml` exists.
 - **Restart policy:** `camera-provision`, `camerabridge`, and mosquitto (by drop-in) use
   `Restart=always`, `RestartSec=5`, and `StartLimitIntervalSec=0`.
-- **Daemon hardening:** it runs as root with a reduced capability set. `CAP_DAC_OVERRIDE` is
+- **Daemon hardening:** `ConfigurationDirectory=` gives it `/etc/systemd/timesyncd.conf.d` writable and
+  mode 0755, so timesyncd, which does not run as root, can still read the drop-in under `UMask=0077`.
+  It runs as root with a reduced capability set. `CAP_DAC_OVERRIDE` is
   required: after `bridge.yaml` is given to `camerabridge` with mode 0600, root can no longer read
   it otherwise, and the node would act as if it had no config.
 
 ### Time
 
-`systemd-timesyncd` syncs the clock once there is an uplink. The portal has no NTP field, so the
-server is set in image build step 8. The bridge reads
-`timedatectl show -p NTPSynchronized --value`, and until that says `yes` (DESIGN 7.5):
+**The time server comes from the portal** (DESIGN 7.5, decided by the owner). `ntp_server` is on the
+full form only, and blank means the broker host. The value is saved atomically with the rest of the
+config, to `/etc/systemd/timesyncd.conf.d/black-relay.conf` as `NTP=<server>` (root, 0644), never to
+`bridge.yaml`. The daemon restarts `systemd-timesyncd` whenever a saved config enters `joining`. A
+failure logs `restarting systemd-timesyncd failed`, is retried every 30 s, and never holds up the join
+or opens the AP. The WiFi-only portal has no such field and leaves the drop-in alone.
 
-- It logs `NTP not yet synchronized; holding durable events until it is`.
-- `object_start`, `object_end`, and cue-acks are held **in RAM only**, capped at 10,000 with the
+On a button re-provision the field starts with the saved value. If it is left at the old broker
+address while the broker changes, it follows the new broker, as the note on the form says, and the
+saved page names the server used. Any other typed value is kept. The one result this cannot give in a
+single save is a time server that stays on the old broker's address: re-provision once more and type
+it. To change the server, hold the button at boot and resubmit: a hand edit to the drop-in lasts only
+until the next full save.
+
+**If the server cannot be reached, the node never syncs.** That includes a node booting during a
+central outage, if the server is the default. Until `timedatectl show -p NTPSynchronized --value` says
+`yes` (DESIGN 7.5), the bridge:
+
+- Logs `NTP not yet synchronized; holding durable events until it is`. Look for this line in
+  `journalctl -u camerabridge`.
+- Holds `object_start`, `object_end`, and cue-acks **in RAM only**, capped at 10,000 with the
   oldest dropped first, and **lost on any restart or power cut**.
-- **Nothing enters the outbox**, so the outbox gives these events no protection.
-- `object_update` is dropped, and **no heartbeat is sent**, so the node looks dead to the central
-  node, though it is still detecting and recording.
-
-**Do not use the central node as the only NTP source.** A node that boots during a central outage
-would never sync, so its events stay in RAM for the whole outage, which is when the outbox is needed.
-List the site gateway first, then the central node.
-
-To change the server on a running node:
-
-```bash
-sudo install -d /etc/systemd/timesyncd.conf.d
-printf '[Time]\nNTP=<site-ntp>\n' | sudo tee /etc/systemd/timesyncd.conf.d/black-relay.conf
-sudo systemctl restart systemd-timesyncd
-timedatectl timesync-status
-```
-
-`<site-ntp>` is one address or a space-separated list.
+- Puts **nothing in the outbox**, so the outbox gives these events no protection.
+- Drops `object_update` and **sends no heartbeat**, so the node looks dead to the central node,
+  though it is still detecting and recording.
 
 ### Requirements on Plan 3
 
@@ -177,11 +197,19 @@ timedatectl timesync-status
 7. The Frigate container is not privileged, and gets only the devices it needs.
 8. The unit that starts Frigate has `Requires=nftables.service` and `After=nftables.service`, so
    Frigate never runs without the firewall. Stopping nftables then stops Frigate too.
+9. `frigate.camera` in `bridge.yaml` always matches Frigate's camera name. Either render Frigate's
+   config from the saved `node_id` and `covered_zones`, again after every re-provision, or give
+   the image one fixed camera name and write that name to `frigate.camera`. The portal writes
+   `frigate.camera` as the `node_id` today, so a fixed name also needs that writer changed. A
+   mismatch makes `camera_online` and `recording_ok` report false forever. C43 checks it.
+10. The central node serves NTP on the site LAN, at its broker address, from its own clock and with
+    no dependency on the WAN. It is every node's default time server, so without this no node
+    syncs, and none sends a heartbeat or fills its outbox.
 
 ## Build the image
 
 Use a small card for the build, since the image is the size of the card. Commands run on the Pi
-unless marked. `<CC>`, `<build-pi>`, `<site-ntp>`, and `<sdX>` are placeholders.
+unless marked. `<CC>`, `<build-pi>`, and `<sdX>` are placeholders.
 
 1. **Flash** Raspberry Pi OS Lite (64-bit), Bookworm. In Raspberry Pi Imager set a user and SSH
    key, and **no WiFi**, since Imager's WiFi setting leaves a `preconfigured` profile behind. Boot
@@ -262,15 +290,7 @@ unless marked. `<CC>`, `<build-pi>`, `<site-ntp>`, and `<sdX>` are placeholders.
    sudo sshd -t
    ```
 
-8. **Set the NTP servers for the site:** the site gateway first, then the central node
-   ([why](#time)). Fusion must not depend on the WAN, so do not rely on the fallback public pool.
-
-   ```bash
-   sudo install -d /etc/systemd/timesyncd.conf.d
-   printf '[Time]\nNTP=<site-ntp>\n' | sudo tee /etc/systemd/timesyncd.conf.d/black-relay.conf
-   ```
-
-9. **Enable the services.** Do not use `--now`: applying the firewall here would cut the build
+8. **Enable the services.** Do not use `--now`: applying the firewall here would cut the build
    session on `eth0`, and starting the daemon would write state into the image.
 
    ```bash
@@ -281,20 +301,28 @@ unless marked. `<CC>`, `<build-pi>`, `<site-ntp>`, and `<sdX>` are placeholders.
    sudo systemctl mask NetworkManager-wait-online.service
    ```
 
-10. **Do the Plan 3 steps** that belong in the image, without rebooting. A reboot would apply the
+9. **Do the Plan 3 steps** that belong in the image, without rebooting. A reboot would apply the
     firewall and cut the build session on `eth0`.
 
-11. **Remove anything site-specific, then power off.** Do not boot the card again before imaging.
+10. **Remove anything site-specific, then power off.** Do not boot the card again before imaging.
 
     ```bash
     sudo rm -f /etc/NetworkManager/system-connections/preconfigured.nmconnection
+    # Left by any bench test of the build card. Every clone would share them.
+    sudo rm -f /etc/NetworkManager/system-connections/black-relay-uplink.nmconnection \
+      /etc/NetworkManager/system-connections/black-relay-setup-ap.nmconnection \
+      /etc/systemd/timesyncd.conf.d/black-relay.conf
     sudo rm -rf /var/lib/camera-provision /var/lib/camerabridge /etc/camerabridge
     sudo systemctl stop tailscaled.service
     sudo rm -rf /var/lib/tailscale
+    # Confirm the golden image holds no bridge config or Tailscale state. Expect both to be missing.
+    sudo ls -d /etc/camerabridge/bridge.yaml /var/lib/tailscale
     sudo poweroff
     ```
 
-12. **Capture the image** with the card in the build host, then write it to each kit's card.
+    The machine ID and SSH host keys are replaced per kit, in the next section. C41 checks all of it.
+
+11. **Capture the image** with the card in the build host, then write it to each kit's card.
 
     ```bash
     # On the build host:
@@ -356,12 +384,12 @@ hard cap 1800 s.
 
 | Situation | What the node does |
 |---|---|
-| Blank node boots | Scans, then opens the AP and the full portal |
+| Blank node boots | Scans, then opens the AP and the full portal. `node_id` and hostname start as `cam-<last 6 of serial>`, and the Frigate address follows, all editable. If the serial cannot be read they start blank, and `reading the serial failed` is logged |
 | Valid form submitted | Saves all files together and sends the response. The save starts the bridge. It then closes the portal, stops the AP, and joins. On L3 uplink (associated, with a DHCP lease) it logs in to Tailscale if requested |
 | Normal reboot with a config | Joins silently. No AP |
 | Join fails (wrong password, router away) | After 120 s opens the AP with a WiFi-only portal. Rejoins after the window, and alternates until it works |
 | AP window ends with no config | Stays on the AP with the full portal |
-| Button held at boot | Opens the AP with the full portal. With a config and no submission, rejoins after the window |
+| Button held at boot | Opens the AP with the full portal, showing the saved non-secret settings. The WiFi and broker passwords stay blank and must be typed again, and the form says so. With a config and no submission, rejoins after the window |
 | WiFi lost after provisioning | No AP. NetworkManager keeps retrying, and the daemon re-issues the join every 180 s |
 | Central broker, central node, or Tailscale down | No effect on provisioning. Once the clock has synced, the bridge queues durable events in the outbox |
 | Clock not synced yet | The bridge logs `NTP not yet synchronized; holding durable events until it is`. Durable events are held in RAM only, capped at 10,000, and lost on restart. Nothing enters the outbox, and no heartbeat is sent |
@@ -373,12 +401,23 @@ Detect and record do not depend on any of this.
 **Status of every check: NOT YET RUN.** Change a check's status only after running it on the real
 hardware, and record the date and output.
 
-Bench: one kit with its camera, a site router you can power off, a laptop, an iPhone, an Android
-phone, a console on the node, and a central broker you can stop. Two commands recur:
+Bench: one kit with its camera, a second kit for C41, a site router you can power off, a laptop, an
+iPhone, an Android phone, a console on the node, and a central broker you can stop. Two commands
+recur:
 
 ```bash
 sudo cat /var/lib/camera-provision/state.json                 # current state
 journalctl -b -u camera-provision --no-pager -g ' -> |portal' # state changes this boot
+```
+
+The **heartbeat check** also recurs. Run it on a host that reaches the central broker, with the broker
+username and password typed into the portal, and the `node_id` typed there. The node's clock must be
+synced, or it sends no heartbeat (C31). If the broker's ACL stops this user subscribing, watch the
+topic as an administrator instead, and look for the typed username in the broker's connection log.
+
+```bash
+mosquitto_sub -h <central> -u <typed-user> -P <typed-password> -t detection/camera/status/nodes \
+  -W 90 | grep -m1 '<typed-node-id>'
 ```
 
 ### Coverage
@@ -414,6 +453,14 @@ journalctl -b -u camera-provision --no-pager -g ' -> |portal' # state changes th
 | AP liveness check | C37 |
 | Rejoin retry every 180 s | C38 |
 | Moving a node to another tailnet | C39 |
+| Default identity from the serial | C07, C41 |
+| No typed secret in the journal | C40 |
+| Services never restarted, and a heartbeat under the typed credentials | C08, C14, C29 |
+| mDNS before any reboot | C08 |
+| Two kits differ, and a clone holds no golden-image state | C41 |
+| Tailscale expiry and recovery with a new key | C42 |
+| `frigate.camera` and zones match Frigate | C43 |
+| Time server from the portal, and a move to another broker | C44 |
 
 ### Static checks and adapters
 
@@ -434,7 +481,7 @@ nftables `Before=`. The `nft` check also proves the kernel has the `fib` express
 uses: without it the whole table fails to load.
 Earlier offline checks used newer versions than Bookworm ships.
 
-**C02. Full suites on Bookworm's Python 3.11. NOT YET RUN.** Run on a build card, before step 11.
+**C02. Full suites on Bookworm's Python 3.11. NOT YET RUN.** Run on a build card, before step 10.
 
 ```bash
 python3 --version
@@ -445,8 +492,9 @@ cd /tmp/suite/bridge && /tmp/uv/bin/uv run --python /usr/bin/python3 pytest -rs
 sudo rm -rf /tmp/uv /tmp/suite
 ```
 
-Expect: Python 3.11, and every test passing with no skips. Compare with the counts in the latest
-Task 6 report. A skip of the real-broker tests means mosquitto is missing.
+Expect: Python 3.11, and every test passing with no skips. Compare the counts with `uv run pytest -rs`
+in each package on the build host, at the same commit; when this line was written they were
+provision 963 and bridge 244. A skip of the real-broker tests means mosquitto is missing.
 
 **C03. Real nmcli output against the parsers. NOT YET RUN.** This is the highest risk: a format
 difference means the probe never sees an uplink and the node never reaches `provisioned`.
@@ -538,6 +586,10 @@ Expect: `unprovisioned + boot -> ap_up`, `portal listening in full mode`, the pr
 `black-relay-setup-ap` active on `wlan0`, and `type AP`. The SSID `BlackRelay-CAM-<serial>` is
 visible and advertises WPA2, joined with the label passphrase. The wrong passphrase is refused.
 
+Open the form. Expect `node_id` and hostname to read `cam-` plus the last 6 characters of the SSID's
+serial, in lowercase, the Frigate address to read `http://<that name>.local:5000`, all three
+editable, and no `reading the serial failed` in the journal.
+
 **C08. Valid submit joins and persists across reboot. NOT YET RUN.** Submit from a phone with
 valid values.
 
@@ -546,14 +598,26 @@ sudo cat /var/lib/camera-provision/state.json
 journalctl -b -u camera-provision --no-pager -g ' -> |portal'
 sudo ls -la /etc/camerabridge /var/lib/camera-provision /etc/NetworkManager/system-connections
 systemctl is-active camerabridge.service
+systemctl show -p NRestarts --value camera-provision.service camerabridge.service
+# Before the reboot, from a site LAN host:
+ping -c 3 <hostname>.local
+# Also run the heartbeat check, then:
 sudo reboot
 ```
 
 Expect: the phone shows the saved page before the AP drops; `ap_up + config_received -> joining`,
 then `portal closed`, then `joining + uplink_up -> provisioned`. `bridge.yaml` is 0600 and owned
-by `camerabridge`, `mediamtx.env` is 0644, the keyfile is 0600, and the bridge is `active`. After
-the reboot: `joining` then `provisioned`, with no `ap_up`, no setup SSID visible at any point
-(watch from a phone during boot), and no operator action.
+by `camerabridge`, `mediamtx.env` is 0644, the keyfile is 0600, the bridge is `active`, and both
+`NRestarts` values are `0`, since this counts only automatic restarts: an `active` unit may be crash
+looping. The heartbeat arrives under the typed credentials. After the reboot: `joining` then
+`provisioned`, with no `ap_up`, no setup SSID visible at any point (watch from a phone during boot),
+and no operator action. Repeat the `NRestarts` and heartbeat checks.
+
+`<hostname>.local` must resolve **before** the reboot, under the typed name. **Unverified:** the daemon
+runs `systemctl --no-block try-restart avahi-daemon.service` after `hostnamectl`, on the assumption
+that avahi needs it to take the new name. A failure is only logged, as `restarting avahi failed`.
+Record whether the name resolves, and whether that log line appears. If it resolves only after the
+reboot, snapshot URLs are wrong until then, so raise it.
 
 Also check the hostname, which the daemon sets on entering `joining`: `hostnamectl --static` prints
 what was typed, including after the reboot, and `journalctl -b -u camera-provision -g 'hostname'`
@@ -576,6 +640,8 @@ post "wifi_ssid=site&$GOOD&vpn_requested=on"                   # VPN with empty 
 post "wifi_ssid=site&${GOOD/node_id=cam-01/node_id=-bad}"
 post "wifi_ssid=site&${GOOD/hostname=cam-01/hostname=bad_name}"
 post "wifi_ssid=site&${GOOD/covered_zones=driveway/covered_zones=}"
+post "wifi_ssid=site&${GOOD/broker_host=10.0.0.2/broker_host=100.64.0.1}"
+post "wifi_ssid=site&$GOOD&ntp_server=bad_name"
 ```
 
 ```bash
@@ -583,7 +649,7 @@ post "wifi_ssid=site&${GOOD/covered_zones=driveway/covered_zones=}"
 sudo ls -la /etc/camerabridge /var/lib/camera-provision /etc/NetworkManager/system-connections | diff /tmp/before -
 ```
 
-Expect: five `HTTP 400`s with a clear message in each body, the state still `ap_up`, and no
+Expect: seven `HTTP 400`s with a clear message in each body, the state still `ap_up`, and no
 difference apart from the `state.json` time. Also try one bad submission from a phone.
 
 Run C10 now, then finish with this positive control, which proves the rejections above came from
@@ -642,7 +708,10 @@ does not count:
 
 ```bash
 sudo mv /etc/camerabridge/bridge.yaml /tmp/bridge.yaml.saved
-journalctl -u camera-provision -n 5 --no-pager
+# The daemon checks this file when it starts and at each state change, not continuously.
+sudo systemctl restart camera-provision
+sleep 5
+journalctl -u camera-provision -n 20 --no-pager
 sudo mv /tmp/bridge.yaml.saved /etc/camerabridge/bridge.yaml
 ```
 
@@ -665,12 +734,14 @@ see at least one `fallback_ap`), then restore the router. Touch nothing on the n
 ```bash
 journalctl -b -u camera-provision --no-pager -o short-precise -g ' -> '
 systemctl is-active camerabridge.service mosquitto.service
+systemctl show -p NRestarts --value camerabridge.service mosquitto.service
 ```
 
 Expect: the node reaches `provisioned` without operator action, within about 7 minutes of the
 router returning (up to 300 s of AP and 120 s of joining). The bridge and mosquitto stay `active`
-throughout, and detection and recording continue. Repeat 3 times with the router returning at
-different points in the cycle.
+throughout, with `NRestarts` `0` for both, and detection and recording continue. Once the clock has
+synced, the heartbeat check passes. Repeat 3 times with the router returning at different points in
+the cycle.
 
 **C15. Central outage does not open the AP. NOT YET RUN.** On a provisioned node with a synced clock,
 stop the central broker, or the whole central node, for 15 minutes.
@@ -687,7 +758,8 @@ Expect: state `provisioned`, `type managed`, sync `yes`, the outbox growing as e
 lines, and no setup SSID visible. Restart the central broker: the outbox drains.
 
 Then reboot during an outage: `joining` then `provisioned` again, with no AP. **The outbox only grows
-if the clock syncs after that reboot.** With the sync source also down, expect sync `no`, the journal
+if the clock syncs after that reboot.** The default time server is the broker host, so stopping the
+whole central node stops the sync source too. With the sync source down, expect sync `no`, the journal
 line `NTP not yet synchronized; holding durable events until it is`, nothing entering the outbox, and
 no heartbeat: events are held in RAM (C31).
 
@@ -704,7 +776,9 @@ journalctl -b -u camera-provision --no-pager -g ' -> |portal'
 ```
 
 Expect, for step 3: `boot -> joining`, `joining + reprovision_button -> ap_up`, and
-`portal listening in full mode`. Submit a changed `broker_host`: the node joins, and
+`portal listening in full mode`. The form shows the saved WiFi name, node, zone, Frigate, broker, and
+MediaMTX values. Every password and key field is blank, and submitting those blank is refused. The
+Tailscale box is unticked once the login has succeeded. Submit a changed `broker_host`: the node joins, and
 `systemctl show -p ActiveEnterTimestamp camerabridge` shows the bridge restarted. Then repeat
 step 3 and submit nothing: after 300 s the node rejoins by itself with its old config.
 
@@ -729,7 +803,8 @@ sudo ls -la /etc/camerabridge /var/lib/camera-provision /etc/NetworkManager/syst
 journalctl -b -u camera-provision --no-pager -g ' -> |failed'
 ```
 
-Expect: every boot ends with the whole old config or the whole new one, and either a full portal
+Expect: every boot ends with the whole old config or the whole new one, including
+`/etc/systemd/timesyncd.conf.d/black-relay.conf`, and either a full portal
 or a join. No `apply.journal` or `.tmp` files remain after startup. On a blank node left with no
 saved config, the bridge is off: no `/etc/camerabridge/bridge.yaml`, and
 `systemctl is-active camerabridge.service` prints `inactive`.
@@ -744,8 +819,9 @@ journalctl -b -u camera-provision --no-pager -g 'tailscale'
 ```
 
 Expect: logged in with the portal's hostname, the key file gone, and the login inside the daemon's
-60 s command timeout. With a bad key: `tailscale login failed, retrying`, backing off from 30 s,
-the state stays `provisioned`, and the AP stays down.
+60 s command timeout. `grep -c 100.100.100.100 /etc/resolv.conf` prints `0`, which is
+`--accept-dns=false` keeping the tailnet's DNS away. With a bad key: `tailscale login failed,
+retrying`, backing off from 30 s, the state stays `provisioned`, and the AP stays down.
 
 ### Exposure
 
@@ -964,13 +1040,16 @@ table returns.
 
 ```bash
 systemctl is-active mosquitto.service camerabridge.service
+systemctl show -p NRestarts --value mosquitto.service camerabridge.service
 systemd-analyze critical-chain camerabridge.service
 systemctl is-enabled NetworkManager-wait-online.service
 mosquitto_sub -h 127.0.0.1 -t 'frigate/stats' -C 1 -W 90 | head -c 200
 ```
 
-Expect: both `active` within seconds of `NetworkManager`, no `network-online` wait in the chain, and
-`masked`. Frigate stats arrive with WiFi down, because detect and record continue.
+Expect: both `active` within seconds of `NetworkManager`, `NRestarts` `0` for both, no `network-online`
+wait in the chain, and `masked`. Frigate stats arrive with WiFi down, because detect and record
+continue. Power the router back on: once the clock has synced, the heartbeat check passes, and
+`NRestarts` is still `0`.
 
 **C30. Bridge starts and restarts on config. NOT YET RUN.**
 
@@ -995,7 +1074,7 @@ journalctl -b -u systemd-timesyncd --no-pager | tail -5
 journalctl -b -u camerabridge --no-pager -g 'NTP'
 ```
 
-Expect: `enabled`, then `yes` shortly after the uplink, with a `<site-ntp>` address as the server, and
+Expect: `enabled`, then `yes` shortly after the uplink, with the portal's time server as the server, and
 `NTP synchronized; clock marked ready`. Repeat on a site with no WAN.
 
 **No-server test.** The kernel's sync flag only clears at boot, so this needs a reboot. Set a server
@@ -1018,10 +1097,10 @@ mosquitto_sub -h <central> -u <user> -P <password> -t 'detection/camera/status/n
 Expect: `no`, the journal line, the outbox count unchanged by the walk, and no heartbeat before the
 timeout. Other nodes' heartbeats share this topic, so filter by `node_id` on a multi-node site.
 
-Now show that the events are held. Restore the real server:
+Now show that the events are held. Restore the portal's value, as `<portal-ntp>`:
 
 ```bash
-printf '[Time]\nNTP=<site-ntp>\n' | sudo tee /etc/systemd/timesyncd.conf.d/black-relay.conf
+printf '[Time]\nNTP=<portal-ntp>\n' | sudo tee /etc/systemd/timesyncd.conf.d/black-relay.conf
 sudo systemctl restart systemd-timesyncd
 journalctl -u camerabridge --no-pager -f -g 'NTP'
 ```
@@ -1148,3 +1227,102 @@ journalctl -b -u camera-provision --no-pager -g 'tailscale'
 
 Expect: record which tailnet the node is on. If it did not move, run `sudo tailscale logout` from a
 console, then re-provision with a new key, and add that step to the re-provisioning procedure.
+
+### Checks added by the final review
+
+**C40. No typed secret in the journal. NOT YET RUN.** After C08, C09, C19, and C42, so the journal
+holds a save, rejected submissions, and logins. Run this once each for the WiFi password, the broker
+password, and the Tailscale key, and once for the typed hostname as a control. `read -s` keeps the
+value off the screen, and `printf` keeps it out of any command line.
+
+```bash
+read -rs VALUE
+sudo journalctl --no-pager | grep -c -F -f <(printf '%s\n' "$VALUE")
+unset VALUE
+```
+
+Expect: `0` for all three secrets, and more than `0` for the hostname, which proves the search works.
+The search covers every unit and every saved boot, including NetworkManager and wpa_supplicant. Any
+other result is a defect: rotate the secret and raise it.
+
+**C41. Two kits are different, and a clone holds no golden-image state. NOT YET RUN.** Two kits, both
+cloned from one image and seeded, with neither submitted yet. On each:
+
+```bash
+sudo ls -la /etc/camerabridge/bridge.yaml /var/lib/camera-provision/node.json \
+  /etc/systemd/timesyncd.conf.d/black-relay.conf
+sudo ls -la /etc/NetworkManager/system-connections/
+tailscale status
+cat /etc/machine-id
+sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+sudo nmcli --show-secrets --get-values 802-11-wireless-security.psk connection show black-relay-setup-ap
+```
+
+Expect: no `bridge.yaml`, `node.json`, or time server drop-in, no `black-relay-uplink` profile, and Tailscale logged out.
+Between the two kits, a different machine ID, SSH key fingerprint, AP passphrase, and form default for
+`node_id`. Then provision both with their defaults, on one site: `tailscale status` shows two separate
+nodes, and both kits' heartbeats keep arriving, with no repeated connect and disconnect for either
+`node_id` in the central broker's log. Two kits sharing an ID would share an MQTT client ID, and
+disconnect each other.
+
+**C42. Tailscale expiry and recovery. NOT YET RUN.** First, an auth key that has expired:
+
+1. Submit a valid form with an expired key. Expect `tailscale login failed, retrying`, the delay
+   growing to at most 3600 s, the state `provisioned`, the AP down, the bridge `active`, and
+   `/var/lib/camera-provision/tailscale.key` still present, mode 0600.
+2. Hold the button at boot, tick Join Tailscale, and submit a new key. Expect a login, and the key
+   file gone.
+
+Then a node key that has expired, on a node logged in with the key type under
+[Tailscale keys and expiry](#tailscale-keys-and-expiry). Record whether its admin console entry shows
+expiry disabled, which settles the "verify" there. On a bench node with an untagged key and a short
+expiry, or using the console's expire action:
+
+```bash
+tailscale status
+journalctl -b -u camera-provision --no-pager -g 'tailscale'
+```
+
+Expect: remote access gone, no new line from the daemon, and the heartbeat check still passing, because
+LAN fusion continues. Now hold the button at boot and submit a new key. Record whether that restores
+access. If it does not, because the daemon runs without `--force-reauth`, run `sudo tailscale logout`
+from a console, submit again, and add that step here.
+
+**C43. `frigate.camera` and zones match Frigate. NOT YET RUN.** Needs Plan 3. On the node, with
+[requirement 9](#requirements-on-plan-3) in place. The endpoint is from memory of Frigate's API, as in C24.
+
+```bash
+sudo /opt/black-relay/provision/bin/python -c "import yaml; c=yaml.safe_load(open('/etc/camerabridge/bridge.yaml')); print(c['frigate']['camera'], sorted(c['covered_zones']))"
+curl -s http://127.0.0.1:5000/api/config | python3 -c "import json,sys; c=json.load(sys.stdin)['cameras']; print({n: sorted(v.get('zones', {})) for n, v in c.items()})"
+```
+
+Expect: Frigate has exactly one camera, named as `frigate.camera`, and its zones are the same as
+`covered_zones`. The first command prints no secrets. Repeat after a re-provision that changes `node_id`
+or the zones. In the node status, `camera_online` and `recording_ok` read true.
+
+**C44. Time server from the portal. NOT YET RUN.** Needs [requirement 10](#requirements-on-plan-3), or
+any NTP server on the site LAN. Submit a full form with the time server left blank.
+
+```bash
+stat -c '%a %U %n' /etc/systemd/timesyncd.conf.d /etc/systemd/timesyncd.conf.d/black-relay.conf
+cat /etc/systemd/timesyncd.conf.d/black-relay.conf
+timedatectl timesync-status
+systemctl show -p ActiveEnterTimestamp systemd-timesyncd
+journalctl -b -u camera-provision --no-pager -g 'timesyncd'
+```
+
+Expect: `755 root` and `644 root`, `NTP=<broker host>`, `timesync-status` naming that server, timesyncd
+restarted after the save, and no `restarting systemd-timesyncd failed`, which would mean the unit's
+hardening blocks it. Then:
+
+1. **Explicit value:** hold the button at boot. The form shows the broker host in the time server
+   field. Type another server, and submit. Expect the saved page, the drop-in, and `timesync-status`
+   all to name it.
+2. **Move to another broker:** repeat from a node on the default, changing `broker_host` and leaving
+   the time server field as it was. Expect the saved page, the drop-in, and `timesync-status` all to
+   name the new broker. Repeat with an explicit server: it is kept.
+3. **WiFi repair:** in `fallback_ap`, note `sha256sum` of the drop-in, submit the right WiFi password
+   adding `&ntp_server=evil.example` by curl, and expect the same hash.
+4. **No reachable server:** with the server stopped, on a fresh boot, expect sync `no`, the bridge's
+   `NTP not yet synchronized; holding durable events until it is`, and the node still joining
+   and staying off the AP.
