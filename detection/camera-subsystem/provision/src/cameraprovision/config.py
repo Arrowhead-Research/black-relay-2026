@@ -30,6 +30,7 @@ __all__ = [
     "NodeConfig",
     "OutboxConfig",
     "validate",
+    "validate_wifi",
     "write_bridge_config",
 ]
 
@@ -41,6 +42,8 @@ _WPA_PSK_RE = re.compile(r"[\x20-\x7e]{8,63}|[0-9a-fA-F]{64}")
 # C0, DEL, C1 (which includes NEL), and the lone surrogates UTF-8 cannot encode.
 _SSID_FORBIDDEN_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\ud800-\udfff]")
 _SSID_MAX_BYTES = 32
+# ASCII and bounded: int() accepts other scripts' digits and raises on very long strings.
+_PORT_DIGITS_RE = re.compile(r"[0-9]{1,5}")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -131,6 +134,18 @@ def _is_port(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 65535
 
 
+def _is_host_port(value: Any) -> bool:
+    """``host:port``, with the host as :func:`_is_host` takes it, and IPv6 in brackets."""
+    if not isinstance(value, str):
+        return False
+    host, separator, port = value.rpartition(":")
+    if not separator or not _PORT_DIGITS_RE.fullmatch(port) or not _is_port(int(port)):
+        return False
+    if host.startswith("[") and host.endswith("]"):
+        return ":" in host and _is_host(host[1:-1])
+    return ":" not in host and _is_host(host)
+
+
 def _is_positive_number(value: Any) -> bool:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return False
@@ -175,6 +190,21 @@ def _credential_checks(cfg: NodeConfig) -> list[tuple[bool, str]]:
     ]
 
 
+def _wifi_checks(ssid: Any, psk: Any) -> list[tuple[bool, str]]:
+    return [
+        (_is_ssid(ssid), "wifi_ssid is required: at most 32 bytes, no control characters"),
+        (
+            _matches(_WPA_PSK_RE, psk),
+            "wifi_psk must be 8-63 printable ASCII characters or 64 hex digits",
+        ),
+    ]
+
+
+def validate_wifi(ssid: str, psk: str) -> list[str]:
+    """Return the problems with a WiFi SSID and PSK alone, under ``validate``'s rules."""
+    return [message for ok, message in _wifi_checks(ssid, psk) if not ok]
+
+
 def validate(cfg: NodeConfig) -> list[str]:
     """Return every problem with ``cfg`` as readable text; empty means valid.
 
@@ -215,12 +245,8 @@ def validate(cfg: NodeConfig) -> list[str]:
             "hostname must be 1-63 letters, digits or hyphens, "
             "and must not start or end with a hyphen",
         ),
-        (_is_ssid(cfg.wifi_ssid), "wifi_ssid is required: at most 32 bytes, no control characters"),
-        (
-            _matches(_WPA_PSK_RE, cfg.wifi_psk),
-            "wifi_psk must be 8-63 printable ASCII characters or 64 hex digits",
-        ),
-        (_is_clean_text(cfg.mediamtx_address), "mediamtx_address is required, with no stray spaces"),
+        *_wifi_checks(cfg.wifi_ssid, cfg.wifi_psk),
+        (_is_host_port(cfg.mediamtx_address), "mediamtx_address must be host:port"),
         (
             not cfg.vpn_requested or _is_clean_text(cfg.tailscale_auth_key),
             "tailscale_auth_key is required when the VPN is requested, with no stray spaces",

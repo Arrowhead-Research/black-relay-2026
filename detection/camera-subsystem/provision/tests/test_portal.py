@@ -7,11 +7,15 @@ browser would build no injected element.
 
 from __future__ import annotations
 
+import contextlib
 import http.client
+import inspect
 import io
 import logging
 import socket
 import threading
+import time
+from dataclasses import asdict, replace
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -24,14 +28,32 @@ import pytest
 from camerabridge import cli as bridge_cli
 
 from cameraprovision import portal
-from cameraprovision.config import BrokerConfig, FrigateConfig, NodeConfig, write_bridge_config
-from cameraprovision.portal import SubmitResult, handle_submit, make_app, make_server, render_form
+from cameraprovision.config import (
+    BrokerConfig,
+    FrigateConfig,
+    NodeConfig,
+    validate,
+    write_bridge_config,
+)
+from cameraprovision.portal import (
+    PortalMode,
+    SubmitResult,
+    WifiChange,
+    handle_submit,
+    handle_wifi_submit,
+    make_app,
+    make_server,
+    render_form,
+)
 
 WIFI_PSK = "w1fi-s3cret-Psk"
 BROKER_PASSWORD = "br0ker-s3cret-Pw"
 TAILSCALE_KEY = "tskey-auth-s3cret"
 SECRETS = (WIFI_PSK, BROKER_PASSWORD, TAILSCALE_KEY)
 SECRET_FIELDS = ("wifi_psk", "broker_password", "tailscale_auth_key")
+PORTAL_HOST = "10.42.0.1"
+BROWSER_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+FORM_CONTENT_TYPE = "application/x-www-form-urlencoded"
 
 REDISPLAYED_FIELDS = (
     "wifi_ssid",
@@ -240,6 +262,50 @@ def test_broker_credentials_can_be_left_blank_in_the_browser() -> None:
     controls = Page(render_form([])).controls()
     assert "required" not in controls["broker_username"]
     assert "required" not in controls["broker_password"]
+
+
+def test_tls_box_carries_the_port_and_ca_hint() -> None:
+    assert "usually port 8883; the certificate must chain to a system ca" in (
+        render_form([]).lower()
+    )
+
+
+# --- render_form: fallback ------------------------------------------------------
+
+
+def test_wifi_only_form_collects_only_the_wifi_fields() -> None:
+    page = Page(render_form(["Alpha"], mode=PortalMode.WIFI_ONLY))
+    assert set(page.controls()) == {"wifi_ssid", "wifi_psk"}
+    assert page.options() == ["Alpha"]
+
+
+def test_wifi_only_form_says_how_to_change_everything_else() -> None:
+    assert "setup button" in render_form([], mode=PortalMode.WIFI_ONLY)
+
+
+def test_full_form_does_not_carry_the_wifi_only_note() -> None:
+    assert "setup button" not in render_form([])
+
+
+def test_wifi_only_form_ignores_every_other_submitted_value() -> None:
+    values = valid_form(node_id="posted-node-id", broker_host="posted.broker.example")
+    html = render_form([], values=values, mode=PortalMode.WIFI_ONLY)
+
+    assert Page(html).controls()["wifi_ssid"]["value"] == values["wifi_ssid"]
+    assert "posted-node-id" not in html
+    assert "posted.broker.example" not in html
+    for secret in SECRETS:
+        assert secret not in html
+
+
+@pytest.mark.parametrize("payload", XSS_PAYLOADS)
+def test_wifi_only_form_escapes_ssids_and_values(payload: str) -> None:
+    page = Page(render_form([payload], values={"wifi_ssid": payload}, mode=PortalMode.WIFI_ONLY))
+
+    assert page.options() == [payload]
+    assert page.controls()["wifi_ssid"]["value"] == payload
+    assert not page.tags() & {"script", "img", "svg"}
+    assert page.event_handler_attrs() == []
 
 
 # --- handle_submit: success -----------------------------------------------------
@@ -507,6 +573,89 @@ def test_apply_is_called_once_even_when_it_fails() -> None:
     apply.assert_called_once()
 
 
+# --- handle_wifi_submit ---------------------------------------------------------
+
+
+def test_wifi_submit_applies_only_the_wifi_change() -> None:
+    apply = Mock()
+
+    result = handle_wifi_submit(valid_form(), apply=apply)
+
+    assert result == SubmitResult(ok=True)
+    apply.assert_called_once_with(WifiChange(wifi_ssid="Site-WiFi", wifi_psk=WIFI_PSK))
+
+
+def test_wifi_submit_ignores_invalid_values_in_other_fields() -> None:
+    """Otherwise a stale or hostile extra field could block a WiFi repair."""
+    apply = Mock()
+    form = {"wifi_ssid": "Site-WiFi", "wifi_psk": WIFI_PSK, "node_id": "BAD", "broker_port": "x"}
+
+    assert handle_wifi_submit(form, apply=apply).ok
+    apply.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("named", "form"),
+    [
+        ("wifi_ssid", {"wifi_psk": WIFI_PSK}),
+        ("wifi_ssid", {"wifi_ssid": "   ", "wifi_psk": WIFI_PSK}),
+        ("wifi_psk", {"wifi_ssid": "Site"}),
+        ("wifi_psk", {"wifi_ssid": "Site", "wifi_psk": "short"}),
+    ],
+)
+def test_bad_wifi_submit_names_the_field_and_applies_nothing(
+    named: str, form: dict[str, str]
+) -> None:
+    apply = Mock()
+
+    result = handle_wifi_submit(form, apply=apply)
+
+    assert not result.ok
+    assert any(error.startswith(named) for error in result.errors)
+    apply.assert_not_called()
+
+
+def test_wifi_change_hides_the_password_from_its_repr() -> None:
+    assert WIFI_PSK not in repr(WifiChange(wifi_ssid="Site", wifi_psk=WIFI_PSK))
+
+
+def test_wifi_apply_failure_is_generic_and_carries_no_secret(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def explode(change: WifiChange) -> None:
+        raise OSError(f"could not write {change.wifi_psk}")
+
+    with caplog.at_level(logging.DEBUG):
+        result = handle_wifi_submit(valid_form(), apply=explode)
+
+    assert not result.ok
+    assert WIFI_PSK not in " ".join(result.errors) + caplog.text
+
+
+def test_wifi_change_merges_into_a_saved_config_by_field_name() -> None:
+    """The interface Task 6 relies on: everything but the WiFi fields survives."""
+    apply = Mock()
+    saved = NodeConfig(
+        node_id="cam-01",
+        hostname="edge-7",
+        wifi_ssid="Old-WiFi",
+        wifi_psk="old-password",
+        tailscale_auth_key=TAILSCALE_KEY,
+        mediamtx_address="10.0.0.2:8554",
+        covered_zones=["driveway"],
+        broker=BrokerConfig(host="10.0.0.2", username="cam", password=BROKER_PASSWORD),
+        frigate=FrigateConfig(base_url="http://cam-01.local:5000"),
+    )
+    form = valid_form(wifi_ssid="New-WiFi", node_id="other", broker_host="evil.example")
+
+    assert handle_wifi_submit(form, apply=apply).ok
+    merged = replace(saved, **asdict(apply.call_args.args[0]))
+
+    assert (merged.wifi_ssid, merged.wifi_psk) == ("New-WiFi", WIFI_PSK)
+    assert replace(merged, wifi_ssid="Old-WiFi", wifi_psk="old-password") == saved
+    assert validate(merged) == []
+
+
 # --- WSGI harness ---------------------------------------------------------------
 
 
@@ -545,7 +694,10 @@ def request(
         "QUERY_STRING": "",
     }
     setup_testing_defaults(environ)
-    environ["HTTP_HOST"] = "10.42.0.1"
+    environ["HTTP_HOST"] = PORTAL_HOST
+    environ["HTTP_ACCEPT"] = BROWSER_ACCEPT
+    if method == "POST":
+        environ["CONTENT_TYPE"] = FORM_CONTENT_TYPE
     environ["wsgi.input"] = wsgi_input or io.BytesIO(body or b"")
     if body is not None:
         environ["CONTENT_LENGTH"] = str(len(body))
@@ -576,8 +728,14 @@ class Harness:
     def __init__(self, **kwargs: Any) -> None:
         self.apply = kwargs.pop("apply", Mock())
         self.scan = kwargs.pop("scan", Mock(return_value=["Alpha", "Beta"]))
-        self.activity = Mock()
-        self.app = make_app(scan_ssids=self.scan, apply=self.apply, on_form_request=self.activity)
+        self.activity = kwargs.pop("activity", Mock())
+        self.app = make_app(
+            scan_ssids=self.scan,
+            apply=self.apply,
+            on_form_request=self.activity,
+            portal_host=kwargs.pop("portal_host", PORTAL_HOST),
+            mode=kwargs.pop("mode", PortalMode.FULL),
+        )
 
     def post(self, form: dict[str, str] | None = None, **kwargs: Any) -> Response:
         return request(self.app, "POST", "/", encoded(form or valid_form()), **kwargs)
@@ -611,6 +769,7 @@ def test_pages_are_not_cached_and_may_load_nothing_external(harness: Harness) ->
     assert response.headers["cache-control"] == "no-store"
     assert "default-src 'none'" in csp
     assert "form-action 'self'" in csp
+    assert "frame-ancestors 'none'" in csp
 
 
 def test_form_get_restarts_the_ap_window(harness: Harness) -> None:
@@ -695,6 +854,199 @@ def test_undecodable_ssid_does_not_break_the_page() -> None:
     assert "Alpha" in Page(response.text).options()
 
 
+# --- WSGI: Host, rebinding ------------------------------------------------------
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+@pytest.mark.parametrize("path", ["/", "/generate_204", "/hotspot-detect.html"])
+@pytest.mark.parametrize("host", ["connectivitycheck.gstatic.com", "evil.example", ""])
+def test_other_host_redirects_to_the_portal_without_restarting_the_ap_window(
+    harness: Harness, method: str, path: str, host: str
+) -> None:
+    response = request(harness.app, method, path, headers={"HTTP_HOST": host})
+
+    assert response.code == 302
+    assert response.headers["location"] == f"http://{PORTAL_HOST}/"
+    harness.activity.assert_not_called()
+    harness.scan.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", list(PortalMode))
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"HTTP_HOST": "evil.example", "HTTP_ORIGIN": "http://evil.example"},
+        {"HTTP_HOST": "evil.example", "HTTP_REFERER": "http://evil.example/"},
+        {"HTTP_HOST": "evil.example"},
+        {"HTTP_HOST": f"{PORTAL_HOST}:8080"},
+        {"HTTP_HOST": ""},
+    ],
+    ids=["rebound-origin", "rebound-referer", "other-host", "other-port", "no-host"],
+)
+def test_post_on_another_host_is_refused(mode: PortalMode, headers: dict[str, str]) -> None:
+    harness = Harness(mode=mode)
+
+    response = harness.post(headers=headers)
+
+    assert response.code == 403
+    harness.apply.assert_not_called()
+    harness.activity.assert_not_called()
+
+
+def test_origin_null_with_no_host_is_refused(harness: Harness) -> None:
+    """Empty Host and the empty netloc of "null" must not count as a match."""
+    response = harness.post(headers={"HTTP_ORIGIN": "null", "HTTP_HOST": ""})
+
+    assert response.code == 403
+    harness.apply.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("portal_host", "headers"),
+    [
+        ("portal.local", {"HTTP_HOST": "PORTAL.LOCAL"}),
+        ("portal.local", {"HTTP_HOST": "PORTAL.LOCAL", "HTTP_ORIGIN": "http://portal.local"}),
+        ("PORTAL.local", {"HTTP_HOST": "portal.LOCAL", "HTTP_REFERER": "http://Portal.Local/"}),
+    ],
+)
+def test_host_comparison_ignores_case(portal_host: str, headers: dict[str, str]) -> None:
+    harness = Harness(portal_host=portal_host)
+
+    assert harness.post(headers=headers).code == 200
+    harness.apply.assert_called_once()
+    assert request(harness.app, headers=headers).code == 200
+
+
+# --- WSGI: AP-window hook -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "accept",
+    [BROWSER_ACCEPT, "text/html", "TEXT/HTML;q=0.9", "application/json, text/html"],
+)
+def test_html_accepting_request_restarts_the_ap_window(harness: Harness, accept: str) -> None:
+    request(harness.app, headers={"HTTP_ACCEPT": accept})
+    harness.post(headers={"HTTP_ACCEPT": accept})
+    assert harness.activity.call_count == 2
+
+
+@pytest.mark.parametrize("accept", ["", "*/*", "application/json", "text/htmlish", "text/plain"])
+def test_probe_on_the_root_gets_the_form_but_does_not_restart_the_ap_window(
+    harness: Harness, accept: str
+) -> None:
+    """A probe that follows the redirect, or asks for / itself, must not hold the AP open."""
+    response = request(harness.app, headers={"HTTP_ACCEPT": accept})
+
+    assert response.code == 200
+    harness.activity.assert_not_called()
+
+
+def test_post_without_html_accept_applies_but_does_not_restart_the_ap_window(
+    harness: Harness,
+) -> None:
+    assert harness.post(headers={"HTTP_ACCEPT": "*/*"}).code == 200
+    harness.apply.assert_called_once()
+    harness.activity.assert_not_called()
+
+
+def test_failing_hook_does_not_stop_the_form_or_the_submit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = Harness(activity=Mock(side_effect=RuntimeError(f"timer {WIFI_PSK}")))
+
+    with caplog.at_level(logging.DEBUG):
+        assert request(harness.app).code == 200
+        assert harness.post().code == 200
+
+    harness.apply.assert_called_once()
+    assert caplog.records
+    assert WIFI_PSK not in caplog.text
+
+
+def test_hook_calls_never_overlap() -> None:
+    """Task 6's hook only resets a timer, so it need not bring its own lock."""
+    inside = 0
+    overlapped = threading.Event()
+
+    def hook() -> None:
+        nonlocal inside
+        inside += 1
+        if inside > 1:
+            overlapped.set()
+        time.sleep(0.01)
+        inside -= 1
+
+    harness = Harness(activity=hook)
+    threads = [threading.Thread(target=request, args=(harness.app,)) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not overlapped.is_set()
+
+
+# --- WSGI: fallback mode --------------------------------------------------------
+
+
+@pytest.fixture
+def fallback() -> Harness:
+    return Harness(mode=PortalMode.WIFI_ONLY)
+
+
+def test_mode_must_be_chosen_explicitly() -> None:
+    parameter = inspect.signature(make_app).parameters["mode"]
+    assert parameter.default is inspect.Parameter.empty
+
+
+def test_fallback_get_shows_only_the_wifi_fields(fallback: Harness) -> None:
+    response = request(fallback.app)
+
+    assert response.code == 200
+    assert set(Page(response.text).controls()) == {"wifi_ssid", "wifi_psk"}
+    assert Page(response.text).options() == ["Alpha", "Beta"]
+
+
+def test_fallback_post_applies_the_wifi_change_only(fallback: Harness) -> None:
+    form = valid_form(
+        wifi_ssid="New-WiFi",
+        node_id="evil",
+        hostname="evil",
+        broker_host="evil.example",
+        vpn_requested="on",
+    )
+
+    response = fallback.post(form)
+
+    assert response.code == 200
+    fallback.apply.assert_called_once_with(WifiChange(wifi_ssid="New-WiFi", wifi_psk=WIFI_PSK))
+    assert not isinstance(fallback.apply.call_args.args[0], NodeConfig)
+
+
+def test_fallback_post_with_only_wifi_fields_is_enough(fallback: Harness) -> None:
+    assert fallback.post({"wifi_ssid": "New-WiFi", "wifi_psk": WIFI_PSK}).code == 200
+    fallback.apply.assert_called_once()
+
+
+def test_fallback_rejection_redisplays_wifi_only(fallback: Harness) -> None:
+    form = valid_form(wifi_psk="tiny-pw", node_id="posted-node-id")
+
+    response = fallback.post(form)
+
+    assert response.code == 400
+    fallback.apply.assert_not_called()
+    assert "wifi_psk must be" in response.text
+    assert set(Page(response.text).controls()) == {"wifi_ssid", "wifi_psk"}
+    assert "posted-node-id" not in response.text
+    for secret in ("tiny-pw", BROKER_PASSWORD, TAILSCALE_KEY):
+        assert secret not in response.text
+
+
+def test_full_mode_post_applies_a_node_config(harness: Harness) -> None:
+    assert harness.post().code == 200
+    assert isinstance(harness.apply.call_args.args[0], NodeConfig)
+
+
 # --- WSGI: submit ---------------------------------------------------------------
 
 
@@ -773,6 +1125,82 @@ def test_undecodable_body_is_a_bad_request(harness: Harness, body: bytes) -> Non
     assert response.code == 400
     harness.apply.assert_not_called()
     harness.activity.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        "application/x-www-form-urlencoded; charset=UTF-8",
+        "APPLICATION/X-WWW-FORM-URLENCODED",
+    ],
+)
+def test_form_content_type_variants_are_accepted(harness: Harness, content_type: str) -> None:
+    assert harness.post(headers={"CONTENT_TYPE": content_type}).code == 200
+    harness.apply.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    ["", "text/plain", "application/json", "multipart/form-data; boundary=x", "x-form"],
+)
+def test_other_content_type_is_415_unread(harness: Harness, content_type: str) -> None:
+    response = request(
+        harness.app,
+        "POST",
+        "/",
+        content_length="10",
+        wsgi_input=ForbiddenInput(),
+        headers={"CONTENT_TYPE": content_type},
+    )
+
+    assert response.code == 415
+    harness.apply.assert_not_called()
+    harness.activity.assert_not_called()
+
+
+def test_concurrent_submits_apply_one_at_a_time() -> None:
+    inside = 0
+    overlapped = threading.Event()
+
+    def apply(_cfg: NodeConfig) -> None:
+        nonlocal inside
+        inside += 1
+        if inside > 1:
+            overlapped.set()
+        time.sleep(0.02)
+        inside -= 1
+
+    harness = Harness(apply=apply)
+    threads = [threading.Thread(target=harness.post) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not overlapped.is_set()
+
+
+def test_slow_apply_does_not_hold_up_the_form() -> None:
+    """Only submits queue behind the lock: the page must stay available."""
+    entered, release = threading.Event(), threading.Event()
+
+    def apply(_cfg: NodeConfig) -> None:
+        entered.set()
+        release.wait(5)
+
+    harness = Harness(apply=apply)
+    poster = threading.Thread(target=harness.post)
+    poster.start()
+    try:
+        assert entered.wait(5)
+        result: list[Response] = []
+        getter = threading.Thread(target=lambda: result.append(request(harness.app)))
+        getter.start()
+        getter.join(2)
+        assert result and result[0].code == 200
+    finally:
+        release.set()
+        poster.join()
 
 
 # --- WSGI: body limit -----------------------------------------------------------
@@ -892,21 +1320,31 @@ def test_cross_origin_post_is_403(harness: Harness, headers: dict[str, str]) -> 
 
 @pytest.fixture
 def served(harness: Harness) -> Iterator[tuple[Harness, int]]:
-    server = make_server(harness.app, "127.0.0.1", 0)
+    with running_server(harness.app) as port:
+        yield harness, port
+
+
+@contextlib.contextmanager
+def running_server(app: Callable[..., Any], interface: str = "lo") -> Iterator[int]:
+    server = make_server(app, "127.0.0.1", 0, interface=interface)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
     thread.start()
     try:
-        yield harness, server.server_address[1]
+        yield server.server_address[1]
     finally:
         server.shutdown()
         thread.join()
         server.server_close()
 
 
+def browser_headers() -> dict[str, str]:
+    return {"Host": PORTAL_HOST, "Accept": BROWSER_ACCEPT, "Content-Type": FORM_CONTENT_TYPE}
+
+
 def http_call(port: int, method: str, path: str, body: bytes | None = None) -> Any:
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     try:
-        connection.request(method, path, body)
+        connection.request(method, path, body, headers=browser_headers())
         response = connection.getresponse()
         return response.status, response.getheader("Location"), response.read()
     finally:
@@ -931,7 +1369,9 @@ def test_server_refuses_an_oversized_declared_body(served: tuple[Harness, int]) 
     _, port = served
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     try:
-        connection.putrequest("POST", "/")
+        connection.putrequest("POST", "/", skip_host=True)
+        for name, value in browser_headers().items():
+            connection.putheader(name, value)
         connection.putheader("Content-Length", str(64 * 1024 + 1))
         connection.endheaders()
         assert connection.getresponse().status == 413
@@ -952,20 +1392,89 @@ def test_server_does_not_log_request_lines(
     assert WIFI_PSK not in captured.out + captured.err
 
 
-def test_stalled_client_does_not_hold_the_server(
+def test_get_behind_a_silent_socket_returns_quickly(served: tuple[Harness, int]) -> None:
+    """With the shipped timeout: the silent client must not delay anyone else."""
+    _, port = served
+
+    with socket.create_connection(("127.0.0.1", port), timeout=5):
+        started = time.monotonic()
+        assert http_call(port, "GET", "/")[0] == 200
+        assert time.monotonic() - started < 2
+
+
+def test_get_behind_a_stalled_upload_returns_quickly(served: tuple[Harness, int]) -> None:
+    """A POST that declares a body and never sends it is parked mid-read."""
+    harness, port = served
+
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as stalled:
+        stalled.sendall(
+            b"POST / HTTP/1.1\r\nHost: " + PORTAL_HOST.encode() + b"\r\n"
+            b"Content-Type: " + FORM_CONTENT_TYPE.encode() + b"\r\nContent-Length: 100\r\n\r\n"
+        )
+        started = time.monotonic()
+        assert http_call(port, "GET", "/")[0] == 200
+        assert time.monotonic() - started < 2
+    harness.apply.assert_not_called()
+
+
+def test_socket_timeout_is_about_ten_seconds() -> None:
+    assert 5 <= portal._QuietRequestHandler.timeout <= 15
+
+
+def test_silent_socket_is_closed_after_the_timeout(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One thread serves everyone, so a silent client must time out."""
-    assert 0 < portal._QuietRequestHandler.timeout <= 60  # the shipped value is bounded
     monkeypatch.setattr(portal._QuietRequestHandler, "timeout", 0.1)
-    server = make_server(harness.app, "127.0.0.1", 0)
-    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
-    thread.start()
+
+    with running_server(harness.app) as port:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as silent:
+            assert silent.recv(1) == b""
+
+
+def test_server_threads_do_not_block_process_exit() -> None:
+    assert portal._PortalServer.daemon_threads is True
+
+
+# --- the listener's binding -----------------------------------------------------
+
+
+def test_server_binds_to_the_named_interface(harness: Harness) -> None:
+    server = make_server(harness.app, "127.0.0.1", 0, interface="lo")
     try:
-        port = server.server_address[1]
-        with socket.create_connection(("127.0.0.1", port), timeout=5):
-            assert http_call(port, "GET", "/")[0] == 200
+        device = server.socket.getsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, 16)
     finally:
-        server.shutdown()
-        thread.join()
         server.server_close()
+    assert device.rstrip(b"\0") == b"lo"
+
+
+def test_server_interface_defaults_to_the_ap_radio() -> None:
+    assert inspect.signature(make_server).parameters["interface"].default == "wlan0"
+
+
+def test_unknown_interface_fails_instead_of_listening_everywhere(harness: Harness) -> None:
+    with pytest.raises(OSError):
+        make_server(harness.app, "127.0.0.1", 0, interface="no-such-if0")
+
+
+def test_listener_on_another_interface_is_unreachable_over_loopback(harness: Harness) -> None:
+    """The option's actual effect: the same address, reached through the wrong device."""
+    others = [name for _, name in socket.if_nameindex() if name != "lo"]
+    if not others:
+        pytest.skip("this host has no interface other than lo")
+
+    with running_server(harness.app, interface=others[0]) as port:
+        with pytest.raises(OSError):
+            http_call(port, "GET", "/")
+    harness.apply.assert_not_called()
+
+
+@pytest.mark.parametrize("ip", ["", "0.0.0.0", "0", "::", "localhost", "not an ip"])
+def test_server_refuses_anything_but_one_specific_ip(harness: Harness, ip: str) -> None:
+    with pytest.raises(ValueError):
+        make_server(harness.app, ip, 0, interface="lo")
+
+
+def test_server_refuses_an_empty_interface(harness: Harness) -> None:
+    """Setting the option to an empty name removes the restriction instead of adding one."""
+    with pytest.raises(ValueError):
+        make_server(harness.app, "127.0.0.1", 0, interface="")

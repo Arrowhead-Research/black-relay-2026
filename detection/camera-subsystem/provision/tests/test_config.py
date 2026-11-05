@@ -26,6 +26,7 @@ from cameraprovision.config import (
     NodeConfig,
     OutboxConfig,
     validate,
+    validate_wifi,
     write_bridge_config,
 )
 
@@ -153,6 +154,21 @@ def test_bad_node_id_is_rejected(node_id: Any) -> None:
         ("mediamtx_address", {"mediamtx_address": ""}),
         ("mediamtx_address", {"mediamtx_address": " 10.0.0.2:8554"}),
         ("mediamtx_address", {"mediamtx_address": "10.0.0.2:8554\n"}),
+        ("mediamtx_address", {"mediamtx_address": "10.0.0.2"}),
+        ("mediamtx_address", {"mediamtx_address": "relay.site.local"}),
+        ("mediamtx_address", {"mediamtx_address": ":8554"}),
+        ("mediamtx_address", {"mediamtx_address": "10.0.0.2:"}),
+        ("mediamtx_address", {"mediamtx_address": "10.0.0.2:abc"}),
+        ("mediamtx_address", {"mediamtx_address": "10.0.0.2:0"}),
+        ("mediamtx_address", {"mediamtx_address": "10.0.0.2:65536"}),
+        ("mediamtx_address", {"mediamtx_address": "10.0.0.2:٨٥٥٤"}),
+        ("mediamtx_address", {"mediamtx_address": "10.0.0.2:" + "9" * 5000}),
+        ("mediamtx_address", {"mediamtx_address": "rtsp://10.0.0.2:8554"}),
+        ("mediamtx_address", {"mediamtx_address": "10.0.0.2:8554/stream"}),
+        ("mediamtx_address", {"mediamtx_address": "bad host:8554"}),
+        ("mediamtx_address", {"mediamtx_address": "::1:8554"}),  # IPv6 needs brackets
+        ("mediamtx_address", {"mediamtx_address": "[relay.local]:8554"}),
+        ("mediamtx_address", {"mediamtx_address": None}),
         ("covered_zones", {"covered_zones": []}),
         ("covered_zones", {"covered_zones": [""]}),
         ("covered_zones", {"covered_zones": ["driveway", "  "]}),
@@ -212,6 +228,39 @@ def test_bad_field_is_rejected_by_name(field: str, overrides: dict) -> None:
 )
 def test_boundary_values_are_accepted(overrides: dict) -> None:
     assert validate(make_config(**overrides)) == []
+
+
+@pytest.mark.parametrize(
+    "address",
+    ["10.0.0.2:8554", "relay.site.local:8554", "relay:1", "relay:65535", "[fd7a::1]:8554"],
+)
+def test_mediamtx_host_port_forms_are_accepted(address: str) -> None:
+    assert validate(make_config(mediamtx_address=address)) == []
+
+
+@pytest.mark.parametrize(
+    ("ssid", "psk", "named"),
+    [
+        ("", WIFI_PSK, "wifi_ssid"),
+        ("s" * 33, WIFI_PSK, "wifi_ssid"),
+        (WIFI_SSID, "short", "wifi_psk"),
+        (WIFI_SSID, "", "wifi_psk"),
+    ],
+)
+def test_validate_wifi_names_the_bad_field(ssid: str, psk: str, named: str) -> None:
+    errors = validate_wifi(ssid, psk)
+    assert len(errors) == 1
+    assert errors[0].startswith(named)
+    assert psk == "" or psk not in errors[0]
+
+
+def test_validate_wifi_accepts_what_validate_accepts() -> None:
+    assert validate_wifi(WIFI_SSID, WIFI_PSK) == []
+
+
+def test_validate_applies_the_same_wifi_rules_as_validate_wifi() -> None:
+    errors = validate(make_config(wifi_ssid="", wifi_psk="short"))
+    assert validate_wifi("", "short") == errors
 
 
 def test_every_problem_is_reported_at_once() -> None:

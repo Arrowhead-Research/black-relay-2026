@@ -1,0 +1,44 @@
+<fieldset>
+<legend>This node</legend>
+<label>Node ID
+<input type="text" name="node_id" value="$node_id" required placeholder="cam-01" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+</label>
+<label>Hostname
+<input type="text" name="hostname" value="$hostname" required placeholder="cam-01" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+</label>
+<label>Covered zones
+<input type="text" name="covered_zones" value="$covered_zones" required placeholder="perimeter-north, driveway" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+<small>Separate zones with commas.</small>
+</label>
+<label>Frigate address
+<input type="text" name="frigate_base_url" value="$frigate_base_url" required placeholder="http://cam-01.local:5000" inputmode="url" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+</label>
+</fieldset>
+<fieldset>
+<legend>Central node</legend>
+<label>Broker address
+<input type="text" name="broker_host" value="$broker_host" required placeholder="10.0.0.2" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+</label>
+<label>Broker port
+<input type="text" name="broker_port" value="$broker_port" required inputmode="numeric" autocomplete="off">
+</label>
+<label>Broker username
+<input type="text" name="broker_username" value="$broker_username" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+</label>
+<label>Broker password
+<input type="password" name="broker_password" autocomplete="off">
+</label>
+<label><input type="checkbox" name="broker_anonymous" value="on" $anonymous_checked> Broker takes no username or password</label>
+<label><input type="checkbox" name="broker_tls" value="on" $tls_checked> Use TLS <small>Usually port 8883; the certificate must chain to a system CA.</small></label>
+<label>MediaMTX address
+<input type="text" name="mediamtx_address" value="$mediamtx_address" required placeholder="10.0.0.2:8554" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+</label>
+</fieldset>
+<fieldset>
+<legend>Remote access</legend>
+<label><input type="checkbox" name="vpn_requested" value="on" $vpn_checked> Join Tailscale</label>
+<label>Tailscale auth key
+<input type="password" name="tailscale_auth_key" autocomplete="off">
+<small>Needed only when joining Tailscale.</small>
+</label>
+</fieldset>

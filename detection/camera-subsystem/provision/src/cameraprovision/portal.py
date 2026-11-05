@@ -1,8 +1,11 @@
 """The captive portal: the setup form, the submit handler, and a stdlib WSGI app.
 
-``render_form`` and ``handle_submit`` hold the logic and touch nothing; ``make_app``
-adds HTTP around them, with the scanner, the ``apply`` side effect, and the AP-window
-hook injected. Task 6 owns what those three do.
+``render_form``, ``handle_submit`` and ``handle_wifi_submit`` hold the logic and touch
+nothing; ``make_app`` adds HTTP around them, with the scanner, the ``apply`` side effect,
+and the AP-window hook injected. Task 6 owns what those three do.
+
+``PortalMode`` follows the provisioning state. ``AP_UP`` serves ``FULL``. ``FALLBACK_AP``
+serves ``WIFI_ONLY``, because changing a broker, VPN or identity takes the physical button.
 
 Two rules run through this module. Every value reaching a page is escaped, because
 SSIDs are chosen by whoever is broadcasting nearby. And no secret is ever echoed or
@@ -12,21 +15,40 @@ reduced to their type name, since their messages can quote what they were given.
 
 from __future__ import annotations
 
+import enum
 import html
+import ipaddress
 import logging
 import re
-import wsgiref.simple_server
+import socket
+import threading
 from dataclasses import dataclass, field
 from importlib import resources
+from socketserver import ThreadingMixIn
 from string import Template
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from urllib.parse import parse_qsl, urlsplit
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer
 from wsgiref.types import StartResponse, WSGIApplication, WSGIEnvironment
 
-from cameraprovision.config import BrokerConfig, FrigateConfig, NodeConfig, validate
+from cameraprovision.config import (
+    BrokerConfig,
+    FrigateConfig,
+    NodeConfig,
+    validate,
+    validate_wifi,
+)
 
-__all__ = ["SubmitResult", "handle_submit", "make_app", "make_server", "render_form"]
+__all__ = [
+    "PortalMode",
+    "SubmitResult",
+    "WifiChange",
+    "handle_submit",
+    "handle_wifi_submit",
+    "make_app",
+    "make_server",
+    "render_form",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +59,18 @@ _MAX_FORM_FIELDS = 64
 _PORT_RE = re.compile(r"[0-9]{1,5}")
 _CONTENT_LENGTH_RE = re.compile(r"[0-9]{1,18}")
 
-_REDISPLAYED_FIELDS = (
-    "wifi_ssid",
+_FORM_CONTENT_TYPE = "application/x-www-form-urlencoded"
+_REDIRECT_BODY = "Redirecting."
+
+
+class PortalMode(enum.Enum):
+    """What the portal offers: everything, or only a WiFi repair."""
+
+    FULL = "full"
+    WIFI_ONLY = "wifi_only"
+
+
+_FULL_ONLY_REDISPLAYED_FIELDS = (
     "hostname",
     "node_id",
     "broker_host",
@@ -52,9 +84,20 @@ _REDISPLAYED_FIELDS = (
 _APPLY_FAILED_ERROR = "The settings could not be saved. Check them and try again."
 _REENTER_NOTE = "Passwords and keys are never shown back, so enter them again."
 
-_FORM_TEMPLATE = Template(
-    resources.files(__package__).joinpath("templates/index.html").read_text(encoding="utf-8")
+_WIFI_ONLY_INTRO = (
+    "<p>Only the WiFi settings can be changed here. "
+    "To change anything else, use the setup button.</p>"
 )
+
+
+def _load_template(name: str) -> Template:
+    return Template(
+        resources.files(__package__).joinpath("templates", name).read_text(encoding="utf-8")
+    )
+
+
+_FORM_TEMPLATE = _load_template("index.html")
+_FULL_FIELDS_TEMPLATE = _load_template("full_fields.html")
 
 _SAVED_PAGE = """<!doctype html>
 <html lang="en">
@@ -73,7 +116,10 @@ Reconnect to it and check the WiFi name and password.</p>
 </html>
 """
 
-_CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'"
+_CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; "
+    "base-uri 'none'; frame-ancestors 'none'"
+)
 
 
 def _escape(value: str) -> str:
@@ -87,17 +133,8 @@ def _errors_html(errors: Sequence[str]) -> str:
     return f'<div class="errors"><ul>{items}</ul><p>{_escape(_REENTER_NOTE)}</p></div>'
 
 
-def render_form(
-    ssids: Iterable[str],
-    *,
-    values: Mapping[str, str] | None = None,
-    errors: Sequence[str] = (),
-) -> str:
-    """Return the setup page, listing ``ssids`` and showing any ``errors``.
-
-    ``values`` is a previous submission to redisplay. Only the non-secret fields are
-    read from it, so passing a whole submitted form is safe.
-    """
+def _full_fields_html(values: Mapping[str, str] | None) -> str:
+    """The fields only ``PortalMode.FULL`` offers, escaped and ready to insert."""
     if values is None:
         shown: Mapping[str, str] = {"broker_port": str(BrokerConfig.port)}
         vpn_ticked = True
@@ -106,16 +143,35 @@ def render_form(
         vpn_ticked = "vpn_requested" in values
     # Absent from a first render's values too, so both boxes start unticked.
     boxes = values or {}
-
-    # Substitution is a single pass, so a value holding "$errors" stays literal text.
-    return _FORM_TEMPLATE.substitute(
-        {name: _escape(shown.get(name, "")) for name in _REDISPLAYED_FIELDS},
-        errors=_errors_html(errors),
-        # A scan reports one row per access point, so a site network repeats.
-        ssid_options="".join(f'<option value="{_escape(s)}">' for s in dict.fromkeys(ssids)),
+    return _FULL_FIELDS_TEMPLATE.substitute(
+        {name: _escape(shown.get(name, "")) for name in _FULL_ONLY_REDISPLAYED_FIELDS},
         vpn_checked="checked" if vpn_ticked else "",
         tls_checked="checked" if "broker_tls" in boxes else "",
         anonymous_checked="checked" if "broker_anonymous" in boxes else "",
+    )
+
+
+def render_form(
+    ssids: Iterable[str],
+    *,
+    values: Mapping[str, str] | None = None,
+    errors: Sequence[str] = (),
+    mode: PortalMode = PortalMode.FULL,
+) -> str:
+    """Return the setup page, listing ``ssids`` and showing any ``errors``.
+
+    ``values`` is a previous submission to redisplay. Only the non-secret fields the
+    ``mode`` offers are read from it, so passing a whole submitted form is safe.
+    """
+    wifi_only = mode is PortalMode.WIFI_ONLY
+    # Each substitution is a single pass, so a value holding "$errors" stays literal text.
+    return _FORM_TEMPLATE.substitute(
+        wifi_ssid=_escape((values or {}).get("wifi_ssid", "")),
+        errors=_errors_html(errors),
+        intro=_WIFI_ONLY_INTRO if wifi_only else "",
+        full_fields="" if wifi_only else _full_fields_html(values),
+        # A scan reports one row per access point, so a site network repeats.
+        ssid_options="".join(f'<option value="{_escape(s)}">' for s in dict.fromkeys(ssids)),
     )
 
 
@@ -125,6 +181,18 @@ class SubmitResult:
 
     ok: bool
     errors: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True, kw_only=True)
+class WifiChange:
+    """What ``WIFI_ONLY`` hands to ``apply``.
+
+    Field names match ``NodeConfig``, so the saved config takes it directly:
+    ``dataclasses.replace(saved, **dataclasses.asdict(change))``.
+    """
+
+    wifi_ssid: str
+    wifi_psk: str = field(repr=False)
 
 
 def _parse_port(text: str) -> int | str:
@@ -165,19 +233,34 @@ def _build_config(form: Mapping[str, str]) -> NodeConfig:
     )
 
 
+def _apply_safely(apply: Callable[[Any], None], change: NodeConfig | WifiChange) -> SubmitResult:
+    try:
+        apply(change)
+    except Exception as exc:
+        # No exc_info: the traceback would print the message, which may quote a secret.
+        logger.error("applying the submitted config failed: %s", type(exc).__name__)
+        return SubmitResult(ok=False, errors=[_APPLY_FAILED_ERROR])
+    return SubmitResult(ok=True)
+
+
 def handle_submit(form: Mapping[str, str], *, apply: Callable[[NodeConfig], None]) -> SubmitResult:
     """Validate a submitted form, and call ``apply`` once only if it is valid."""
     cfg = _build_config(form)
     errors = validate(cfg)
     if errors:
         return SubmitResult(ok=False, errors=errors)
-    try:
-        apply(cfg)
-    except Exception as exc:
-        # No exc_info: the traceback would print the message, which may quote a secret.
-        logger.error("applying the submitted config failed: %s", type(exc).__name__)
-        return SubmitResult(ok=False, errors=[_APPLY_FAILED_ERROR])
-    return SubmitResult(ok=True)
+    return _apply_safely(apply, cfg)
+
+
+def handle_wifi_submit(
+    form: Mapping[str, str], *, apply: Callable[[WifiChange], None]
+) -> SubmitResult:
+    """Like :func:`handle_submit`, reading only the WiFi fields and ignoring all others."""
+    change = WifiChange(wifi_ssid=form.get("wifi_ssid", ""), wifi_psk=form.get("wifi_psk", ""))
+    errors = validate_wifi(change.wifi_ssid, change.wifi_psk)
+    if errors:
+        return SubmitResult(ok=False, errors=errors)
+    return _apply_safely(apply, change)
 
 
 # --- HTTP -----------------------------------------------------------------------
@@ -215,22 +298,34 @@ def _netloc(url: str) -> str | None:
         return None
 
 
-def _same_origin(environ: WSGIEnvironment) -> bool:
-    """False if a present ``Origin`` or ``Referer`` does not match ``Host``."""
-    host = environ.get("HTTP_HOST", "").lower()
-    for header in ("HTTP_ORIGIN", "HTTP_REFERER"):
-        value = environ.get(header)
-        if value is not None and (not host or _netloc(value) != host):
-            return False
-    return True
+def _same_origin(environ: WSGIEnvironment, host: str) -> bool:
+    """False if a present ``Origin`` or ``Referer`` is not on ``host``."""
+    return all(
+        _netloc(environ[header]) == host
+        for header in ("HTTP_ORIGIN", "HTTP_REFERER")
+        if header in environ
+    )
 
 
-def _read_form(environ: WSGIEnvironment) -> dict[str, str]:
+def _is_portal_host(environ: WSGIEnvironment, portal_host: str) -> bool:
+    return environ.get("HTTP_HOST", "").lower() == portal_host.lower()
+
+
+def _media_types(header: str) -> list[str]:
+    """The media types in a ``Content-Type`` or ``Accept`` value, without parameters."""
+    return [part.split(";")[0].strip().lower() for part in header.split(",")]
+
+
+def _read_form(environ: WSGIEnvironment, portal_host: str) -> dict[str, str]:
     """Return the POSTed form, or raise ``_Refused``. Reads nothing it will refuse."""
-    if not _same_origin(environ):
+    # Origin alone cannot stop DNS rebinding: a rebound page's Origin matches its Host.
+    if not _is_portal_host(environ, portal_host) or not _same_origin(environ, portal_host.lower()):
         raise _Refused(_Response("403 Forbidden", "This form must be sent from its own page."))
 
-    # Reading without a valid length would block this single-threaded server.
+    if _media_types(environ.get("CONTENT_TYPE", "")) != [_FORM_CONTENT_TYPE]:
+        raise _Refused(_Response("415 Unsupported Media Type", "This form type is not accepted."))
+
+    # Reading without a valid length would park this thread until the socket times out.
     declared = environ.get("CONTENT_LENGTH", "")
     if not _CONTENT_LENGTH_RE.fullmatch(declared):
         raise _Refused(_Response("400 Bad Request", "The request has no usable length."))
@@ -270,33 +365,69 @@ def _scan(scan_ssids: Callable[[], list[str]]) -> list[str]:
         return []
 
 
+def _guarded_hook(hook: Callable[[], None] | None) -> Callable[[], None]:
+    """Serialize ``hook`` across request threads, and stop its failure reaching a request.
+
+    The AP window is housekeeping: losing one restart must not cost a provisioning.
+    """
+    lock = threading.Lock()
+
+    def notify() -> None:
+        if hook is None:
+            return
+        with lock:
+            try:
+                hook()
+            except Exception as exc:
+                logger.warning("the AP-window hook failed: %s", type(exc).__name__)
+
+    return notify
+
+
 def make_app(
     *,
     scan_ssids: Callable[[], list[str]],
-    apply: Callable[[NodeConfig], None],
+    apply: Callable[[Any], None],
+    portal_host: str,
+    mode: PortalMode,
     on_form_request: Callable[[], None] | None = None,
 ) -> WSGIApplication:
     """Return the portal's WSGI app.
 
+    ``mode`` is fixed for the app's life, and decides what ``apply`` receives: a whole
+    ``NodeConfig`` in ``FULL``, a ``WifiChange`` in ``WIFI_ONLY``. ``apply`` runs under a
+    lock, one submission at a time.
+
+    ``portal_host`` is the ``Host`` the portal is served as, such as the AP's IP. A GET
+    under any other name is sent there, and a POST under any other name is refused.
+
     ``on_form_request`` is the AP-window hook. It runs for form GETs and for POSTs that
-    reach validation, before ``apply``. It never runs for a redirected path, so a
-    phone's connectivity checks cannot hold the AP open, nor for a HEAD or a refused
-    POST.
+    reach validation, before ``apply``, and only when the request accepts ``text/html``.
+    It never runs for a redirect, a HEAD, or a refused POST, so a phone's connectivity
+    checks cannot hold the AP open. ``scan_ssids`` may be called from several threads
+    at once.
     """
-    notify = on_form_request or (lambda: None)
+    notify = _guarded_hook(on_form_request)
+    submit_lock = threading.Lock()
+    submit = handle_wifi_submit if mode is PortalMode.WIFI_ONLY else handle_submit
+
+    def notify_if_browser(environ: WSGIEnvironment) -> None:
+        if "text/html" in _media_types(environ.get("HTTP_ACCEPT", "")):
+            notify()
 
     def route_post(environ: WSGIEnvironment) -> _Response:
         if environ.get("PATH_INFO") != "/":
             return _Response("404 Not Found", "Not found.")
         try:
-            form = _read_form(environ)
+            form = _read_form(environ, portal_host)
         except _Refused as refused:
             return refused.response
-        notify()
-        result = handle_submit(form, apply=apply)
+        notify_if_browser(environ)
+        with submit_lock:
+            result = submit(form, apply=apply)
         if result.ok:
             return _html_response("200 OK", _SAVED_PAGE)
-        page = render_form(_scan(scan_ssids), values=form, errors=result.errors)
+        page = render_form(_scan(scan_ssids), values=form, errors=result.errors, mode=mode)
         return _html_response("400 Bad Request", page)
 
     def route(environ: WSGIEnvironment) -> _Response:
@@ -309,11 +440,14 @@ def make_app(
                 "Method not allowed.",
                 extra_headers=(("Allow", "GET, HEAD, POST"),),
             )
+        if not _is_portal_host(environ, portal_host):
+            location = f"http://{portal_host}/"
+            return _Response("302 Found", _REDIRECT_BODY, extra_headers=(("Location", location),))
         if environ.get("PATH_INFO", "/") != "/":
-            return _Response("302 Found", "Redirecting.", extra_headers=(("Location", "/"),))
+            return _Response("302 Found", _REDIRECT_BODY, extra_headers=(("Location", "/"),))
         if method == "GET":
-            notify()
-        return _html_response("200 OK", render_form(_scan(scan_ssids)))
+            notify_if_browser(environ)
+        return _html_response("200 OK", render_form(_scan(scan_ssids), mode=mode))
 
     def app(environ: WSGIEnvironment, start_response: StartResponse) -> Iterable[bytes]:
         response = route(environ)
@@ -334,13 +468,38 @@ def make_app(
 
 
 class _QuietRequestHandler(WSGIRequestHandler):
-    # One thread serves every client, so a silent one must not hold the portal.
-    timeout = 30
+    # Each connection has its own thread, and this bounds how long a silent one lives.
+    timeout = 10
 
     def log_message(self, format: str, *args: Any) -> None:
         """Log nothing: request lines carry query strings, which could hold a secret."""
 
 
-def make_server(app: WSGIApplication, host: str, port: int) -> WSGIServer:
-    """Return a wsgiref server for ``app``, bound and ready for ``serve_forever``."""
-    return wsgiref.simple_server.make_server(host, port, app, handler_class=_QuietRequestHandler)
+class _PortalServer(ThreadingMixIn, WSGIServer):
+    daemon_threads = True
+
+
+def make_server(app: WSGIApplication, ip: str, port: int, interface: str = "wlan0") -> WSGIServer:
+    """Return a threaded wsgiref server for ``app``, listening and ready for ``serve_forever``.
+
+    It accepts connections only on ``ip``, and only arriving through ``interface``, so
+    the portal stays off ``eth0`` and ``tailscale0``. Raises ``ValueError`` for anything
+    but one specific IP address or for an empty interface, and ``OSError`` if the
+    interface does not exist.
+    """
+    if not interface:
+        # An empty name would clear the device binding instead of setting it.
+        raise ValueError("the portal must be bound to a named interface")
+    if ipaddress.ip_address(ip).is_unspecified:  # also raises ValueError for a non-address
+        raise ValueError("the portal must be bound to one specific IP address")
+
+    server = _PortalServer((ip, port), _QuietRequestHandler, bind_and_activate=False)
+    try:
+        server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode())
+        server.server_bind()
+        server.server_activate()
+    except BaseException:
+        server.server_close()
+        raise
+    server.set_app(app)
+    return server

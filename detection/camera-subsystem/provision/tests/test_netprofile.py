@@ -278,6 +278,18 @@ def test_passphrase_uses_the_full_label_safe_alphabet() -> None:
     assert seen == allowed
 
 
+def test_every_passphrase_position_covers_the_whole_alphabet() -> None:
+    """A position stuck on one symbol, or a narrower set, would pass the pooled test above.
+
+    2000 draws miss one (position, symbol) pair about 1 in 10^15, over all 1140 pairs
+    about 1 in 10^12.
+    """
+    allowed = set(string.ascii_letters + string.digits) - set("0O1lI")
+    draws = [generate_ap_passphrase() for _ in range(2000)]
+    for position in range(len(draws[0])):
+        assert {draw[position] for draw in draws} == allowed, position
+
+
 def test_passphrases_differ_between_calls() -> None:
     assert len({generate_ap_passphrase() for _ in range(200)}) == 200
 
