@@ -10,6 +10,7 @@ import re
 import stat
 import subprocess
 import threading
+import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,6 +28,8 @@ from cameralink.adopt import (
     step,
 )
 from cameralink.daemon import (
+    FRIGATE_DOWN_TICKS,
+    RUNNING_STATES,
     TICK_SECONDS,
     Daemon,
     Paths,
@@ -35,7 +38,7 @@ from cameralink.daemon import (
     clear_limits,
     read_lease,
 )
-from cameralink.frigate_config import proxy_secret
+from cameralink.frigate_config import FrigateConfigError, proxy_secret
 from cameralink.reolink import ApiError, AuthFailed
 from cameralink.store import CameraRecord, CameraStore, StoreError
 
@@ -57,6 +60,8 @@ class FakeSystemd:
         self.paths = paths
         self.calls = []
         self.running = set()
+        self.states = {}
+        self.failed = set()
         self.broken = False
         self.seen_at_restart = []
 
@@ -65,10 +70,17 @@ class FakeSystemd:
             raise SystemdError(f"{action} {unit}: no")
         self.calls.append((action, unit))
 
-    def is_running(self, unit):
+    def state(self, unit):
         if self.broken:
             raise SystemdError(f"is-active {unit}: no")
-        return unit in self.running
+        if unit in self.states:
+            return self.states[unit]
+        return "active" if unit in self.running else "inactive"
+
+    def is_failed(self, unit):
+        if self.broken:
+            raise SystemdError(f"is-failed {unit}: no")
+        return unit in self.failed
 
     def start(self, unit):
         self._call("start", unit)
@@ -143,6 +155,7 @@ class Node:
             frigate_config=root / "frigate" / "config.yml",
             frigate_env=root / "etc" / "frigate.env",
             state_file=root / "run" / "state.json",
+            local_proxy_secret=root / "camera-link" / "proxy.secret",
         )
         for directory in ("camera-link", "sys", "proc", "etc", "provision", "frigate", "run"):
             (root / directory).mkdir()
@@ -267,6 +280,93 @@ def test_a_missing_lease_file_is_no_lease(tmp_path):
     assert read_lease(tmp_path / "absent", NOW) is None
 
 
+def test_a_clock_step_does_not_expire_a_lease_seen_in_this_generation(live):
+    """A node with no RTC boots on an old clock, and NTP then steps it past the lease's expiry."""
+    live.daemon.tick()
+    generation = live.step.last.generation
+    live.clock_epoch = NOW + 6 * 3600
+    live.daemon.tick()
+    assert live.step.last.lease == Lease(MAC, IP)
+    assert live.step.last.generation == generation
+    assert live.state()["state"] == "adopted"
+
+
+def test_a_held_lease_survives_a_daemon_restart(live):
+    live.daemon.tick()
+    live.clock_epoch = NOW + 6 * 3600
+    live.restart_daemon()
+    live.daemon.tick()
+    assert live.step.last.lease == Lease(MAC, IP)
+
+
+def test_a_lease_dnsmasq_dropped_after_a_clock_step_is_still_held(live):
+    live.daemon.tick()
+    live.clock_epoch = NOW + 6 * 3600
+    live.paths.lease_file.write_text("")
+    live.daemon.tick()
+    assert live.step.last.lease == Lease(MAC, IP)
+
+
+def test_an_expired_lease_never_seen_in_this_generation_is_not_believed(live):
+    live.set_lease(expiry=NOW - 1)
+    live.daemon.tick()
+    assert live.step.last.lease is None
+
+
+def test_a_held_lease_ends_when_the_file_names_another_mac_even_if_expired(live):
+    live.daemon.tick()
+    live.set_lease(mac=OTHER_MAC, expiry=NOW - 1)
+    live.daemon.tick()
+    assert live.step.last.lease is None
+
+
+def test_a_held_lease_gives_way_to_another_macs_live_lease(live):
+    live.daemon.tick()
+    live.set_lease(mac=OTHER_MAC)
+    live.daemon.tick()
+    assert live.step.last.lease == Lease(OTHER_MAC, IP)
+    live.clock_epoch = NOW + 6 * 3600
+    live.daemon.tick()
+    assert live.step.last.lease == Lease(OTHER_MAC, IP)
+
+
+def test_a_carrier_change_ends_a_held_lease(live):
+    live.daemon.tick()
+    live.set_carrier(False)
+    live.daemon.tick()
+    live.set_carrier(True)
+    live.daemon.tick()  # the rising carrier's reset
+    live.set_lease(expiry=NOW - 1)
+    live.daemon.tick()
+    assert live.step.last.lease is None
+
+
+def test_a_flap_ends_a_held_lease(live):
+    live.paths.carrier_changes.write_text("4\n")
+    live.daemon.tick()
+    live.paths.carrier_changes.write_text("6\n")
+    live.daemon.tick()  # the reset
+    live.set_lease(expiry=NOW - 1)
+    live.daemon.tick()
+    assert live.step.last.lease is None
+
+
+def test_a_boot_ends_a_held_lease(live):
+    live.daemon.tick()
+    live.set_boot("boot-b")
+    live.restart_daemon()
+    live.daemon.tick()  # the boot's reset
+    live.set_lease(expiry=NOW - 1)
+    live.daemon.tick()
+    assert live.step.last.lease is None
+
+
+def test_read_lease_with_no_clock_ignores_expiry(tmp_path):
+    leases = tmp_path / "leases"
+    leases.write_text(f"{NOW - 100} {MAC} {IP} * *\n")
+    assert read_lease(leases, None) == Lease(MAC, IP)
+
+
 def test_no_carrier_means_no_camera_whatever_the_lease_file_says(live):
     live.daemon.tick()
     live.set_carrier(False)
@@ -319,6 +419,15 @@ def test_a_flap_count_appearing_or_going_is_not_a_flap(live):
     live.paths.carrier_changes.unlink()
     live.daemon.tick()
     assert live.step.last.generation == first
+
+
+def test_an_undecodable_flap_count_or_carrier_is_survived(live):
+    live.paths.carrier_changes.write_bytes(b"\xff\xfe")
+    live.daemon.tick()
+    assert live.step.last.lease == Lease(MAC, IP)
+    live.paths.carrier.write_bytes(b"\xff")
+    live.daemon.tick()
+    assert live.step.last.lease is None
 
 
 def test_lease_ip_change_bumps_the_generation(live):
@@ -617,12 +726,98 @@ def test_a_changed_config_alone_restarts_frigate_once_and_keeps_the_drawing(live
     assert rendered["cameras"]["cam-8da040"]["zones"]["gate"]["coordinates"] == drawn
 
 
+def test_the_restart_is_owed_on_disk_before_the_files_change(live, monkeypatch):
+    live.daemon.tick()
+    live.provision(node_id="cam-renamed")
+
+    def refuse(source, target):
+        raise OSError(30, "Read-only file system")
+
+    real = os.replace
+    monkeypatch.setattr(
+        os,
+        "replace",
+        lambda source, target: refuse(source, target)
+        if Path(target) == live.paths.frigate_config
+        else real(source, target),
+    )
+    live.daemon.tick()
+    assert json.loads(live.paths.link_state.read_text())["restart_owed"] is True
+
+
+def test_the_config_is_world_readable_and_replaced_whole(live):
+    live.daemon.tick()
+    assert stat.S_IMODE(live.paths.frigate_config.stat().st_mode) == 0o644
+
+
 def test_a_stopped_frigate_is_started_with_no_rewrite(live):
     live.daemon.tick()
     live.systemd.running.clear()
     live.daemon.tick()
     live.daemon.tick()
     assert live.systemd.frigate_calls() == ["restart", "start"]
+
+
+def test_a_frigate_wanted_and_down_is_reported_after_six_ticks(live):
+    live.daemon.tick()
+    live.systemd.running.clear()
+    live.systemd.states["frigate.service"] = "failed"
+    for _ in range(FRIGATE_DOWN_TICKS - 1):
+        live.daemon.tick()
+        assert live.state()["reason"] is None
+    live.daemon.tick()
+    state = live.state()
+    assert state["state"] == "adopted"
+    assert "Frigate is wanted but not running" in state["reason"]
+    assert FRIGATE_DOWN_TICKS == 6
+    del live.systemd.states["frigate.service"]
+    live.systemd.running.add("frigate.service")
+    live.daemon.tick()
+    assert live.state()["reason"] is None
+
+
+def test_a_frigate_stuck_activating_is_reported_and_not_started_again(live):
+    """A missing /dev/hailo0 never gets past activating."""
+    live.daemon.tick()
+    live.systemd.states["frigate.service"] = "activating"
+    for _ in range(FRIGATE_DOWN_TICKS):
+        live.daemon.tick()
+    assert "Frigate is wanted but not running" in live.state()["reason"]
+    assert live.systemd.frigate_calls() == ["restart"]
+
+
+def test_a_failed_firewall_is_named_as_the_cause(live):
+    live.daemon.tick()
+    live.systemd.states["frigate.service"] = "failed"
+    live.systemd.failed.add("nftables.service")
+    for _ in range(FRIGATE_DOWN_TICKS):
+        live.daemon.tick()
+    assert "nftables.service" in live.state()["reason"]
+    assert live.state()["state"] == "adopted"
+
+
+def test_the_down_count_starts_again_after_a_restart_request(live):
+    live.daemon.tick()
+    live.systemd.states["frigate.service"] = "failed"
+    for _ in range(FRIGATE_DOWN_TICKS - 1):
+        live.daemon.tick()
+    live.provision(node_id="cam-renamed")
+    live.daemon.tick()
+    assert live.state()["reason"] is None
+    live.daemon.tick()
+    assert live.state()["reason"] is None
+
+
+def test_the_down_count_starts_again_when_frigate_is_no_longer_wanted(live):
+    live.daemon.tick()
+    live.systemd.states["frigate.service"] = "failed"
+    for _ in range(FRIGATE_DOWN_TICKS - 1):
+        live.daemon.tick()
+    live.step.state = LinkState.ADOPTING
+    live.daemon.tick()
+    live.step.state = LinkState.ADOPTED
+    live.daemon.tick()
+    assert live.state()["reason"] is None
 
 
 def test_a_restart_lost_to_a_crash_is_still_owed(live):
@@ -720,6 +915,38 @@ def test_a_password_pasted_into_a_rejected_field_is_not_reported(live):
     assert live.state()["reason"]
 
 
+def test_relay_user_is_named_and_never_quoted(live):
+    live.provision(broker={"username": "pa\\ss word1", "password": "other-pass"})
+    live.daemon.tick()
+    reason = live.state()["reason"]
+    assert "relay_user" in reason
+    assert "ss word1" not in reason
+
+
+def test_the_camera_password_in_a_rejected_zone_name_is_not_reported(live):
+    live.provision(covered_zones=[f"a b {CAMERA_PASSWORD}"])
+    live.daemon.tick()
+    reason = live.state()["reason"]
+    assert CAMERA_PASSWORD not in reason
+    assert "Frigate's config" in reason
+
+
+def test_a_very_short_password_hides_a_quoted_reason_but_says_what_failed(live):
+    live.provision(
+        covered_zones=["bad zone!"], broker={"username": "kit1", "password": "a"}
+    )
+    live.daemon.tick()
+    assert "Frigate's config" in live.state()["reason"]
+
+
+def test_a_very_short_password_does_not_hide_reasons_with_no_settings_in_them(live):
+    live.provision(broker={"username": "kit1", "password": "e"})
+    live.daemon.tick()
+    live.step.state = LinkState.NEEDS_RESET
+    live.daemon.tick()
+    assert live.state()["reason"] == "the camera needs a factory reset"
+
+
 def test_an_unparseable_saved_config_is_kept_since_it_may_hold_drawings(live):
     live.daemon.tick()
     live.paths.frigate_config.write_text("cameras: [unclosed\n")
@@ -764,9 +991,7 @@ def test_an_unwritable_config_is_reported_and_retried(live, monkeypatch):
 # When Frigate must stop, and when it must not
 
 
-@pytest.mark.parametrize(
-    "state", [LinkState.FAILED, LinkState.ADOPTING, LinkState.NEEDS_RESET]
-)
+@pytest.mark.parametrize("state", [LinkState.FAILED, LinkState.ADOPTING])
 def test_the_same_camera_with_a_known_password_keeps_frigate(live, state):
     live.daemon.tick()
     live.step.state = state
@@ -780,6 +1005,56 @@ def test_an_unplugged_camera_keeps_frigate(live):
     live.daemon.tick()
     assert live.systemd.frigate_calls() == ["restart"]
     assert "frigate.service" in live.systemd.running
+
+
+def test_any_needs_reset_stops_frigate_even_with_a_saved_password(live):
+    live.daemon.tick()
+    live.step.state = LinkState.NEEDS_RESET
+    live.daemon.tick()
+    live.daemon.tick()
+    assert live.systemd.frigate_calls() == ["restart", "stop"]
+    assert CAMERA_PASSWORD == CameraStore(live.paths.store).load(MAC).password
+
+
+def test_frigate_comes_back_after_needs_reset_with_no_rewrite(live):
+    live.daemon.tick()
+    live.step.state = LinkState.NEEDS_RESET
+    live.daemon.tick()
+    live.step.state = LinkState.ADOPTED
+    live.daemon.tick()
+    assert live.systemd.frigate_calls() == ["restart", "stop", "start"]
+
+
+@pytest.mark.parametrize("remain_times", [7, 2])
+def test_a_refused_saved_password_stops_frigate_with_the_real_step(live, remain_times):
+    """Frigate's ffmpeg would go on retrying the password that adoption just stopped using."""
+    live.daemon.tick()
+    generation = json.loads(live.paths.link_state.read_text())["generation"]
+    live.seed(settle_key=f"{MAC}/{generation}", settle_since=-1000.0, attempted=None, phase=None)
+    logins = []
+
+    class Camera:
+        def __init__(self, ip):
+            pass
+
+        def login(self, user, password):
+            logins.append(password)
+            raise AuthFailed("no", remain_times=remain_times)
+
+        def logout(self):
+            pass
+
+    live.daemon = Daemon(
+        live.paths,
+        live.systemd,
+        step_fn=functools.partial(step, probe=lambda host, port: True),
+        clock=live.clock,
+        client_factory=Camera,
+    )
+    live.daemon.tick()
+    assert live.state()["state"] == "needs_reset"
+    assert logins == [CAMERA_PASSWORD]
+    assert live.systemd.frigate_calls() == ["restart", "stop"]
 
 
 def test_needs_reset_with_no_known_password_stops_frigate(live):
@@ -1002,7 +1277,7 @@ def test_no_provisioning_is_named_in_the_state_file(node):
     node.settle_boot()
     node.set_lease()
     node.daemon.tick()
-    assert "provision" in node.state()["reason"]
+    assert node.state()["reason"] == "not provisioned, so Frigate's config is not updated"
 
 
 def test_retry_after_reports_the_signature_limit(live):
@@ -1019,6 +1294,15 @@ def test_retry_after_reports_the_rolling_cap_at_its_oldest_counted_stamp(live):
     live.step.state = LinkState.NEEDS_RESET
     live.daemon.tick()
     assert live.state()["retry_after"] == min(stamps) + FAILURE_WINDOW_SECONDS
+
+
+def test_retry_after_with_more_stamps_than_the_cap_waits_for_enough_to_age_out(live):
+    stamps = tuple(NOW - 100.0 * (i + 1) for i in range(FAILURE_CAP + 2))
+    live.seed(failures=stamps)
+    live.step.state = LinkState.NEEDS_RESET
+    live.daemon.tick()
+    counted = sorted(stamps)[-FAILURE_CAP]
+    assert live.state()["retry_after"] == counted + FAILURE_WINDOW_SECONDS
 
 
 def test_retry_after_takes_the_later_of_the_limits(live):
@@ -1207,9 +1491,14 @@ def test_clear_limits_says_it_is_waiting_while_blocked(tmp_path):
         assert printed.wait(10)
         assert "waiting" in lines[0].lower()
         assert CameraStore(path).load().failures  # it has written nothing yet
+        # A copy read before the lock would now be stale, and its save refused.
+        time.sleep(0.2)
+        holder.save(replace(holder.load(), phase="failed"))
     worker.join(10)
     assert not worker.is_alive()
-    assert CameraStore(path).load().failures == ()
+    after = CameraStore(path).load()
+    assert after.failures == ()
+    assert after.phase == "failed"
 
 
 def test_clear_limits_with_no_record_is_fine(tmp_path, capsys):
@@ -1248,6 +1537,128 @@ def test_proxy_secret_is_the_labelled_hash_of_the_broker_password():
     )
 
 
+def test_there_is_no_proxy_secret_for_an_empty_password():
+    with pytest.raises(FrigateConfigError):
+        proxy_secret("")
+
+
+# An anonymous broker: nothing to derive from, and the label alone is a public constant.
+
+LABEL_ONLY = hashlib.sha256(b"black-relay-frigate-proxy:").hexdigest()
+
+
+def provision_anonymous(node):
+    node.provision(broker={"username": "", "password": ""})
+
+
+def env_secret(node):
+    for line in node.paths.frigate_env.read_text().splitlines():
+        if line.startswith("FRIGATE_PROXY_SECRET="):
+            return line.split("=", 1)[1]
+    raise AssertionError("no proxy secret")
+
+
+def test_an_anonymous_broker_gets_a_random_secret_stored_root_only(live):
+    provision_anonymous(live)
+    live.daemon.tick()
+    secret = env_secret(live)
+    assert re.fullmatch(r"[0-9a-f]{64}", secret)
+    assert live.paths.local_proxy_secret.read_text().strip() == secret
+    assert stat.S_IMODE(live.paths.local_proxy_secret.stat().st_mode) == 0o600
+    assert live.systemd.frigate_calls() == ["restart"]
+
+
+def test_the_label_only_constant_never_appears(live):
+    provision_anonymous(live)
+    live.daemon.tick()
+    live.daemon.tick()
+    assert LABEL_ONLY not in all_files_text(live.root)
+
+
+def test_the_random_secret_is_reused_with_no_restart(live):
+    provision_anonymous(live)
+    live.daemon.tick()
+    secret = env_secret(live)
+    live.daemon.tick()
+    live.restart_daemon()
+    live.daemon.tick()
+    assert env_secret(live) == secret
+    assert live.systemd.frigate_calls() == ["restart"]
+
+
+def test_two_nodes_get_different_random_secrets(tmp_path):
+    secrets = []
+    for name in ("one", "two"):
+        root = tmp_path / name
+        root.mkdir()
+        node = Node(root)
+        provision_anonymous(node)
+        node.settle_boot()
+        node.set_lease()
+        node.daemon.tick()
+        secrets.append(env_secret(node))
+    assert secrets[0] != secrets[1]
+
+
+@pytest.mark.parametrize("content", ["", "short\n", "g" * 64])
+def test_a_damaged_random_secret_is_replaced_with_a_new_random_one(live, content):
+    live.paths.local_proxy_secret.write_text(content)
+    provision_anonymous(live)
+    live.daemon.tick()
+    secret = env_secret(live)
+    assert re.fullmatch(r"[0-9a-f]{64}", secret)
+    assert secret != LABEL_ONLY
+    assert live.paths.local_proxy_secret.read_text().strip() == secret
+
+
+def test_a_broker_with_a_password_writes_no_random_secret(live):
+    live.daemon.tick()
+    assert not live.paths.local_proxy_secret.exists()
+    assert env_secret(live) == proxy_secret(RELAY_PASSWORD)
+
+
+def test_a_random_secret_that_cannot_be_saved_starts_nothing(live, monkeypatch):
+    provision_anonymous(live)
+    real = os.replace
+
+    def refuse(source, target):
+        if Path(target) == live.paths.local_proxy_secret:
+            raise OSError(28, "No space left on device")
+        real(source, target)
+
+    monkeypatch.setattr(os, "replace", refuse)
+    live.daemon.tick()
+    assert live.systemd.frigate_calls() == []
+    assert not live.paths.frigate_env.exists()
+    assert live.state()["reason"] != "central_proxy_unavailable"
+
+
+def test_an_anonymous_broker_is_reported_when_nothing_matters_more(live):
+    provision_anonymous(live)
+    live.daemon.tick()
+    assert live.state()["reason"] == "central_proxy_unavailable"
+    assert live.state()["state"] == "adopted"
+    secret = env_secret(live)
+    assert secret not in live.paths.state_file.read_text()
+
+
+def test_more_important_reasons_come_before_the_anonymous_one(live):
+    provision_anonymous(live)
+    live.daemon.tick()
+    live.step.state = LinkState.NEEDS_RESET
+    live.daemon.tick()
+    assert live.state()["reason"] == "the camera needs a factory reset"
+    live.step.state = LinkState.ADOPTED
+    live.provision(broker={"username": "", "password": ""}, covered_zones=["bad zone!"])
+    live.daemon.tick()
+    assert "zone" in live.state()["reason"]
+
+
+def test_a_broker_with_a_password_never_says_the_proxy_is_unavailable(live):
+    live.daemon.tick()
+    assert live.state()["reason"] is None
+
+
 # systemctl
 
 
@@ -1272,6 +1683,7 @@ class Runner:
         ("active\n", 0, True),
         ("activating\n", 3, True),
         ("reloading\n", 0, True),
+        ("refreshing\n", 0, True),
         ("inactive\n", 3, False),
         ("failed\n", 3, False),
         ("deactivating\n", 3, False),
@@ -1279,8 +1691,19 @@ class Runner:
 )
 def test_systemctl_reads_is_active(stdout, returncode, expected):
     runner = Runner(stdout, returncode)
-    assert Systemctl(run=runner).is_running("frigate.service") is expected
+    assert (Systemctl(run=runner).state("frigate.service") in RUNNING_STATES) is expected
+    assert Systemctl(run=runner).state("frigate.service") == stdout.strip()
     assert runner.calls[0][-2:] == ["is-active", "frigate.service"]
+
+
+@pytest.mark.parametrize(
+    ("stdout", "returncode", "expected"),
+    [("failed\n", 0, True), ("active\n", 1, False), ("inactive\n", 1, False)],
+)
+def test_systemctl_reads_is_failed(stdout, returncode, expected):
+    runner = Runner(stdout, returncode)
+    assert Systemctl(run=runner).is_failed("nftables.service") is expected
+    assert runner.calls[0][-2:] == ["is-failed", "nftables.service"]
 
 
 @pytest.mark.parametrize(
@@ -1295,7 +1718,7 @@ def test_systemctl_reads_is_active(stdout, returncode, expected):
 )
 def test_systemctl_trouble_is_a_systemd_error(runner):
     with pytest.raises(SystemdError):
-        Systemctl(run=runner).is_running("frigate.service")
+        Systemctl(run=runner).state("frigate.service")
 
 
 def test_frigate_control_does_not_wait_on_the_job():
@@ -1318,55 +1741,100 @@ def test_a_refused_action_is_a_systemd_error():
 # Units
 
 
-def unit(name):
-    parser = configparser.ConfigParser(interpolation=None, strict=False)
-    parser.optionxform = str
-    parser.read_string((UNITS / name).read_text().replace("\\\n", " "))
-    return parser
+def directives(name):
+    """Every directive of a unit, by section, with repeats kept in order."""
+    sections = {}
+    section = None
+    text = re.sub(r"\\\n\s*", " ", (UNITS / name).read_text())
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("["):
+            section = sections.setdefault(line.strip("[]"), {})
+        else:
+            key, value = line.split("=", 1)
+            section.setdefault(key, []).append(value)
+    return sections
 
 
-def words(text):
-    return text.split()
+SANDBOX = {
+    "NoNewPrivileges": ["yes"],
+    "ProtectSystem": ["strict"],
+    "ProtectHome": ["yes"],
+    "PrivateTmp": ["yes"],
+    "PrivateDevices": ["yes"],
+    "ProtectClock": ["yes"],
+    "ProtectControlGroups": ["yes"],
+    "ProtectKernelLogs": ["yes"],
+    "ProtectKernelModules": ["yes"],
+    "ProtectKernelTunables": ["yes"],
+    "LockPersonality": ["yes"],
+    "MemoryDenyWriteExecute": ["yes"],
+    "RestrictNamespaces": ["yes"],
+    "RestrictRealtime": ["yes"],
+    "RestrictSUIDSGID": ["yes"],
+    "SystemCallArchitectures": ["native"],
+    "SystemCallFilter": ["@system-service"],
+    "SystemCallErrorNumber": ["EPERM"],
+}
+DOCS = ["file:/opt/black-relay/ops/README.md"]
 
 
-def test_frigate_unit_runs_the_pinned_image_with_only_what_it_needs():
-    frigate = unit("frigate.service")
-    argv = words(frigate["Service"]["ExecStart"])
-    assert argv[:2] == ["/usr/bin/docker", "run"]
-    assert argv[-1] == (
-        "ghcr.io/blakeblackshear/frigate:0.18.2-standard-arm64"
-        "@sha256:4a854373c0fd4a8f550518758e34b929be0b423085bb569bb232390d128fa4ef"
-    )
-    for wanted in (
-        "--network host",
-        "--device /dev/hailo0",
+def test_frigate_unit_is_exactly_what_it_needs():
+    frigate = directives("frigate.service")
+    service = frigate["Service"]
+    assert service.pop("ExecStart")[0].split() == [
+        "/usr/bin/docker",
+        "run",
+        "--rm",
+        "--name",
+        "frigate",
+        "--network",
+        "host",
+        "--device",
+        "/dev/hailo0",
         "--shm-size=128m",
-        "--tmpfs /tmp/cache:size=256m",
-        "-v /var/lib/frigate/config:/config",
-        "-v /var/lib/frigate/media:/media/frigate",
-        "-v /etc/localtime:/etc/localtime:ro",
-        "--env-file /etc/camerabridge/frigate.env",
-    ):
-        assert wanted in " ".join(argv)
-    assert "--privileged" not in argv
-    assert sum(item == "--device" for item in argv) == 1
+        "--tmpfs",
+        "/tmp/cache:size=256m",
+        "-v",
+        "/var/lib/frigate/config:/config",
+        "-v",
+        "/var/lib/frigate/media:/media/frigate",
+        "-v",
+        "/etc/localtime:/etc/localtime:ro",
+        "--env-file",
+        "/etc/camerabridge/frigate.env",
+        "ghcr.io/blakeblackshear/frigate:0.18.2-standard-arm64"
+        "@sha256:4a854373c0fd4a8f550518758e34b929be0b423085bb569bb232390d128fa4ef",
+    ]
+    assert service == {
+        "Type": ["simple"],
+        # The table first and with no "-": nftables stays active even with its rules flushed.
+        "ExecStartPre": [
+            "/bin/sh -c '/usr/sbin/nft list table inet black_relay >/dev/null'",
+            "-/usr/bin/docker rm -f frigate",
+        ],
+        "ExecStop": ["-/usr/bin/docker stop --timeout 30 frigate"],
+        "Restart": ["always"],
+        "RestartSec": ["5"],
+        "TimeoutStopSec": ["45"],
+    }
+    assert int(service["TimeoutStopSec"][0]) > 30  # longer than docker stop's own timeout
+    assert frigate["Unit"] == {
+        "Description": ["Frigate NVR for the Black Relay camera node"],
+        "Documentation": DOCS,
+        "Requires": ["nftables.service docker.service"],
+        "After": ["nftables.service docker.service"],
+        "StartLimitIntervalSec": ["0"],
+    }
+    assert set(frigate) == {"Unit", "Service"}  # no [Install]: only the daemon starts it
 
 
-def test_frigate_unit_needs_its_firewall_and_is_only_started_by_the_daemon():
-    frigate = unit("frigate.service")
-    for field in ("Requires", "After"):
-        assert set(words(frigate["Unit"][field])) >= {"nftables.service", "docker.service"}
-    assert frigate["Unit"]["StartLimitIntervalSec"] == "0"
-    assert frigate["Service"]["Restart"] == "always"
-    assert "rm -f frigate" in frigate["Service"]["ExecStartPre"]
-    assert "Install" not in frigate
-
-
-def test_dhcp_unit_runs_the_sequence_proven_on_kit_1():
-    dhcp = unit("camera-link-dhcp.service")
-    argv = words(dhcp["Service"]["ExecStart"])
-    assert argv[0] == "/usr/sbin/dnsmasq"
-    for flag in (
+def test_dhcp_unit_is_the_sequence_proven_on_kit_1_with_exact_hardening():
+    dhcp = directives("camera-link-dhcp.service")
+    service = dhcp["Service"]
+    assert service.pop("ExecStart")[0].split() == [
+        "/usr/sbin/dnsmasq",
         "--conf-file=/dev/null",
         "--port=0",
         "--bind-interfaces",
@@ -1377,45 +1845,72 @@ def test_dhcp_unit_runs_the_sequence_proven_on_kit_1():
         "--dhcp-option=6",
         "--dhcp-leasefile=/var/lib/camera-link/dnsmasq.leases",
         "--keep-in-foreground",
-    ):
-        assert flag in argv
-    assert "wlan0" not in argv
-    assert dhcp["Service"]["StateDirectory"] == "camera-link"
-    assert dhcp["Service"]["StateDirectoryMode"] == "0700"
-    assert dhcp["Service"]["Restart"] == "always"
-    assert "AF_PACKET" in dhcp["Service"]["RestrictAddressFamilies"]
+        "--pid-file=/run/camera-link-dhcp/dnsmasq.pid",
+    ]
+    assert service == {
+        "Type": ["simple"],
+        "Restart": ["always"],
+        "RestartSec": ["5"],
+        "RestartSteps": ["5"],
+        "RestartMaxDelaySec": ["60"],
+        "UMask": ["0077"],
+        "StateDirectory": ["camera-link"],
+        "StateDirectoryMode": ["0700"],
+        "RuntimeDirectory": ["camera-link-dhcp"],
+        "RuntimeDirectoryMode": ["0755"],
+        "CapabilityBoundingSet": [
+            "CAP_CHOWN CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SETGID CAP_SETUID"
+        ],
+        "RestrictAddressFamilies": ["AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET"],
+        **SANDBOX,
+    }
+    assert dhcp["Unit"] == {
+        "Description": ["Black Relay camera link DHCP (one address on eth0, no gateway, no DNS)"],
+        "Documentation": DOCS,
+        "After": ["NetworkManager.service nftables.service"],
+        "Wants": ["NetworkManager.service nftables.service"],
+        "StartLimitIntervalSec": ["0"],
+    }
+    assert dhcp["Install"] == {"WantedBy": ["multi-user.target"]}
 
 
-def test_link_unit_is_ordered_and_can_read_bridge_yaml_and_reach_systemd():
-    link = unit("camera-link.service")
-    after = words(link["Unit"]["After"])
-    assert {"NetworkManager.service", "nftables.service", "camera-link-dhcp.service"} <= set(after)
-    service = link["Service"]
-    assert service["Restart"] == "always"
-    assert link["Unit"]["StartLimitIntervalSec"] == "0"
-    assert service["StateDirectory"] == "camera-link"
-    assert service["StateDirectoryMode"] == "0700"
-    assert service["RuntimeDirectory"] == "camera-link"
-    assert service["RuntimeDirectoryMode"] == "0755"
-    assert "User" not in service
-    # bridge.yaml is 0600 and owned by camerabridge, so root needs this to read it.
-    assert "CAP_DAC_READ_SEARCH" in service["CapabilityBoundingSet"]
-    # systemctl reaches systemd over /run/systemd/private, a unix socket.
-    assert "AF_UNIX" in service["RestrictAddressFamilies"]
-    assert "PrivateNetwork" not in service
-    assert "InaccessiblePaths" not in service
-    assert "IPAddressDeny" not in service
-    # Everything it writes outside its state and runtime directories.
-    assert set(words(service["ReadWritePaths"])) == {"/etc/camerabridge", "/var/lib/frigate/config"}
-    assert service["ExecStart"].endswith("camera-link run")
-    # Long enough to finish a tick with the 120 s enable_services timeout in it.
-    assert int(service["TimeoutStopSec"]) >= 130
-
-
-def test_units_do_not_tie_the_daemon_to_frigate():
-    text = (UNITS / "camera-link.service").read_text()
-    assert not re.search(r"^(Requires|BindsTo|PartOf|Wants)=.*frigate", text, re.MULTILINE)
-    assert not re.search(r"^(BindsTo|PartOf)=.*", (UNITS / "frigate.service").read_text(), re.MULTILINE)
+def test_link_unit_has_exact_hardening_and_no_tie_to_frigate():
+    link = directives("camera-link.service")
+    assert link["Service"] == {
+        "Type": ["simple"],
+        # "+" because ReadWritePaths needs the directory before the sandbox is built.
+        "ExecStartPre": [
+            "+/usr/bin/install -d -m 0750 /var/lib/frigate /var/lib/frigate/config "
+            "/var/lib/frigate/media"
+        ],
+        "ExecStart": ["/opt/black-relay/cameralink/bin/camera-link run"],
+        "Restart": ["always"],
+        "RestartSec": ["5"],
+        "TimeoutStopSec": ["140"],  # longer than a tick with its 120 s enable_services timeout
+        "UMask": ["0077"],
+        # bridge.yaml is 0600 and owned by camerabridge, so root needs this to read it.
+        "CapabilityBoundingSet": ["CAP_DAC_READ_SEARCH"],
+        "StateDirectory": ["camera-link"],
+        "StateDirectoryMode": ["0700"],
+        "RuntimeDirectory": ["camera-link"],
+        "RuntimeDirectoryMode": ["0755"],
+        "ConfigurationDirectory": ["camerabridge"],
+        "ConfigurationDirectoryMode": ["0755"],
+        "ReadWritePaths": ["/etc/camerabridge /var/lib/frigate/config"],
+        # systemctl reaches systemd over /run/systemd/private, a unix socket.
+        "RestrictAddressFamilies": ["AF_UNIX AF_INET AF_INET6 AF_NETLINK"],
+        **SANDBOX,
+    }
+    assert link["Unit"] == {
+        "Description": [
+            "Black Relay camera link (adopts the camera, renders Frigate's config, runs Frigate)"
+        ],
+        "Documentation": DOCS,
+        "After": ["NetworkManager.service nftables.service camera-link-dhcp.service"],
+        "Wants": ["NetworkManager.service nftables.service camera-link-dhcp.service"],
+        "StartLimitIntervalSec": ["0"],
+    }
+    assert link["Install"] == {"WantedBy": ["multi-user.target"]}
 
 
 def test_camera_profile_is_static_with_no_route():

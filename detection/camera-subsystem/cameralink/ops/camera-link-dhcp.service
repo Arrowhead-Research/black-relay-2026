@@ -10,14 +10,18 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-# With --bind-interfaces it exits while eth0 has no address, as with the cable out, so
-# Restart=always is also what brings it back when the link does.
+# With --bind-interfaces it exits at start while eth0 has no address, as on a boot with the cable
+# out. Once running it survives the address going and coming back. So Restart=always is what brings
+# it up when the link does, and the backoff keeps a node with no camera from filling the journal.
+# camera-link stops and starts it on a rising carrier, which is meant not to wait for the delay.
 ExecStart=/usr/sbin/dnsmasq --conf-file=/dev/null --port=0 --bind-interfaces --interface=eth0 \
     --except-interface=lo --dhcp-range=10.77.0.10,10.77.0.10,255.255.255.0,1h \
     --dhcp-option=3 --dhcp-option=6 --dhcp-leasefile=/var/lib/camera-link/dnsmasq.leases \
     --keep-in-foreground --pid-file=/run/camera-link-dhcp/dnsmasq.pid
 Restart=always
 RestartSec=5
+RestartSteps=5
+RestartMaxDelaySec=60
 UMask=0077
 
 # Shared with camera-link, which reads the leases and clears them on a boot or a new link.

@@ -10,6 +10,8 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
+# nftables stays active even with its rules flushed, so Requires= does not prove the table is there.
+ExecStartPre=/bin/sh -c '/usr/sbin/nft list table inet black_relay >/dev/null'
 # A container left by a power cut would otherwise hold the name.
 ExecStartPre=-/usr/bin/docker rm -f frigate
 # The model is /var/lib/frigate/config/model_cache/yolov6n.hef on the host, because the /config

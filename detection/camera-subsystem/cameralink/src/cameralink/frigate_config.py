@@ -68,7 +68,10 @@ class FrigateConfigError(Exception):
 
 def proxy_secret(broker_password: str) -> str:
     """The secret Frigate shares with the central API. Both ends hold the broker password, and
-    the central API must derive this same value, so changing it changes the secret on both."""
+    the central API must derive this same value, so changing it changes the secret on both. No
+    password means no secret: the label alone would give a constant that anyone can compute."""
+    if not broker_password:
+        raise FrigateConfigError("no proxy secret can be derived from an empty broker password")
     return hashlib.sha256(b"black-relay-frigate-proxy:" + broker_password.encode()).hexdigest()
 
 
@@ -211,7 +214,8 @@ def _rtsp_section(relay_user: Any) -> dict[str, str]:
         return {"listen": "127.0.0.1:8554"}
     if not isinstance(relay_user, str) or not _RELAY_USER_RE.fullmatch(relay_user):
         raise FrigateConfigError(
-            f"relay_user {relay_user!r} must use only letters, digits and . _ ~ @ + -"
+            # Not quoted: it is a credential field, and the message reaches a world-readable file.
+            "relay_user must use only letters, digits and . _ ~ @ + -"
         )
     return {"username": relay_user, "password": f"{{{RELAY_PASSWORD_ENV}}}"}
 

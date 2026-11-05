@@ -14,6 +14,10 @@ swapped camera gets "no address available" for up to an hour (measured with thes
 why a boot or a rising carrier wipes the lease and restarts dnsmasq, and why no lease is believed
 until that is done: at those moments the file may describe a camera that has gone.
 
+A node with no RTC boots on an old clock and NTP later steps it, which makes a live lease look
+expired. So the expiry only decides whether to believe a lease not yet seen in this generation.
+One already seen is held until the generation changes or the file names another MAC.
+
 Errors from the camera, the store, render and systemd end the tick's work and are reported. Any
 other exception is a bug and is left to crash into ``Restart=always``. The state file lives in the
 service's runtime directory, so it goes too, and nothing can read a stale state as current.
@@ -24,6 +28,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, fields, replace
@@ -47,13 +52,15 @@ from cameralink.store import CameraRecord, CameraStore, StoreError
 _log = logging.getLogger(__name__)
 
 TICK_SECONDS = 5
+FRIGATE_DOWN_TICKS = 6
 FRIGATE_UNIT = "frigate.service"
 DHCP_UNIT = "camera-link-dhcp.service"
+FIREWALL_UNIT = "nftables.service"
 
 _SYSTEMCTL = "/usr/bin/systemctl"
 _SYSTEMCTL_TIMEOUT = 30
-_RUNNING = frozenset({"active", "activating", "reloading", "refreshing"})
-_NOT_RUNNING = frozenset({"inactive", "failed", "deactivating"})
+RUNNING_STATES = frozenset({"active", "activating", "reloading", "refreshing"})
+_NOT_RUNNING_STATES = frozenset({"inactive", "failed", "deactivating"})
 _RUNNABLE = frozenset({LinkState.ADOPTED, LinkState.ADOPTED_PENDING_SETTINGS})
 _LIMITED = frozenset(
     {LinkState.ADOPTED_PENDING_SETTINGS, LinkState.NEEDS_RESET, LinkState.FAILED}
@@ -61,7 +68,12 @@ _LIMITED = frozenset(
 _MAC_RE = re.compile(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}")
 # Frigate's files are from a camera nobody can name now, so any camera differs from it.
 _UNKNOWN_MAC = "unknown"
-_HIDDEN_REASON = "a setting was rejected, and its message would have shown a secret"
+_HIDDEN_REASON = (
+    "Frigate's config could not be rendered: a setting was rejected, and the message is hidden "
+    "because it would show a secret"
+)
+_NO_CENTRAL_PROXY = "central_proxy_unavailable"
+_LOCAL_SECRET_RE = re.compile(rb"[0-9a-f]{64}\s*")
 
 
 class SystemdError(Exception):
@@ -89,6 +101,7 @@ class Paths:
     frigate_config: Path = Path("/var/lib/frigate/config/config.yml")
     frigate_env: Path = Path("/etc/camerabridge/frigate.env")
     state_file: Path = Path("/run/camera-link/state.json")
+    local_proxy_secret: Path = Path("/var/lib/camera-link/proxy.secret")
 
 
 class Systemctl:
@@ -98,13 +111,14 @@ class Systemctl:
     def __init__(self, run=subprocess.run):
         self._run = run
 
-    def is_running(self, unit: str) -> bool:
+    def state(self, unit: str) -> str:
         state = self._systemctl("is-active", unit).stdout.strip()
-        if state in _RUNNING:
-            return True
-        if state in _NOT_RUNNING:
-            return False
+        if state in RUNNING_STATES or state in _NOT_RUNNING_STATES:
+            return state
         raise SystemdError(f"{unit}: unexpected state from systemctl")
+
+    def is_failed(self, unit: str) -> bool:
+        return self._systemctl("is-failed", unit).stdout.strip() == "failed"
 
     def start(self, unit: str) -> None:
         self._act("--no-block", "start", unit)
@@ -149,6 +163,7 @@ class _Link:
     carrier: bool | None = None
     carrier_changes: str | None = None  # the kernel's count, which sees a flap between ticks
     ip: str | None = None  # the last lease's IP, kept while there is no lease
+    held_mac: str | None = None  # the MAC of the lease seen in this generation
     frigate_mac: str | None = None  # the camera whose password is in Frigate's env file
     restart_owed: bool = False  # the files are ahead of the running Frigate
     dhcp_reset_owed: bool = False  # the lease file may describe a camera that has gone
@@ -169,9 +184,10 @@ class _Provisioning:
         return f"_Provisioning({self.node_id!r})"
 
 
-def read_lease(path: Path, now: float) -> Lease | None:
-    """The newest lease in a dnsmasq lease file that has not ended. Lines that make no sense
-    are skipped. An expiry of 0 is how dnsmasq writes a lease that never ends."""
+def read_lease(path: Path, now: float | None) -> Lease | None:
+    """The newest lease in a dnsmasq lease file that has not ended, or of any age if ``now`` is
+    None. Lines that make no sense are skipped. An expiry of 0 is how dnsmasq writes a lease that
+    never ends."""
     try:
         text = path.read_text(encoding="ascii", errors="replace")
     except OSError:
@@ -184,7 +200,7 @@ def read_lease(path: Path, now: float) -> Lease | None:
             continue
         expiry = float(fields[0]) or float("inf")
         mac = fields[1].lower()
-        if expiry <= now or not _MAC_RE.fullmatch(mac) or not _is_ipv4(fields[2]):
+        if (now is not None and expiry <= now) or not _MAC_RE.fullmatch(mac) or not _is_ipv4(fields[2]):
             continue
         if expiry > best_expiry:
             best, best_expiry = Lease(mac, fields[2]), expiry
@@ -234,6 +250,7 @@ class Daemon:
         self._store = CameraStore(paths.store)  # one per thread: its lock is per object
         self._link = self._load_link()
         self._published = None
+        self._frigate_down_ticks = 0
 
     def run(self, stop) -> None:
         while not stop.is_set():
@@ -245,7 +262,7 @@ class Daemon:
         try:
             lease = self._observe_link(problems)
         except LinkStateError as err:
-            self._publish(LinkState.FAILED, None, None, str(err), None)
+            self._publish(LinkState.FAILED, None, None, str(err))
             return
 
         provisioning = None
@@ -277,14 +294,16 @@ class Daemon:
             problems.append(f"camera error: {type(err).__name__}")
 
         try:
-            problem = self._drive_frigate(state, mac, record, provisioning, bool(problems))
+            problem = self._drive_frigate(state, mac, record, provisioning)
         except (SystemdError, LinkStateError) as err:
             problem = str(err)
         if problem:
             problems.append(problem)
         if state is LinkState.NEEDS_RESET:
             problems.append("the camera needs a factory reset")
-        self._publish(state, mac, record, problems[0] if problems else None, provisioning)
+        if provisioning is not None and not provisioning.relay_password:
+            problems.append(_NO_CENTRAL_PROXY)
+        self._publish(state, mac, record, problems[0] if problems else None)
 
     # The link
 
@@ -306,7 +325,6 @@ class Daemon:
         return _Link(
             generation=int(self._clock().timestamp()),
             frigate_mac=_UNKNOWN_MAC,
-            restart_owed=True,
             dhcp_reset_owed=True,
         )
 
@@ -329,6 +347,7 @@ class Daemon:
                 boot_id=boot_id,
                 carrier=carrier,
                 carrier_changes=flaps,
+                held_mac=None,
                 dhcp_reset_owed=link.dhcp_reset_owed or booted or (changed and carrier),
             )
         elif flaps != link.carrier_changes:
@@ -339,11 +358,26 @@ class Daemon:
             self._reset_dhcp(problems)
             return None
 
-        lease = read_lease(self._paths.lease_file, self._clock().timestamp())
-        if lease is not None and lease.ip != self._link.ip:
-            bump = 1 if self._link.ip is not None else 0
-            self._save_link(generation=self._link.generation + bump, ip=lease.ip)
+        lease = self._current_lease()
+        if lease is not None and (lease.ip, lease.mac) != (self._link.ip, self._link.held_mac):
+            moved = self._link.ip is not None and lease.ip != self._link.ip
+            self._save_link(
+                generation=self._link.generation + (1 if moved else 0),
+                ip=lease.ip,
+                held_mac=lease.mac,
+            )
         return lease
+
+    def _current_lease(self) -> Lease | None:
+        lease = read_lease(self._paths.lease_file, self._clock().timestamp())
+        held = self._link.held_mac
+        if lease is not None or held is None:
+            return lease
+        named = read_lease(self._paths.lease_file, None)
+        if named is not None and named.mac != held:
+            self._save_link(held_mac=None)
+            return None
+        return Lease(held, self._link.ip)
 
     def _reset_dhcp(self, problems: list) -> None:
         failure = None
@@ -378,38 +412,38 @@ class Daemon:
         mac: str | None,
         record: CameraRecord | None,
         provisioning: _Provisioning | None,
-        has_problem: bool,
     ) -> str | None:
         problem = None
-        if state in _RUNNABLE and not has_problem:
+        if state in _RUNNABLE:
             if provisioning is None:
-                problem = "not provisioned yet, so Frigate is not started"
+                problem = "not provisioned, so Frigate's config is not updated"
             else:
                 try:
-                    self._apply_config(mac, record, provisioning)
-                    return None
+                    return self._apply_config(mac, record, provisioning)
                 except FrigateConfigError as err:
-                    problem = str(err)
+                    problem = _without_secrets(str(err), record, provisioning)
                 except OSError as err:
                     problem = f"Frigate's files cannot be written: {type(err).__name__}"
+        self._frigate_down_ticks = 0
 
+        # The env file holds another camera's password, or this one's has been refused, or
+        # locked out, or is held back by a limit. Frigate would go on sending it either way.
         foreign = (
             mac is not None
             and self._link.frigate_mac is not None
             and self._link.frigate_mac != mac
         )
-        unreachable = state is LinkState.NEEDS_RESET and (record is None or not record.password)
-        if (foreign or unreachable) and self._systemd.is_running(FRIGATE_UNIT):
+        if (foreign or state is LinkState.NEEDS_RESET) and (
+            self._systemd.state(FRIGATE_UNIT) in RUNNING_STATES
+        ):
             self._systemd.stop(FRIGATE_UNIT)
-        if foreign:
-            self._save_link(frigate_mac=None)
         return problem
 
     def _apply_config(
         self, mac: str, record: CameraRecord, provisioning: _Provisioning
-    ) -> None:
+    ) -> str | None:
         paths = self._paths
-        secret = proxy_secret(provisioning.relay_password)
+        secret = self._proxy_secret(provisioning.relay_password)
         config = render(
             provisioning.node_id,
             provisioning.covered_zones,
@@ -437,14 +471,44 @@ class Daemon:
         if self._link.restart_owed:
             self._systemd.restart(FRIGATE_UNIT)
             self._save_link(restart_owed=False)
-        elif not self._systemd.is_running(FRIGATE_UNIT):
+            self._frigate_down_ticks = 0
+            return None
+        return self._keep_frigate_up()
+
+    def _keep_frigate_up(self) -> str | None:
+        """A queued start returns 0 even when its job then fails, as on a failed firewall, and a
+        missing /dev/hailo0 never gets past activating. So watch what actually comes of it."""
+        state = self._systemd.state(FRIGATE_UNIT)
+        if state not in RUNNING_STATES:
             self._systemd.start(FRIGATE_UNIT)
+        if state in RUNNING_STATES and state != "activating":
+            self._frigate_down_ticks = 0
+            return None
+        self._frigate_down_ticks += 1
+        if self._frigate_down_ticks < FRIGATE_DOWN_TICKS:
+            return None
+        if self._systemd.is_failed(FIREWALL_UNIT):
+            return f"Frigate is wanted but not running: {FIREWALL_UNIT} has failed, see its journal"
+        return "Frigate is wanted but not running, see its journal"
+
+    def _proxy_secret(self, broker_password: str) -> str:
+        """Derived from the broker password, which the central API also holds. With no password
+        there is nothing to derive from, so a random one nobody else knows keeps Frigate's proxy
+        closed. The central API cannot reach this node's Frigate then, which the state file says."""
+        if broker_password:
+            return proxy_secret(broker_password)
+        path = self._paths.local_proxy_secret
+        saved = _read_or_none(path)
+        if saved is not None and _LOCAL_SECRET_RE.fullmatch(saved):
+            return saved.decode("ascii").strip()
+        secret = secrets.token_hex(32)
+        _write_file(path, f"{secret}\n".encode(), 0o600)
+        return secret
 
     # Reporting
 
-    def _publish(self, state, mac, record, reason, provisioning) -> None:
+    def _publish(self, state, mac, record, reason) -> None:
         now = self._clock().timestamp()
-        reason = _without_secrets(reason, record, provisioning)
         content = {
             "state": state.value,
             "mac": mac,
@@ -570,16 +634,14 @@ def _limit_end(stamps: tuple[float, ...], cap: int, now: float) -> float | None:
     return recent[-cap] + FAILURE_WINDOW_SECONDS if len(recent) >= cap else None
 
 
-def _without_secrets(reason, record, provisioning):
-    """render quotes the values it refuses, and a password can be pasted into the wrong field."""
-    if reason is None:
-        return None
-    secrets = []
-    if record is not None:
-        secrets += [record.password, record.pending_password]
-    if provisioning is not None:
-        secrets += [provisioning.relay_password, proxy_secret(provisioning.relay_password)]
-    return _HIDDEN_REASON if any(s and s in reason for s in secrets) else reason
+def _without_secrets(reason: str, record, provisioning: _Provisioning) -> str:
+    """render quotes zone names and node ids it refuses, and a password can be pasted into the
+    wrong field. Only these messages quote a setting, so only they go through this. A very short
+    password can hide one for nothing, and the text then still says what failed."""
+    hidden = [record.password, record.pending_password, provisioning.relay_password]
+    if provisioning.relay_password:
+        hidden.append(proxy_secret(provisioning.relay_password))
+    return _HIDDEN_REASON if any(value and value in reason for value in hidden) else reason
 
 
 def _is_ipv4(text: str) -> bool:
