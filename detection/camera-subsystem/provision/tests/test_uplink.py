@@ -44,25 +44,25 @@ def test_uplink_up_requires_association_and_lease(
 
 def test_relaunch_when_joining_without_uplink_past_timeout() -> None:
     assert should_relaunch_ap(
-        state=ProvisionState.JOINING, seconds_since_boot=121.0, uplink=False, timeout_s=120.0
+        state=ProvisionState.JOINING, seconds_in_joining=121.0, uplink=False, timeout_s=120.0
     )
 
 
 def test_relaunch_exactly_at_timeout() -> None:
     assert should_relaunch_ap(
-        state=ProvisionState.JOINING, seconds_since_boot=120.0, uplink=False, timeout_s=120.0
+        state=ProvisionState.JOINING, seconds_in_joining=120.0, uplink=False, timeout_s=120.0
     )
 
 
 def test_no_relaunch_when_joining_with_uplink() -> None:
     assert not should_relaunch_ap(
-        state=ProvisionState.JOINING, seconds_since_boot=121.0, uplink=True, timeout_s=120.0
+        state=ProvisionState.JOINING, seconds_in_joining=121.0, uplink=True, timeout_s=120.0
     )
 
 
 def test_no_relaunch_when_joining_before_timeout() -> None:
     assert not should_relaunch_ap(
-        state=ProvisionState.JOINING, seconds_since_boot=119.9, uplink=False, timeout_s=120.0
+        state=ProvisionState.JOINING, seconds_in_joining=119.9, uplink=False, timeout_s=120.0
     )
 
 
@@ -70,5 +70,13 @@ def test_no_relaunch_when_joining_before_timeout() -> None:
 @pytest.mark.parametrize("state", [s for s in ProvisionState if s is not ProvisionState.JOINING])
 def test_only_joining_can_relaunch(state: ProvisionState, uplink: bool) -> None:
     assert not should_relaunch_ap(
-        state=state, seconds_since_boot=10_000.0, uplink=uplink, timeout_s=120.0
+        state=state, seconds_in_joining=10_000.0, uplink=uplink, timeout_s=120.0
+    )
+
+
+# Time since boot would already be past the timeout on any rejoin after a
+# fallback, which would relaunch the AP before the attempt had any time to join.
+def test_no_relaunch_when_reentering_joining_within_the_timeout() -> None:
+    assert not should_relaunch_ap(
+        state=ProvisionState.JOINING, seconds_in_joining=5.0, uplink=False, timeout_s=120.0
     )

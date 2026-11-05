@@ -23,7 +23,11 @@ def uplink_up(probe: UplinkProbe) -> bool:
 
 
 def should_relaunch_ap(
-    *, state: ProvisionState, seconds_since_boot: float, uplink: bool, timeout_s: float
+    *, state: ProvisionState, seconds_in_joining: float, uplink: bool, timeout_s: float
 ) -> bool:
-    """True only for a ``JOINING`` node with no uplink once the timeout has passed."""
-    return state is ProvisionState.JOINING and not uplink and seconds_since_boot >= timeout_s
+    """True only for a ``JOINING`` node with no uplink once the timeout has passed.
+
+    ``seconds_in_joining`` counts from when the node last entered ``JOINING``, not
+    from boot, so every rejoin attempt gets a full timeout.
+    """
+    return state is ProvisionState.JOINING and not uplink and seconds_in_joining >= timeout_s

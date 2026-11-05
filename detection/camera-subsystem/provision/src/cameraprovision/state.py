@@ -4,9 +4,9 @@ See DESIGN.md 7.4. The rules that matter most:
 
 * A ``PROVISIONED`` node never reopens the AP on link loss. Only the physical
   re-provision button does that.
-* A node with a saved config must not stay on the fallback AP. It alternates
-  between the AP and rejoin attempts, so it recovers by itself when the router
-  returns after a power cut.
+* A node with a saved config must not stay on a setup AP. It alternates between
+  the AP and rejoin attempts, so it recovers by itself when the router returns
+  after a power cut, or after an accidental press of the button.
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ _TRANSITIONS: dict[tuple[ProvisionState, ProvisionEvent], tuple[ProvisionState, 
     **{(state, _E.BOOT): (_S.JOINING, _S.AP_UP) for state in _S},
     **{(state, _E.REPROVISION_BUTTON): (_S.AP_UP, _S.AP_UP) for state in _S},
     (_S.AP_UP, _E.CONFIG_RECEIVED): (_S.JOINING, _S.JOINING),
+    (_S.AP_UP, _E.AP_WINDOW_ELAPSED): (_S.JOINING, _S.AP_UP),
     (_S.JOINING, _E.UPLINK_UP): (_S.PROVISIONED, _S.PROVISIONED),
     (_S.JOINING, _E.UPLINK_TIMEOUT): (_S.FALLBACK_AP, _S.FALLBACK_AP),
     (_S.FALLBACK_AP, _E.CONFIG_RECEIVED): (_S.JOINING, _S.JOINING),

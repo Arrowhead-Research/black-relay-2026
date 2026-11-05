@@ -79,6 +79,15 @@ def test_fallback_window_elapsed_without_config_stays_on_the_ap() -> None:
     assert next_state(S.FALLBACK_AP, E.AP_WINDOW_ELAPSED, has_config=False) is S.FALLBACK_AP
 
 
+# An accidental button press must not leave a configured node offline forever.
+def test_ap_up_window_elapsed_with_config_rejoins() -> None:
+    assert next_state(S.AP_UP, E.AP_WINDOW_ELAPSED, has_config=True) is S.JOINING
+
+
+def test_ap_up_window_elapsed_without_config_stays_on_the_ap() -> None:
+    assert next_state(S.AP_UP, E.AP_WINDOW_ELAPSED, has_config=False) is S.AP_UP
+
+
 @pytest.mark.parametrize("has_config", BOTH)
 def test_fallback_config_received_joins(has_config: bool) -> None:
     assert next_state(S.FALLBACK_AP, E.CONFIG_RECEIVED, has_config=has_config) is S.JOINING
@@ -95,6 +104,7 @@ _MAPPED = {
     (S.JOINING, E.UPLINK_UP),
     (S.JOINING, E.UPLINK_TIMEOUT),
     (S.AP_UP, E.CONFIG_RECEIVED),
+    (S.AP_UP, E.AP_WINDOW_ELAPSED),
     (S.FALLBACK_AP, E.CONFIG_RECEIVED),
     (S.FALLBACK_AP, E.AP_WINDOW_ELAPSED),
 }
