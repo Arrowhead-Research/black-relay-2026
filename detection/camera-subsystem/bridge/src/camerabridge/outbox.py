@@ -167,17 +167,32 @@ class Outbox:
         if not durable:
             return
 
-        payload = json.dumps(message, separators=_SEP).encode("utf-8")
-        entry = _Entry(
-            mid=self._next_mid,
-            topic=topic,
-            qos=_DURABLE_QOS,
-            ts=float(self._time_fn()),
-            payload=payload,
-        )
-        self._next_mid += 1
-        self._entries[entry.mid] = entry
-        self._append(entry)
+        self.enqueue_many([(topic, message)])
+
+    def enqueue_many(self, messages: list[tuple[str, dict]]) -> None:
+        """Durably queue ``(topic, message)`` pairs, in order, as one batch.
+
+        One write + fsync and one overflow pass for the whole batch. Enqueueing a
+        large backlog one at a time is quadratic, because each overflow pass measures
+        the whole queue.
+        """
+        if not messages:
+            return
+        entries = []
+        for topic, message in messages:
+            payload = json.dumps(message, separators=_SEP).encode("utf-8")
+            entries.append(
+                _Entry(
+                    mid=self._next_mid,
+                    topic=topic,
+                    qos=_DURABLE_QOS,
+                    ts=float(self._time_fn()),
+                    payload=payload,
+                )
+            )
+            self._next_mid += 1
+            self._entries[entries[-1].mid] = entries[-1]
+        self._append(entries)
         self._enforce_limits()
 
     # --- send / replay ------------------------------------------------------
@@ -320,11 +335,11 @@ class Outbox:
         """Total on-disk byte size the current index would occupy."""
         return sum(len(self._line(entry).encode("utf-8")) for entry in self._entries.values())
 
-    def _append(self, entry: _Entry) -> None:
-        """Append one entry's line to the file and fsync it (durable before send)."""
+    def _append(self, entries: list[_Entry]) -> None:
+        """Append entries' lines to the file and fsync once (durable before send)."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._path.open("a", encoding="utf-8") as handle:
-            handle.write(self._line(entry))
+            handle.write("".join(self._line(entry) for entry in entries))
             handle.flush()
             os.fsync(handle.fileno())
 

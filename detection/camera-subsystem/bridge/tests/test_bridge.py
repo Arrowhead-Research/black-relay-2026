@@ -11,8 +11,8 @@ Review-Focus invariants proven here (carried decisions 1-4):
 
 * a malformed Frigate payload on the wire is skipped and the service keeps
   processing later events (no crash);
-* with the clock not-ready, a valid Frigate event produces **no** publish
-  (boot-only drop window, not an untrusted timestamp);
+* with the clock not-ready, a valid Frigate event produces **no** publish (no
+  untrusted timestamp); durable events are held and stamped when the clock syncs;
 * a Frigate ``new`` → a schema-valid ``camera.detection.v0`` with
   ``event:object_start`` on ``TOPIC_DETECTIONS`` at QoS 1;
 * an ``object_update`` → published best-effort at QoS 0;
@@ -31,10 +31,12 @@ from pathlib import Path
 import pytest
 from jsonschema.validators import Draft202012Validator
 
+from camerabridge import bridge as bridge_module
 from camerabridge import formats
 from camerabridge.bridge import Bridge
 from camerabridge.cues import CueMatcher
 from camerabridge.outbox import Outbox
+from camerabridge.status import NodeState
 
 SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schemas"
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
@@ -125,12 +127,21 @@ def make_bridge(
     matcher=None,
     outbox=None,
     time_fn=lambda: FIXED_EPOCH,
+    local_client=None,
+    connected=True,
+    **bridge_kwargs,
 ) -> Bridge:
+    """Build a bridge whose ``client`` is the central connection.
+
+    ``connected=True`` (the default) performs the central connect, so tests of the
+    steady-state publish paths see a live link. Outage tests pass ``connected=False``.
+    """
     clock = clock or FakeClock()
     matcher = matcher or CueMatcher(covered_zones={"perimeter-north"}, window_s=5.0)
     outbox = outbox or Outbox(str(tmp_path / "outbox.jsonl"), max_bytes=10_000_000, max_age_s=1e9)
-    return Bridge(
-        client=client,
+    bridge = Bridge(
+        central_client=client,
+        local_client=local_client or FakeMqttClient(),
         outbox=outbox,
         matcher=matcher,
         clock=clock,
@@ -138,7 +149,11 @@ def make_bridge(
         frigate_topic="frigate/events",
         frigate_base_url="http://cam-01.local:5000",
         time_fn=time_fn,
+        **bridge_kwargs,
     )
+    if connected:
+        bridge.handle_central_connect()
+    return bridge
 
 
 def decode_published(client) -> list[tuple[str, dict, int]]:
@@ -202,15 +217,22 @@ def test_malformed_payload_skipped_then_service_recovers(tmp_path):
     assert any(t == formats.TOPIC_DETECTIONS and m["object_id"] == "trk-9" for t, m, _q in pubs)
 
 
-def test_clock_not_ready_drops_detection(tmp_path):
+def test_clock_not_ready_holds_detection(tmp_path):
     client = FakeMqttClient()
     clock = formats.SystemClock()  # un-synced: now_rfc3339 raises ClockNotReady
 
     bridge = make_bridge(client, tmp_path=tmp_path, clock=clock)
     bridge.dispatch("frigate/events", json.dumps(frigate_payload("new", "trk-1")).encode())
 
-    # Boot-only window: no untrusted timestamp is emitted, so nothing publishes.
+    # No untrusted timestamp is emitted: nothing publishes, and it is held in memory.
     assert client.published == []
+    assert not (tmp_path / "outbox.jsonl").exists()
+
+    clock.mark_synced()
+    bridge.publish_status(NodeState(True, True, True, True))
+    dets = [m for t, m, _q in decode_published(client) if t == formats.TOPIC_DETECTIONS]
+    assert [m["object_id"] for m in dets] == ["trk-1"]
+    validate("detection.v0.schema.json", dets[0])
 
 
 # --- RF cue correlation path ------------------------------------------------
@@ -283,13 +305,19 @@ def test_malformed_cue_skipped(tmp_path):
     assert client.published == []
 
 
-def test_clock_not_ready_drops_cue(tmp_path):
+def test_clock_not_ready_holds_cue_ack(tmp_path):
     client = FakeMqttClient()
     clock = formats.SystemClock()
     bridge = make_bridge(client, tmp_path=tmp_path, clock=clock)
     cue = {"rf_cue_id": "rf-cue-9", "zone": "perimeter-north", "ts_epoch": FIXED_EPOCH}
     bridge.dispatch(formats.TOPIC_RF_CUES_IN, json.dumps(cue).encode())
     assert client.published == []
+
+    clock.mark_synced()
+    bridge.publish_status(NodeState(True, True, True, True))
+    acks = [m for t, m, _q in decode_published(client) if t == formats.TOPIC_CUE_ACKS]
+    assert [m["rf_cue_id"] for m in acks] == ["rf-cue-9"]
+    validate("cue-ack.v0.schema.json", acks[0])
 
 
 # --- bounded state over uptime (expire) -------------------------------------
@@ -378,14 +406,17 @@ def test_handle_connect_subscribes_and_replays_outbox(tmp_path):
     )
     outbox.enqueue(formats.TOPIC_DETECTIONS, queued, durable=True)
 
-    bridge = make_bridge(client, tmp_path=tmp_path, outbox=outbox)
-    bridge.handle_connect()
+    local = FakeMqttClient()
+    bridge = make_bridge(client, tmp_path=tmp_path, outbox=outbox, local_client=local, connected=False)
+    bridge.handle_central_connect()
+    bridge.handle_local_connect()
 
-    # Both topics subscribed at QoS 1 (M2) so a reconnect blip cannot drop an
-    # inbound object_start/object_end or RF cue.
-    subs = dict(client.subscriptions)
-    assert subs["frigate/events"] == 1
-    assert subs[formats.TOPIC_RF_CUES_IN] == 1
+    # Each inbound topic is subscribed at QoS 1 (M2) on its own connection, so a
+    # reconnect blip cannot drop an inbound object_start/object_end or RF cue, and
+    # Frigate topics never touch the central broker.
+    assert dict(client.subscriptions) == {formats.TOPIC_RF_CUES_IN: 1}
+    assert dict(local.subscriptions)["frigate/events"] == 1
+    assert formats.TOPIC_RF_CUES_IN not in dict(local.subscriptions)
     # The durable message queued during the "outage" is replayed on connect.
     pubs = decode_published(client)
     assert any(m["object_id"] == "trk-queued" for _t, m, _q in pubs)
@@ -571,7 +602,9 @@ def test_make_bridge_rejects_invalid_node_id(tmp_path, bad_node_id):
         "frigate": {"topic": "frigate/events", "base_url": "http://x"},
     }
     with pytest.raises(ValueError, match="node_id"):
-        cli.make_bridge(cfg, client=FakeMqttClient(), clock=FakeClock())
+        cli.make_bridge(
+            cfg, central_client=FakeMqttClient(), local_client=FakeMqttClient(), clock=FakeClock()
+        )
 
 
 def test_make_bridge_accepts_valid_node_id(tmp_path):
@@ -583,7 +616,9 @@ def test_make_bridge_accepts_valid_node_id(tmp_path):
         "outbox": {"path": str(tmp_path / "outbox.jsonl")},
         "frigate": {"topic": "frigate/events", "base_url": "http://x"},
     }
-    bridge = cli.make_bridge(cfg, client=FakeMqttClient(), clock=FakeClock())
+    bridge = cli.make_bridge(
+        cfg, central_client=FakeMqttClient(), local_client=FakeMqttClient(), clock=FakeClock()
+    )
     assert isinstance(bridge, Bridge)
 
 
@@ -606,9 +641,646 @@ def test_make_bridge_from_config_builds_bridge(tmp_path):
     cfg = cli.load_config(str(CONFIG_DIR / "bridge.example.yaml"))
     cfg["outbox"]["path"] = str(tmp_path / "outbox.jsonl")  # keep the test off /var
     client = FakeMqttClient()
-    bridge = cli.make_bridge(cfg, client=client, clock=FakeClock())
+    bridge = cli.make_bridge(
+        cfg, central_client=client, local_client=FakeMqttClient(), clock=FakeClock()
+    )
     assert isinstance(bridge, Bridge)
+    bridge.handle_central_connect()
     # Covered zones from config reach the matcher: a cue in a covered zone with a
     # matching track correlates.
     bridge.dispatch("frigate/events", json.dumps(frigate_payload("new", "trk-1")).encode())
     assert any(t == formats.TOPIC_DETECTIONS for t, _p, _q in client.published)
+
+
+# --- two MQTT connections: local (Frigate) + central (fusion) ----------------
+
+
+class _ConnackRC:
+    """Stands in for paho's ``ReasonCode`` on the VERSION2 callback signature."""
+
+    def __init__(self, is_failure: bool) -> None:
+        self.is_failure = is_failure
+
+
+def outbox_lines(tmp_path) -> list[dict]:
+    path = tmp_path / "outbox.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+
+def test_central_down_frigate_event_persisted_and_replayed_byte_identical(tmp_path):
+    central, local = FakeMqttClient(), FakeMqttClient()
+    bridge = make_bridge(central, tmp_path=tmp_path, local_client=local, connected=False)
+    bridge.wire()
+
+    # Central never came up; Frigate's object_start arrives on the LOCAL connection.
+    message = type("M", (), {"topic": "frigate/events", "retain": False})()
+    message.payload = json.dumps(frigate_payload("new", "trk-outage")).encode()
+    local.on_message(local, None, message)
+
+    assert central.published == []  # nothing handed to paho while central is down
+    lines = outbox_lines(tmp_path)
+    assert len(lines) == 1
+    persisted = lines[0]["bytes"].encode("utf-8")
+    assert json.loads(persisted)["object_id"] == "trk-outage"
+
+    # Central comes up: the entry is replayed with its exact original bytes.
+    central.on_connect(central, None, None, _ConnackRC(False), None)
+    assert central.published == [(formats.TOPIC_DETECTIONS, persisted, 1)]
+
+    # The PUBACK empties the outbox.
+    central.on_publish(central, None, 1, _ConnackRC(False), None)
+    assert outbox_lines(tmp_path) == []
+
+
+def test_object_update_not_published_while_central_down(tmp_path):
+    central = FakeMqttClient()
+    bridge = make_bridge(central, tmp_path=tmp_path, connected=False)
+    bridge.dispatch("frigate/events", json.dumps(frigate_payload("update", "trk-1")).encode())
+    assert central.published == []
+    assert outbox_lines(tmp_path) == []  # QoS 0 updates are never persisted
+
+
+def test_central_disconnect_stops_publishing_until_reconnect(tmp_path):
+    central, local = FakeMqttClient(), FakeMqttClient()
+    bridge = make_bridge(central, tmp_path=tmp_path, local_client=local, connected=False)
+    bridge.wire()
+    central.on_connect(central, None, None, _ConnackRC(False), None)
+    assert bridge.central_connected is True
+
+    central.on_disconnect(central, None, None, _ConnackRC(True), None)
+    assert bridge.central_connected is False
+    bridge.dispatch("frigate/events", json.dumps(frigate_payload("new", "trk-2")).encode())
+    assert central.published == []
+    assert len(outbox_lines(tmp_path)) == 1
+
+
+def test_refused_central_connack_is_not_a_connection(tmp_path):
+    # paho VERSION2 also fires on_connect for a refused CONNACK (e.g. a bad password).
+    central = FakeMqttClient()
+    bridge = make_bridge(central, tmp_path=tmp_path, connected=False)
+    bridge.wire()
+    central.on_connect(central, None, None, _ConnackRC(True), None)
+    assert bridge.central_connected is False
+    assert central.subscriptions == []
+
+
+def test_refused_local_connack_does_not_subscribe(tmp_path):
+    local = FakeMqttClient()
+    bridge = make_bridge(FakeMqttClient(), tmp_path=tmp_path, local_client=local)
+    bridge.wire()
+    local.on_connect(local, None, None, _ConnackRC(True), None)
+    assert local.subscriptions == []
+    local.on_connect(local, None, None, _ConnackRC(False), None)
+    assert ("frigate/events", 1) in local.subscriptions
+
+
+def test_local_connection_does_not_drive_acks_or_replay(tmp_path):
+    central, local = FakeMqttClient(), FakeMqttClient()
+    bridge = make_bridge(central, tmp_path=tmp_path, local_client=local, connected=False)
+    bridge.wire()
+    bridge.dispatch("frigate/events", json.dumps(frigate_payload("new", "trk-3")).encode())
+
+    local.on_connect(local, None, None, _ConnackRC(False), None)
+    assert central.published == []  # local connect must not replay to central
+    assert local.published == []  # and nothing is ever published on the local broker
+    assert local.on_publish is None
+    assert bridge.central_connected is False
+
+
+def test_on_publish_callback_does_not_block_on_bridge_lock(tmp_path):
+    """paho holds its _out_message_mutex while calling on_publish, and publish() takes
+    that mutex. If on_publish blocked on the bridge lock, a thread that holds the lock
+    and is inside publish() would deadlock with the network thread."""
+    import threading
+
+    central = FakeMqttClient()
+    bridge = make_bridge(central, tmp_path=tmp_path)
+    bridge.wire()
+    bridge.dispatch("frigate/events", json.dumps(frigate_payload("new", "trk-4")).encode())
+    assert len(outbox_lines(tmp_path)) == 1
+
+    release = threading.Event()
+    holding = threading.Event()
+
+    def hold_lock():
+        with bridge._lock:
+            holding.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    holding.wait(5)
+    try:
+        callback = threading.Thread(
+            target=central.on_publish, args=(central, None, 1, _ConnackRC(False), None), daemon=True
+        )
+        callback.start()
+        callback.join(1.0)
+        assert not callback.is_alive(), "on_publish blocked on the bridge lock"
+    finally:
+        release.set()
+        holder.join()
+
+    # The ack was deferred, not lost: the next lock-holding entry point applies it.
+    assert len(outbox_lines(tmp_path)) == 1
+    bridge.expire_tracks()
+    assert outbox_lines(tmp_path) == []
+
+
+class _NetClient:
+    """Records the async connect the CLI performs (no socket)."""
+
+    def __init__(self) -> None:
+        self.connect_async_calls: list[tuple[str, int]] = []
+        self.loop_started = False
+        self.loop_stopped = False
+
+    def reconnect_delay_set(self, *, min_delay, max_delay):
+        self.delay = (min_delay, max_delay)
+
+    def connect_async(self, host, port):
+        self.connect_async_calls.append((host, port))
+
+    def loop_start(self):
+        self.loop_started = True
+
+    def loop_stop(self):
+        self.loop_stopped = True
+
+    def disconnect(self):
+        pass
+
+    def publish(self, topic, payload, qos=0):
+        return _FakeInfo(1)
+
+    def subscribe(self, topic, qos=0):
+        pass
+
+
+def _run_main_one_tick(monkeypatch, tmp_path, cfg_overrides):
+    """Run cli.main for one heartbeat with fake clients; return (central, local)."""
+    import yaml
+
+    from camerabridge import cli
+
+    cfg = cli.load_config(str(CONFIG_DIR / "bridge.example.yaml"))
+    cfg["outbox"]["path"] = str(tmp_path / "outbox.jsonl")
+    cfg.update(cfg_overrides)
+    config_path = tmp_path / "bridge.yaml"
+    config_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    central, local = _NetClient(), _NetClient()
+    monkeypatch.setattr(cli, "_build_central_client", lambda _cfg: central)
+    monkeypatch.setattr(cli, "_build_local_client", lambda _cfg: local)
+    monkeypatch.setattr(cli, "_ntp_synchronized", lambda: True)
+
+    def stop(_seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.time, "sleep", stop)
+    assert cli.main(["run", "--config", str(config_path)]) == 0
+    return central, local
+
+
+def test_cli_dials_central_and_local_brokers_independently(monkeypatch, tmp_path):
+    central, local = _run_main_one_tick(
+        monkeypatch,
+        tmp_path,
+        {
+            "broker": {"host": "10.0.0.2", "port": 1884},
+            "frigate": {"topic": "frigate/events", "base_url": "http://x", "camera": "cam-01"},
+        },
+    )
+    assert central.connect_async_calls == [("10.0.0.2", 1884)]
+    # frigate.mqtt_host / mqtt_port default to the node-local broker.
+    assert local.connect_async_calls == [("127.0.0.1", 1883)]
+    assert central.loop_started and local.loop_started
+    assert central.loop_stopped and local.loop_stopped
+
+
+def test_cli_requires_a_central_broker_host(monkeypatch, tmp_path):
+    # Defaulting the central host would silently publish fusion traffic to the local
+    # broker and report the uplink as healthy.
+    with pytest.raises(ValueError, match="broker.host"):
+        _run_main_one_tick(monkeypatch, tmp_path, {"broker": {"port": 1883}})
+
+
+# --- real health in camera.node-status.v0 ------------------------------------
+
+
+class _Mono:
+    """An injected monotonic clock."""
+
+    def __init__(self, now: float = 500.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+HEALTHY_STATS = json.dumps(
+    {
+        "cameras": {"cam-01": {"camera_fps": 5.0}},
+        "detectors": {"hailo": {"inference_speed": 9.5, "pid": 42}},
+    }
+).encode()
+
+
+def health_bridge(tmp_path, mono, central=None, local=None, connected=True):
+    from camerabridge.health import FrigateHealth
+
+    return make_bridge(
+        central or FakeMqttClient(),
+        tmp_path=tmp_path,
+        local_client=local,
+        connected=connected,
+        health=FrigateHealth(camera="cam-01", stale_after_s=90.0, monotonic_fn=mono),
+    )
+
+
+def feed_frigate_health(bridge) -> None:
+    # Raw wire payloads: "online" and "ON" are not JSON and must still get through.
+    bridge.dispatch("frigate/available", b"online")
+    bridge.dispatch("frigate/cam-01/recordings/state", b"ON")
+    bridge.dispatch("frigate/stats", HEALTHY_STATS)
+
+
+def test_local_connect_subscribes_to_frigate_health_topics(tmp_path):
+    local = FakeMqttClient()
+    bridge = health_bridge(tmp_path, _Mono(), local=local)
+    bridge.handle_local_connect()
+    subs = {topic for topic, _qos in local.subscriptions}
+    assert subs == {
+        "frigate/events",
+        "frigate/available",
+        "frigate/stats",
+        "frigate/cam-01/recordings/state",
+    }
+
+
+def test_node_state_healthy_and_heartbeat_validates(tmp_path):
+    central = FakeMqttClient()
+    bridge = health_bridge(tmp_path, _Mono(), central=central)
+    feed_frigate_health(bridge)
+
+    state = bridge.node_state()
+    assert (state.camera_online, state.detector_ok, state.recording_ok, state.link_online) == (
+        True,
+        True,
+        True,
+        True,
+    )
+    bridge.publish_status(state)
+    statuses = [m for t, m, _q in decode_published(central) if t == formats.TOPIC_STATUS]
+    assert statuses[0]["camera_online"] is True
+    validate("node-status.v0.schema.json", statuses[0])
+
+
+def test_node_state_no_data_is_all_false(tmp_path):
+    bridge = health_bridge(tmp_path, _Mono(), connected=False)
+    state = bridge.node_state()
+    assert (state.camera_online, state.detector_ok, state.recording_ok, state.link_online) == (
+        False,
+        False,
+        False,
+        False,
+    )
+
+
+def test_link_online_follows_central_connection(tmp_path):
+    bridge = health_bridge(tmp_path, _Mono(), connected=False)
+    assert bridge.node_state().link_online is False
+    bridge.handle_central_connect()
+    assert bridge.node_state().link_online is True
+    bridge.handle_central_disconnect()
+    assert bridge.node_state().link_online is False
+
+
+def test_local_disconnect_invalidates_retained_frigate_state(tmp_path):
+    # available/recordings are only re-published on change, so a dead local broker
+    # would otherwise leave recording_ok frozen at True.
+    local = FakeMqttClient()
+    bridge = health_bridge(tmp_path, _Mono(), local=local)
+    bridge.wire()
+    feed_frigate_health(bridge)
+    assert bridge.node_state().recording_ok is True
+
+    local.on_disconnect(local, None, None, _ConnackRC(True), None)
+    state = bridge.node_state()
+    assert (state.camera_online, state.detector_ok, state.recording_ok) == (False, False, False)
+    assert state.link_online is True  # central is unaffected
+
+
+def test_retained_stats_message_is_not_treated_as_fresh(tmp_path):
+    # Staleness is measured from receipt, so an old retained message must not count.
+    local = FakeMqttClient()
+    bridge = health_bridge(tmp_path, _Mono(), local=local)
+    bridge.wire()
+    message = type("M", (), {"topic": "frigate/stats", "payload": HEALTHY_STATS, "retain": True})()
+    bridge.dispatch("frigate/available", b"online")
+    local.on_message(local, None, message)
+    assert bridge.node_state().camera_online is False
+
+
+def test_heartbeat_tick_reports_stale_stats_false(tmp_path):
+    mono = _Mono()
+    bridge = health_bridge(tmp_path, mono)
+    feed_frigate_health(bridge)
+    mono.now += 90.001
+    assert bridge.node_state().camera_online is False
+
+
+def test_stale_limit_is_three_status_intervals(tmp_path):
+    from camerabridge import cli
+
+    cfg = {
+        "node_id": "cam-01",
+        "outbox": {"path": str(tmp_path / "outbox.jsonl")},
+        "status_interval_s": 10,
+        "frigate": {"topic": "site1/events", "camera": "front"},
+    }
+    mono = _Mono()
+    bridge = cli.make_bridge(
+        cfg,
+        central_client=FakeMqttClient(),
+        local_client=FakeMqttClient(),
+        clock=FakeClock(),
+        monotonic_fn=mono,
+    )
+    # The health topics follow the prefix of the configured events topic.
+    bridge.dispatch("site1/available", b"online")
+    bridge.dispatch("site1/front/recordings/state", b"ON")
+    bridge.dispatch(
+        "site1/stats",
+        json.dumps(
+            {
+                "cameras": {"front": {"camera_fps": 5.0}},
+                "detectors": {"hailo": {"inference_speed": 9.5, "pid": 1}},
+            }
+        ).encode(),
+    )
+    mono.now += 30.0
+    assert bridge.node_state().camera_online is True
+    mono.now += 0.001
+    assert bridge.node_state().camera_online is False
+
+
+def test_cli_heartbeat_reports_measured_health_not_optimistic_defaults(monkeypatch, tmp_path):
+    published: list = []
+    from camerabridge import cli
+
+    monkeypatch.setattr(
+        _NetClient,
+        "publish",
+        lambda self, topic, payload, qos=0: (published.append((topic, payload)), _FakeInfo(1))[1],
+    )
+    # Mark central up as soon as the client "connects", with no Frigate data at all.
+    real_make = cli.make_bridge
+
+    def make_and_connect(*a, **k):
+        bridge = real_make(*a, **k)
+        monkeypatch.setattr(_NetClient, "loop_start", lambda self: bridge.handle_central_connect())
+        return bridge
+
+    monkeypatch.setattr(cli, "make_bridge", make_and_connect)
+    _run_main_one_tick(monkeypatch, tmp_path, {})
+    statuses = [json.loads(p) for t, p in published if t == formats.TOPIC_STATUS]
+    assert statuses, "no heartbeat published"
+    assert statuses[0]["camera_online"] is False
+    assert statuses[0]["detector_ok"] is False
+    assert statuses[0]["recording_ok"] is False
+    assert statuses[0]["link_online"] is True
+
+
+# --- hold durable events until NTP sync (DESIGN.md 7.5) ----------------------
+
+SYNC_WALL = 1_800_000_000.0  # the trusted wall clock once NTP has synced
+HEARTBEAT = NodeState(True, True, True, True)
+
+
+def held_bridge(tmp_path, *, central=None, connected=True, **kwargs):
+    """A bridge on an un-synced SystemClock with injected wall and monotonic time."""
+    clock = formats.SystemClock()
+    mono = _Mono(100.0)
+    wall = {"now": 5.0}  # the untrusted boot-time wall clock
+    central = central or FakeMqttClient()
+    bridge = make_bridge(
+        central,
+        tmp_path=tmp_path,
+        clock=clock,
+        connected=connected,
+        time_fn=lambda: wall["now"],
+        monotonic_fn=mono,
+        **kwargs,
+    )
+    return bridge, central, clock, mono, wall
+
+
+def sync(clock, wall) -> None:
+    wall["now"] = SYNC_WALL
+    clock.mark_synced()
+
+
+def feed(bridge, type_, object_id) -> None:
+    bridge.dispatch("frigate/events", json.dumps(frigate_payload(type_, object_id)).encode())
+
+
+def rfc3339(epoch: float) -> str:
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_held_event_stamped_now_minus_elapsed_monotonic(tmp_path):
+    bridge, central, clock, mono, wall = held_bridge(tmp_path)
+
+    feed(bridge, "new", "trk-early")  # captured at monotonic 100
+    mono.now = 130.0
+    feed(bridge, "end", "trk-early")  # captured at monotonic 130
+    mono.now = 160.0
+
+    sync(clock, wall)
+    bridge.publish_status(HEARTBEAT)
+
+    dets = [m for t, m, _q in decode_published(central) if t == formats.TOPIC_DETECTIONS]
+    assert [(m["event"], m["timestamp"]) for m in dets] == [
+        ("object_start", rfc3339(SYNC_WALL - 60.0)),
+        ("object_end", rfc3339(SYNC_WALL - 30.0)),
+    ]
+
+
+def test_held_events_release_in_capture_order_before_later_events(tmp_path):
+    bridge, central, clock, _mono, wall = held_bridge(tmp_path)
+    feed(bridge, "new", "trk-a")
+    bridge.dispatch(
+        formats.TOPIC_RF_CUES_IN,
+        json.dumps({"rf_cue_id": "c-1", "zone": "perimeter-north", "ts_epoch": 0.0}).encode(),
+    )
+    feed(bridge, "end", "trk-a")
+
+    sync(clock, wall)
+    # The first thing after sync is a NEW event: it must not jump the held ones.
+    feed(bridge, "new", "trk-b")
+
+    ids = [m.get("object_id") if t == formats.TOPIC_DETECTIONS else m["rf_cue_id"]
+           for t, m, _q in decode_published(central)]
+    assert ids == ["trk-a", "c-1", "trk-a", "trk-b"]
+
+
+def test_no_placeholder_timestamp_reaches_the_wire_or_disk(tmp_path):
+    bridge, central, clock, _mono, wall = held_bridge(tmp_path)
+    feed(bridge, "new", "trk-a")
+    sync(clock, wall)
+    bridge.publish_status(HEARTBEAT)
+    for line in outbox_lines(tmp_path):
+        assert not json.loads(line["bytes"])["timestamp"].startswith("1970")
+    published = decode_published(central)
+    assert published and not any(m["timestamp"].startswith("1970") for _t, m, _q in published)
+    assert published[0][1]["timestamp"] == rfc3339(SYNC_WALL)
+
+
+def test_nothing_released_while_clock_still_unsynced(tmp_path):
+    bridge, central, _clock, _mono, _wall = held_bridge(tmp_path)
+    feed(bridge, "new", "trk-a")
+    bridge.publish_status(HEARTBEAT)
+    feed(bridge, "new", "trk-b")
+    assert central.published == []
+    assert not (tmp_path / "outbox.jsonl").exists()
+
+
+def test_object_update_and_status_still_dropped_while_unsynced(tmp_path):
+    bridge, central, clock, _mono, wall = held_bridge(tmp_path)
+    feed(bridge, "update", "trk-a")
+    bridge.publish_status(HEARTBEAT)
+    sync(clock, wall)
+    feed(bridge, "new", "trk-b")  # flushes anything held
+    messages = decode_published(central)
+    assert [m["object_id"] for _t, m, _q in messages] == ["trk-b"]
+
+
+def test_held_release_with_central_down_lands_in_outbox_for_replay(tmp_path):
+    bridge, central, clock, mono, wall = held_bridge(tmp_path, connected=False)
+    feed(bridge, "new", "trk-a")
+    mono.now += 10.0
+    sync(clock, wall)
+    bridge.publish_status(HEARTBEAT)
+
+    assert central.published == []
+    lines = outbox_lines(tmp_path)
+    assert [line["topic"] for line in lines] == [formats.TOPIC_DETECTIONS, formats.TOPIC_STATUS]
+    persisted = lines[0]["bytes"].encode("utf-8")
+    assert json.loads(persisted)["timestamp"] == rfc3339(SYNC_WALL - 10.0)
+
+    bridge.handle_central_connect()
+    assert central.published[0] == (formats.TOPIC_DETECTIONS, persisted, 1)
+
+
+def test_central_connect_after_sync_releases_held_without_duplicates(tmp_path):
+    bridge, central, clock, _mono, wall = held_bridge(tmp_path, connected=False)
+    feed(bridge, "new", "trk-a")
+    sync(clock, wall)
+    bridge.handle_central_connect()
+    assert [m["object_id"] for _t, m, _q in decode_published(central)] == ["trk-a"]
+
+
+def test_held_cap_drops_oldest_with_warning(tmp_path, caplog):
+    bridge, central, clock, _mono, wall = held_bridge(tmp_path, held_cap=2)
+    with caplog.at_level("WARNING", logger="camerabridge.bridge"):
+        for name in ("trk-1", "trk-2", "trk-3"):
+            feed(bridge, "new", name)
+    assert any("oldest" in r.getMessage() for r in caplog.records)
+
+    sync(clock, wall)
+    bridge.publish_status(HEARTBEAT)
+    dets = [m["object_id"] for t, m, _q in decode_published(central) if t == formats.TOPIC_DETECTIONS]
+    assert dets == ["trk-2", "trk-3"]
+
+
+def test_default_held_cap_is_10000():
+    assert bridge_module._DEFAULT_HELD_CAP == 10_000
+
+
+def test_event_id_minted_at_capture_is_kept(tmp_path, monkeypatch):
+    ids = iter(["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"])
+    monkeypatch.setattr(formats, "new_event_id", lambda: next(ids))
+    bridge, central, clock, _mono, wall = held_bridge(tmp_path)
+    feed(bridge, "new", "trk-a")
+    sync(clock, wall)
+    bridge.publish_status(HEARTBEAT)
+    assert decode_published(central)[0][1]["event_id"] == "11111111-1111-4111-8111-111111111111"
+
+
+def _matched_cue(bridge, wall, cue_id="rf-7") -> None:
+    cue = {"rf_cue_id": cue_id, "zone": "perimeter-north", "ts_epoch": wall["now"]}
+    bridge.dispatch(formats.TOPIC_RF_CUES_IN, json.dumps(cue).encode())
+
+
+def test_presync_matched_cue_ack_holds_match_and_tags_next_held_detection(tmp_path):
+    bridge, central, clock, _mono, wall = held_bridge(tmp_path)
+    feed(bridge, "new", "trk-a")
+    _matched_cue(bridge, wall)
+    assert "trk-a" in bridge._pending_cue
+
+    feed(bridge, "end", "trk-a")  # carries the cue, and consumes it
+    assert bridge._pending_cue == {}
+
+    sync(clock, wall)
+    bridge.publish_status(HEARTBEAT)
+    messages = decode_published(central)
+    acks = [m for t, m, _q in messages if t == formats.TOPIC_CUE_ACKS]
+    dets = [m for t, m, _q in messages if t == formats.TOPIC_DETECTIONS]
+    # The match decided at capture survives, even though the track is gone by release.
+    assert (acks[0]["matched"], acks[0]["object_id"]) == (True, "trk-a")
+    assert "rf_cue_id" not in dets[0]["attributes"]
+    assert dets[1]["attributes"]["rf_cue_id"] == "rf-7"
+
+
+def test_presync_dropped_update_keeps_pending_cue_for_next_detection(tmp_path):
+    bridge, central, clock, _mono, wall = held_bridge(tmp_path)
+    feed(bridge, "new", "trk-a")
+    _matched_cue(bridge, wall)
+
+    feed(bridge, "update", "trk-a")  # dropped, so it cannot have delivered the cue
+    assert "trk-a" in bridge._pending_cue
+
+    feed(bridge, "end", "trk-a")
+    assert bridge._pending_cue == {}
+    sync(clock, wall)
+    bridge.publish_status(HEARTBEAT)
+    dets = [m for t, m, _q in decode_published(central) if t == formats.TOPIC_DETECTIONS]
+    assert dets[-1]["attributes"]["rf_cue_id"] == "rf-7"
+
+
+def test_presync_unmatched_cue_leaves_no_pending(tmp_path):
+    bridge, _central, _clock, _mono, wall = held_bridge(tmp_path)
+    _matched_cue(bridge, wall)
+    assert bridge._pending_cue == {}
+
+
+def test_concurrent_presync_capture_and_sync_keeps_every_event_once(tmp_path):
+    import threading
+
+    bridge, central, clock, _mono, wall = held_bridge(tmp_path, held_cap=10_000)
+    names = [f"trk-{i}" for i in range(300)]
+
+    def capture():
+        for name in names:
+            feed(bridge, "new", name)
+
+    def heartbeat():
+        for i in range(100):
+            if i == 50:
+                sync(clock, wall)
+            bridge.publish_status(HEARTBEAT)
+
+    threads = [threading.Thread(target=capture), threading.Thread(target=heartbeat)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    bridge.publish_status(HEARTBEAT)
+
+    dets = [m["object_id"] for t, m, _q in decode_published(central) if t == formats.TOPIC_DETECTIONS]
+    assert dets == names  # all delivered, once, in capture order

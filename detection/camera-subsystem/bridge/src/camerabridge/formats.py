@@ -36,6 +36,9 @@ __all__ = [
     "Clock",
     "ClockNotReady",
     "SystemClock",
+    "FixedClock",
+    "rfc3339_from_epoch",
+    "with_timestamp",
     "detection_event",
     "cue_ack",
     "node_status",
@@ -114,6 +117,26 @@ class SystemClock:
 def _format_rfc3339_z(moment: datetime) -> str:
     """Format a UTC datetime as RFC 3339 with a trailing ``Z`` (second precision)."""
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class FixedClock:
+    """A ``Clock`` that always returns one given timestamp."""
+
+    def __init__(self, timestamp: str) -> None:
+        self._timestamp = timestamp
+
+    def now_rfc3339(self) -> str:
+        return self._timestamp
+
+
+def rfc3339_from_epoch(epoch: float) -> str:
+    """Format epoch seconds as this contract's RFC 3339 UTC ``Z`` timestamp."""
+    return _format_rfc3339_z(datetime.fromtimestamp(epoch, timezone.utc))
+
+
+def with_timestamp(message: dict, timestamp: str) -> dict:
+    """Return ``message`` with its envelope ``timestamp`` replaced."""
+    return {**message, "timestamp": timestamp}
 
 
 def _event_id(event_id: Optional[str]) -> str:

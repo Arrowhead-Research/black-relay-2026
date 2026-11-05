@@ -55,7 +55,7 @@ Everything else in this contract is self-consistent and can proceed.
   network, VPN, and central node with no keyboard, monitor, or shell.
 - Own and build the central RTSP relay (`camera-relay-server`) that aggregates
   every node's restream for local clients.
-- Reuse maintained software (Frigate, go2rtc, MediaMTX, Balena wifi-connect,
+- Reuse maintained software (Frigate, go2rtc, MediaMTX,
   NetworkManager, Tailscale). Write only the glue and the contract.
 
 **Non-goals (v0)**
@@ -126,6 +126,12 @@ RLC-520A ──wired P2P──▶ Pi 5 + Hailo-8 (26 TOPS)
 - **Publish:** a thin bridge translates Frigate's MQTT events into the normalized
   `camera.*` contract and publishes to the fusion broker through a durable outbox
   (section 5.5).
+- **Two MQTT connections:** Frigate publishes to a **broker on the node itself**, and
+  the bridge's local client subscribes there to Frigate topics only. The bridge's
+  central client publishes `camera.*`, subscribes to RF cues, and drives publish
+  acknowledgements and outbox replay. Each connection retries on its own and stays up
+  when the other is down, so a central outage cannot lose a Frigate event and a
+  local-broker outage cannot stop the heartbeat.
 
 ### 4.2 Central relay (`camera-relay-server`) — in scope
 
@@ -146,7 +152,8 @@ The camera subsystem owns the central receiving side:
 |---|---|---|
 | Central node down | detect + record locally, outbox queues durable events | no central live view / fusion; footage safe; events replay on recovery; **node stays on network (does not open AP)** |
 | Wi-Fi link down | detect + record locally, outbox queues durable events | no restream; footage safe; events replay |
-| Camera down | Frigate reports camera offline via status | one camera lost; node reports it; others unaffected |
+| Camera down | Frigate stats show no frames; `camera_online` reports false (5.3) | one camera lost; node reports it; others unaffected |
+| Node-local broker down | no new Frigate events reach the bridge; camera, detector and recording health report false; the central link and heartbeat stay up | events emitted during the outage are lost; Frigate still detects and records locally |
 | Edge Pi down | — | that one camera's coverage lost; no cascade |
 | Mains loss | all nodes drop | total outage until power returns (no UPS; see risks) |
 
@@ -237,6 +244,22 @@ Edge heartbeat, parallel to `rf.node-status.v0`.
 }
 ```
 
+The bridge derives health from Frigate's topics on the node-local broker
+(`frigate/available`, `frigate/stats`, `frigate/<camera>/recordings/state`):
+
+- `camera_online`: `camera_fps > 0` for this camera in fresh stats.
+- `detector_ok`: at least one detector is present in fresh stats, and every one has a
+  process id and a positive inference speed.
+- `recording_ok`: Frigate is `online` and the recordings state is `ON`. This is
+  Frigate's recording **setting**, not proof that segments are being written.
+- `link_online`: the central MQTT connection is currently up.
+
+**Fail safe:** no data, stats older than 3 status intervals, Frigate not `online`, or
+a lost local-broker connection all report `camera_online`, `detector_ok`, and
+`recording_ok` as false, never true. Frigate's `mqtt.stats_interval` (default 60 s)
+must stay below 3 status intervals, or a healthy node reports false between stats
+messages.
+
 ### 5.4 Inbound RF cue + `camera.cue-ack.v0`
 
 RF publishes a cue on a TPMS `first_heard` event to `detection/rf/cues/camera`.
@@ -324,10 +347,13 @@ Each kit ships blind. First boot with no saved network brings up a setup access
 point; the operator joins it, opens a captive portal, and configures the node.
 
 ### 7.1 Setup AP
-`hostapd` + `dnsmasq`, wrapped by **Balena wifi-connect** (Rust, maintained).
-SSID is the kit name, e.g. `BlackRelay-CAM-<serial>`. The AP is **WPA2-protected,
-not open** — the portal sets secrets. The AP passphrase is **unique per kit**,
-derived from the serial and printed on a label on the kit, not shared across kits.
+A NetworkManager access-point profile on Raspberry Pi OS, with captive DNS. SSID
+is the kit name, e.g. `BlackRelay-CAM-<serial>`. The AP is **WPA2-protected, not
+open** — the portal sets secrets. The AP passphrase is **unique per kit**: random,
+generated when the image is seeded, stored root-only on the node, and printed on a
+label on the kit. It is not derived from the serial, because the SSID exposes the
+serial. Forwarding to and from the camera link is dropped, so an AP client cannot
+reach the camera.
 
 ### 7.2 Portal fields
 The portal collects, and writes to node config:
@@ -337,8 +363,10 @@ The portal collects, and writes to node config:
 - **Central endpoints:** MQTT broker address + credentials/TLS, MediaMTX address.
 - **`node_id`:** defaults to a value derived from the hostname/serial, editable.
 
-wifi-connect handles the Wi-Fi flow; the VPN, hostname, and central-endpoint
-fields are an extension on top. After a successful join the portal is disabled.
+One unified Python portal collects all of these on one page. Balena wifi-connect
+is not used, because its fixed UI collects only Wi-Fi credentials. balenaCloud is
+not used, because it puts a third party in the device-management trust path. After
+a successful join the portal is disabled.
 
 ### 7.3 Traffic paths
 - **Fusion traffic (events + restream, node→central) goes over the site LAN/Wi-Fi
@@ -353,15 +381,30 @@ fields are an extension on top. After a successful join the portal is disabled.
 the central node is reachable. A central-node or broker outage must never push a
 node back into setup-AP mode (that would defeat survivability and start every node
 emitting a setup AP). If no L3 uplink is established within a timeout after boot,
-the node relaunches the setup AP. Re-provisioning a already-configured node (e.g.
+the node relaunches the setup AP. A node that has a saved config alternates
+between the setup AP and rejoin attempts, so it recovers by itself when the router
+returns after a power cut. Re-provisioning an already-configured node (e.g.
 the site Wi-Fi password changed) is triggered **physically** — a GPIO button held
 during boot — not automatically.
 
 ### 7.5 Time
 Once an uplink exists, the node syncs NTP from the central node or the site
 gateway. Because the Pi 5 has no battery RTC, events created before NTP sync carry
-an untrusted clock; they are held in the outbox and stamped at publish using an
-NTP-corrected clock. An optional RTC module is listed as hardening (section 9).
+an untrusted clock, so the bridge holds them instead of stamping them:
+
+- **Held:** `object_start`, `object_end`, and `cue-ack` wait in a bounded in-memory
+  FIFO with their monotonic capture time (cap 10,000; beyond it the oldest is dropped
+  with a warning).
+- **Stamped:** when the clock syncs, each is stamped as now minus its elapsed
+  monotonic time, then enqueued in the durable outbox in order, ahead of any newer
+  event. `event_id` and any cue match are fixed at capture.
+- **Dropped:** `object_update` and `node-status` are not held. A node that has not
+  synced sends no heartbeat.
+- **Lost on restart:** held events are in memory, not in the outbox, because the
+  outbox only takes stamped bytes. A restart or power cut before sync loses them. This
+  is the one case where a durable event is lost below the outbox's caps.
+
+An optional RTC module is listed as hardening (section 9).
 
 ## 8. Testing and verification
 
@@ -422,8 +465,6 @@ contracts, not exhaustive coverage.
   against the shared zone names from section 6.
 - Retention policy and record storage medium (microSD vs USB SSD).
 - Which Hailo model / `.hef` (Frigate's bundled Hailo YOLO is the default start).
-- Portal implementation detail (extending wifi-connect vs a thin companion app for
-  the VPN / hostname / central-endpoint fields).
 - RLC-520A bring-up: v0 pre-configures each camera at the bench as a documented
   assembly step (sub-stream 640×480@5fps, main ≤5MP@15fps, RTSP + ONVIF enabled,
   admin password, NTP) plus the Pi-side static addressing on the point-to-point

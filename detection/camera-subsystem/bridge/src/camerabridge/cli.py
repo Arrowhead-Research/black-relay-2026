@@ -5,8 +5,8 @@ It reads a YAML config (``config/bridge.example.yaml`` is the annotated template
 builds the durable :class:`~camerabridge.outbox.Outbox`, the
 :class:`~camerabridge.cues.CueMatcher` over this node's covered zones, the NTP-gated
 :class:`~camerabridge.formats.SystemClock`, and the :class:`~camerabridge.bridge.Bridge`
-over a real paho MQTT client, then runs the network loop and a periodic status
-heartbeat.
+over two real paho MQTT clients (central fusion broker and node-local Frigate
+broker), then runs both network loops and a periodic status heartbeat.
 
 Packaging: this module is the ``camerabridge`` console-script entry declared in
 ``pyproject.toml`` ``[project.scripts]`` (with a matching ``python -m camerabridge``
@@ -16,9 +16,9 @@ installs; ``uv run camerabridge run --config <path>`` works.
 Clock gating (DESIGN.md 7.5): a Pi 5 has no battery RTC, so a node booting before
 NTP sync must not stamp an untrusted time. :func:`mark_clock_if_synced` confirms
 NTP (``timedatectl``) and only then marks the clock ready; until then the bridge
-drops builds (boot window). The check is re-run each heartbeat, so a late NTP sync
-flips the node to publishing without a restart. Continuous link/health probing is
-an onboarding-layer concern (DESIGN.md 7.4) and out of scope for this bridge.
+holds durable events in memory and drops ``object_update`` and status. The check is
+re-run each heartbeat, so a late NTP sync releases the held events and flips the
+node to publishing without a restart.
 """
 
 from __future__ import annotations
@@ -29,19 +29,23 @@ import re
 import subprocess
 import sys
 import time
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 import yaml
 
 from . import formats
 from .bridge import Bridge
 from .cues import CueMatcher
+from .health import FrigateHealth
 from .outbox import Outbox
-from .status import NodeState
 
 logger = logging.getLogger("camerabridge")
 
 __all__ = ["load_config", "make_bridge", "mark_clock_if_synced", "start_client", "main"]
+
+# Frigate publishes to a broker on the node itself (DESIGN.md 4.1).
+_DEFAULT_LOCAL_HOST = "127.0.0.1"
+_DEFAULT_MQTT_PORT = 1883
 
 # Outbox overflow caps: defaults sized for a node riding out a multi-day uplink
 # outage without unbounded disk use (overridable via config).
@@ -49,6 +53,9 @@ _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
 _DEFAULT_MAX_AGE_S = 7 * 24 * 3600
 _DEFAULT_STATUS_INTERVAL_S = 30.0
 _DEFAULT_CUE_WINDOW_S = 5.0
+
+# Frigate stats older than this many status intervals count as stale (fail safe).
+_STATS_STALE_INTERVALS = 3
 
 # Every camera.* message carries node_id, and the contract pins it to this pattern
 # (schemas/*.schema.json). A bad field-provisioned value (uppercase, underscore,
@@ -82,15 +89,17 @@ def load_config(path: str) -> dict:
 def make_bridge(
     cfg: dict,
     *,
-    client: Any,
+    central_client: Any,
+    local_client: Any,
     clock: Optional[formats.Clock] = None,
+    monotonic_fn: Callable[[], float] = time.monotonic,
 ) -> Bridge:
     """Construct a :class:`Bridge` from parsed config and an injected MQTT client.
 
-    Pure wiring — no network. ``client`` and ``clock`` are injected so tests build
+    Pure wiring — no network. Both clients and ``clock`` are injected so tests build
     a bridge without a broker or a real wall clock. Reads ``node_id``,
-    ``covered_zones``, ``cue_window_s``, the ``outbox`` path/caps, and the
-    ``frigate`` topic/base URL.
+    ``covered_zones``, ``cue_window_s``, ``status_interval_s``, the ``outbox``
+    path/caps, and the ``frigate`` topic/base URL/camera name.
     """
     node_id = _validate_node_id(cfg["node_id"])
     covered_zones = set(cfg.get("covered_zones", []))
@@ -105,27 +114,42 @@ def make_bridge(
 
     frigate_cfg = cfg.get("frigate", {})
     matcher = CueMatcher(covered_zones=covered_zones, window_s=window_s)
+    frigate_topic = frigate_cfg.get("topic", "frigate/events")
+    camera = frigate_cfg.get("camera")
+    if not camera:
+        logger.warning(
+            "frigate.camera is not set: camera_online and recording_ok will always "
+            "report false. Set it to the Frigate camera name."
+        )
+    status_interval = float(cfg.get("status_interval_s", _DEFAULT_STATUS_INTERVAL_S))
+    health = FrigateHealth(
+        camera=camera,
+        stale_after_s=_STATS_STALE_INTERVALS * status_interval,
+        # Frigate's health topics share the events topic's prefix (mqtt.topic_prefix).
+        topic_prefix=frigate_topic.rsplit("/", 1)[0],
+        monotonic_fn=monotonic_fn,
+    )
 
     return Bridge(
-        client=client,
+        central_client=central_client,
+        local_client=local_client,
         outbox=outbox,
         matcher=matcher,
         clock=clock or formats.SystemClock(),
         node_id=node_id,
-        frigate_topic=frigate_cfg.get("topic", "frigate/events"),
+        frigate_topic=frigate_topic,
         frigate_base_url=frigate_cfg.get("base_url", ""),
         # Age pending cues on the same horizon as the matcher's track window so the
         # two bound together over the node's uptime.
         pending_ttl_s=window_s,
+        health=health,
     )
 
 
-def _build_mqtt_client(cfg: dict) -> Any:
-    """Build a paho MQTT client from broker config (host/port/creds/TLS).
+def _build_central_client(cfg: dict) -> Any:
+    """Build the paho client for the central broker (host/port/creds/TLS).
 
-    Imported lazily so unit tests (which inject a fake client) need no paho and no
-    broker. v0 assumes Frigate publishes to this same broker (DESIGN.md 4.2); a
-    separate Frigate broker is a documented follow-up, not v0.
+    Imported lazily so unit tests (which inject fakes) need no paho and no broker.
     """
     import paho.mqtt.client as mqtt  # lazy: only the live service needs paho
 
@@ -142,13 +166,36 @@ def _build_mqtt_client(cfg: dict) -> Any:
     return client
 
 
+def _build_local_client(cfg: dict) -> Any:
+    """Build the paho client for the node-local broker Frigate publishes to."""
+    import paho.mqtt.client as mqtt  # lazy: only the live service needs paho
+
+    return mqtt.Client(
+        mqtt.CallbackAPIVersion.VERSION2,
+        client_id=f"{cfg.get('node_id')}-local",
+    )
+
+
+def _central_endpoint(cfg: dict) -> tuple[str, int]:
+    """Return the central broker's (host, port); ``broker.host`` is required.
+
+    A default here would silently send fusion traffic to whatever listens on that
+    address and report the uplink as healthy.
+    """
+    broker = cfg.get("broker") or {}
+    host = broker.get("host")
+    if not host:
+        raise ValueError("broker.host is required: set the central broker address in the config")
+    return host, int(broker.get("port", _DEFAULT_MQTT_PORT))
+
+
 def mark_clock_if_synced(clock: formats.Clock) -> bool:
     """Mark ``clock`` NTP-synced iff the system reports NTP synchronization.
 
     Returns whether the clock is (now) synced. A :class:`SystemClock` exposes
     ``is_synced`` / ``mark_synced``; any other injected clock is treated as already
     trusted. The NTP state is read from ``timedatectl`` and any failure is treated
-    as not-synced (fail safe: keep dropping rather than stamp an untrusted time).
+    as not-synced (fail safe: keep holding rather than stamp an untrusted time).
     """
     mark = getattr(clock, "mark_synced", None)
     if mark is None:
@@ -159,7 +206,7 @@ def mark_clock_if_synced(clock: formats.Clock) -> bool:
         mark()
         logger.info("NTP synchronized; clock marked ready")
         return True
-    logger.warning("NTP not yet synchronized; dropping events until it is")
+    logger.warning("NTP not yet synchronized; holding durable events until it is")
     return False
 
 
@@ -183,30 +230,14 @@ def start_client(client: Any, host: str, port: int, *, min_delay: int = 1, max_d
 
     Uses ``connect_async`` (which does NOT raise when the broker is unreachable)
     plus ``reconnect_delay_set`` so the paho network thread keeps retrying with
-    backoff. A central-broker outage is a documented degradation case (DESIGN.md
-    4.3): the node must stay up detecting/recording and queueing durable events,
-    not exit at boot because the broker happens to be down. ``loop_start`` runs the
-    retrying network thread.
+    backoff. A broker outage is a documented degradation case (DESIGN.md 4.3): the
+    node must stay up detecting/recording and queueing durable events, not exit at
+    boot because a broker happens to be down. ``loop_start`` runs the retrying
+    network thread. Each client gets its own call, so each retries independently.
     """
     client.reconnect_delay_set(min_delay=min_delay, max_delay=max_delay)
     client.connect_async(host, port)
     client.loop_start()
-
-
-def _default_node_state(link_online: bool) -> NodeState:
-    """A conservative heartbeat state.
-
-    v0 reports the uplink it can observe (``link_online``) and leaves camera /
-    recording / detector health at their optimistic defaults; wiring real Frigate
-    health probes (camera offline, recorder/detector faults — DESIGN.md 4.3) is a
-    follow-up. Kept honest: this is a liveness heartbeat, not a health claim.
-    """
-    return NodeState(
-        camera_online=True,
-        link_online=link_online,
-        recording_ok=True,
-        detector_ok=True,
-    )
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -225,16 +256,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     cfg = load_config(args.config)
     clock = formats.SystemClock()
-    client = _build_mqtt_client(cfg)
-    bridge = make_bridge(cfg, client=client, clock=clock)
+    central_host, central_port = _central_endpoint(cfg)
+    frigate_cfg = cfg.get("frigate", {})
+    central = _build_central_client(cfg)
+    local = _build_local_client(cfg)
+    bridge = make_bridge(cfg, central_client=central, local_client=local, clock=clock)
     bridge.wire()
 
-    broker = cfg.get("broker", {})
     status_interval = float(cfg.get("status_interval_s", _DEFAULT_STATUS_INTERVAL_S))
 
     mark_clock_if_synced(clock)
-    # Async connect + auto-reconnect: stay up and retry if the broker is down now.
-    start_client(client, broker.get("host", "127.0.0.1"), int(broker.get("port", 1883)))
+    # Async connect + auto-reconnect: stay up and retry if either broker is down now.
+    start_client(central, central_host, central_port)
+    start_client(
+        local,
+        frigate_cfg.get("mqtt_host", _DEFAULT_LOCAL_HOST),
+        int(frigate_cfg.get("mqtt_port", _DEFAULT_MQTT_PORT)),
+    )
     logger.info("camerabridge running for node %s", cfg["node_id"])
     try:
         while True:
@@ -242,17 +280,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             # TOP of the loop so a node is not status-silent for a whole interval at
             # boot; then sleep until the next tick.
             mark_clock_if_synced(clock)
-            bridge.publish_status(_default_node_state(link_online=True))
+            bridge.publish_status(bridge.node_state())
             bridge.expire_tracks()
             time.sleep(status_interval)
     except KeyboardInterrupt:
         logger.info("shutting down")
     finally:
-        client.loop_stop()
-        try:
-            client.disconnect()
-        except Exception:  # pragma: no cover - best-effort teardown
-            pass
+        for client in (central, local):
+            client.loop_stop()
+            try:
+                client.disconnect()
+            except Exception:  # pragma: no cover - best-effort teardown
+                pass
     return 0
 
 

@@ -3,40 +3,56 @@
 :class:`Bridge` is the camera subsystem's service layer. It is the only place the
 independently-testable pieces meet:
 
-* **Frigate detections** — a subscription to Frigate's ``frigate/events`` topic.
+* **Frigate detections** — a subscription, on the node-local broker, to Frigate's
+  ``frigate/events`` topic.
   Each payload is parsed (:func:`frigate.parse_frigate_event`), the open track is
   recorded in the :class:`cues.CueMatcher`, the ``camera.detection.v0`` envelope
   is minted (:func:`formats.detection_event`), and it is delivered through the
   durable :class:`outbox.Outbox`.
-* **RF cues** — a subscription to ``detection/rf/cues/camera``
-  (``formats.TOPIC_RF_CUES_IN``). Each cue is parsed (:func:`cues.parse_cue`),
+* **RF cues** — a subscription, on the central broker, to
+  ``detection/rf/cues/camera`` (``formats.TOPIC_RF_CUES_IN``). Each cue is parsed (:func:`cues.parse_cue`),
   matched against open tracks, and acknowledged (:func:`cues.handle_cue`). On a
   match the bridge remembers the ``rf_cue_id`` and stamps it onto that track's
   **next** detection's ``attributes.rf_cue_id`` (DESIGN.md 5.4).
-* **Status heartbeats** — :meth:`publish_status` lowers a :class:`status.NodeState`
-  to ``camera.node-status.v0`` and delivers it durably.
+* **Status heartbeats** — :meth:`node_state` evaluates Frigate's health topics
+  (:class:`health.FrigateHealth`) and the central link, and :meth:`publish_status`
+  lowers that :class:`status.NodeState` to ``camera.node-status.v0`` and delivers it
+  durably.
 
 Carried decisions baked in here (task-7 brief):
 
-1. **Clock gating.** While the injected clock reports
-   :class:`formats.ClockNotReady` (boot, before NTP sync), the build raises and
-   the bridge **drops** the message rather than emit an untrusted timestamp. The
-   drop is caught around every envelope build; it never crashes the service.
-2. **Outbox lifecycle.** :meth:`handle_connect` calls ``outbox.replay`` on each
-   (re)connect; durable sends are flushed in steady state. The durable flag is
-   ``event != "object_update"``: ``object_update`` is best-effort QoS 0, published
-   directly and never persisted (so a long outage cannot backlog stale positions).
+1. **Clock gating (DESIGN.md 7.5).** While the injected clock reports
+   :class:`formats.ClockNotReady` (boot, before NTP sync), no timestamp from it is
+   emitted. Durable events (``object_start``, ``object_end``, cue-acks) are held in a
+   bounded in-memory FIFO with their monotonic capture time. The first entry point
+   after the clock syncs stamps each as now minus its elapsed monotonic time and
+   enqueues them in order, ahead of any new event. ``object_update`` and status are
+   dropped while unsynced. Held events are lost on restart.
+2. **Outbox lifecycle.** :meth:`handle_central_connect` calls ``outbox.replay`` on
+   each central (re)connect; durable sends are flushed in steady state. The durable
+   flag is ``event != "object_update"``: ``object_update`` is best-effort QoS 0,
+   published directly and never persisted (so a long outage cannot backlog stale
+   positions). While central is down nothing is handed to paho: durable messages
+   wait in the outbox (paho would otherwise also queue them in memory, without
+   limit, for the whole outage) and ``object_update`` is dropped.
 3. **Snapshot URL** is minted here (the service knows the Frigate host); the
    parser leaves it ``None``.
 4. **Robustness.** A malformed payload on the wire (bad JSON, or a well-formed
    JSON that the parser rejects) is skipped; the service keeps processing later
    events. The parsers never raise, and JSON decoding is guarded.
 
-The MQTT client is **injected** (:meth:`__init__`) so tests drive a fake and the
-service drives paho. The bridge touches only a tiny client surface:
-``publish(topic, payload, qos) -> info`` (with ``info.mid``),
-``subscribe(topic, qos)``, and the assignable ``on_connect`` / ``on_message`` /
-``on_publish`` callbacks.
+**Two MQTT connections** (DESIGN.md 4.1), both **injected** (:meth:`__init__`) so
+tests drive fakes and the service drives paho:
+
+* the **local** client talks to the node-local broker Frigate publishes to. It only
+  subscribes to Frigate topics, and it never publishes.
+* the **central** client talks to the fusion broker. It publishes ``camera.*``,
+  subscribes to RF cues, and drives PUBACKs and outbox replay.
+
+Each connects and reconnects on its own, so a central outage cannot lose a Frigate
+event and a local-broker outage cannot stop the heartbeat. The bridge touches only a
+tiny client surface: ``publish(topic, payload, qos) -> info`` (with ``info.mid``),
+``subscribe(topic, qos)``, and the assignable paho VERSION2 callbacks.
 
 **Thread safety.** paho runs ``on_message`` (→ :meth:`dispatch`) and
 ``on_publish`` (→ :meth:`on_publish_ack`) on its own network loop thread, while a
@@ -46,19 +62,30 @@ the outbox file). Every public entry point therefore takes one re-entrant lock, 
 all state changes serialize and no concurrent-mutation ``RuntimeError`` can kill
 message processing. Internal helpers run under the caller's lock and never
 re-acquire it beyond the re-entrant guarantee.
+
+The one exception is paho's ``on_publish``, which must never **wait** for that lock:
+paho calls it holding its internal ``_out_message_mutex``, and ``publish()`` takes
+that same mutex, so waiting would deadlock with a thread that holds the lock and is
+inside ``publish()``. The callback posts the mid to a thread-safe mailbox and applies
+it only if the lock is free; otherwise the current lock holder or the next heartbeat
+applies it. A delayed ack can at worst cause a duplicate replay, which fusion dedupes.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import queue
 import threading
 import time
+from collections import deque
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from . import formats
 from .cues import CueMatcher, handle_cue, parse_cue
 from .frigate import parse_frigate_event
+from .health import FrigateHealth
 from .outbox import Outbox
 from .status import NodeState, build_status
 
@@ -82,22 +109,40 @@ _NO_ZONE = "__no_zone__"
 # node's uptime. Mirrors the matcher's default window so the two age together.
 _DEFAULT_PENDING_TTL_S = 5.0
 
+# Cap on durable events held for NTP sync; the oldest are dropped beyond it.
+_DEFAULT_HELD_CAP = 10_000
+_HELD_DROP_WARN_EVERY = 1_000
+
+# Builds a held message before it can be stamped. Release always replaces the value.
+_UNSTAMPED = formats.FixedClock("1970-01-01T00:00:00Z")
+
+
+@dataclass
+class _Held:
+    """A durable message awaiting NTP sync, with its monotonic capture time."""
+
+    topic: str
+    message: dict
+    captured_at: float
+
 
 class Bridge:
     """Wire a Frigate subscription, an RF-cue subscription, and a status heartbeat.
 
-    Construct with an injected MQTT ``client``, a durable ``outbox``, a
-    ``matcher``, a ``clock``, this node's ``node_id``, the Frigate events
+    Construct with injected ``central_client`` and ``local_client``, a durable
+    ``outbox``, a ``matcher``, a ``clock``, this node's ``node_id``, the Frigate events
     ``frigate_topic`` and ``frigate_base_url`` (for snapshot URLs). ``time_fn`` is
     injectable only so tests can align a track's observation time with a cue's
     ``ts_epoch``; production uses the wall clock (epoch seconds, NTP-corrected once
     synced — the matcher only compares epoch deltas within a window).
+    ``monotonic_fn`` times held events; ``time_fn`` anchors them once the clock syncs.
     """
 
     def __init__(
         self,
         *,
-        client: Any,
+        central_client: Any,
+        local_client: Any,
         outbox: Outbox,
         matcher: CueMatcher,
         clock: formats.Clock,
@@ -106,8 +151,16 @@ class Bridge:
         frigate_base_url: str = "",
         time_fn: Callable[[], float] = time.time,
         pending_ttl_s: float = _DEFAULT_PENDING_TTL_S,
+        health: Optional[FrigateHealth] = None,
+        monotonic_fn: Callable[[], float] = time.monotonic,
+        held_cap: int = _DEFAULT_HELD_CAP,
     ) -> None:
-        self._client = client
+        self._central = central_client
+        self._local = local_client
+        # True only between a successful central CONNACK and its disconnect.
+        self._central_connected = False
+        # PUBACK mids posted by paho, applied under the lock (see module docstring).
+        self._acks: queue.SimpleQueue[Any] = queue.SimpleQueue()
         self._outbox = outbox
         self._matcher = matcher
         self._clock = clock
@@ -116,10 +169,16 @@ class Bridge:
         self._frigate_base_url = frigate_base_url.rstrip("/")
         self._time_fn = time_fn
         self._pending_ttl_s = pending_ttl_s
+        # With no health source nothing can be proven, so every signal reports False.
+        self._health = health or FrigateHealth(camera=None, stale_after_s=0.0)
         # object_id -> (rf_cue_id, observed_epoch) awaiting attachment to that
         # track's next detection. The epoch bounds the entry's lifetime so a match
         # whose track never produces a further detection cannot leak (expire_tracks).
         self._pending_cue: dict[str, tuple[str, float]] = {}
+        self._monotonic_fn = monotonic_fn
+        self._held_cap = held_cap
+        self._held: deque[_Held] = deque()
+        self._held_dropped = 0
         # Serializes all shared-state mutation across the paho loop thread and the
         # service's heartbeat thread (re-entrant: a locked public method may call
         # another helper that would otherwise re-lock on the same thread).
@@ -128,43 +187,112 @@ class Bridge:
     # --- MQTT wiring --------------------------------------------------------
 
     def wire(self) -> None:
-        """Register the paho-style callbacks on the injected client.
+        """Register the paho VERSION2 callbacks on both injected clients.
 
-        Subscriptions are (re)issued inside :meth:`handle_connect` so a reconnect
+        Subscriptions are (re)issued on each successful connect so a reconnect
         re-subscribes, mirroring paho's idiom.
         """
-        self._client.on_connect = self._paho_on_connect
-        self._client.on_message = self._paho_on_message
-        self._client.on_publish = self._paho_on_publish
+        self._central.on_connect = self._paho_central_on_connect
+        self._central.on_disconnect = self._paho_central_on_disconnect
+        self._central.on_message = self._paho_on_message
+        self._central.on_publish = self._paho_on_publish
+        self._local.on_connect = self._paho_local_on_connect
+        self._local.on_disconnect = self._paho_local_on_disconnect
+        self._local.on_message = self._paho_on_message
 
-    def _paho_on_connect(self, *_args: Any, **_kwargs: Any) -> None:
-        self.handle_connect()
+    # paho VERSION2 also fires on_connect for a REFUSED CONNACK (bad credentials, for
+    # example), so the reason code decides whether a connection actually exists.
+    def _paho_central_on_connect(
+        self, _client: Any, _userdata: Any, _flags: Any, reason_code: Any, _properties: Any = None
+    ) -> None:
+        if reason_code.is_failure:
+            logger.warning("central broker refused the connection: %s", reason_code)
+            return
+        self.handle_central_connect()
+
+    def _paho_central_on_disconnect(self, *_args: Any, **_kwargs: Any) -> None:
+        self.handle_central_disconnect()
+
+    def _paho_local_on_connect(
+        self, _client: Any, _userdata: Any, _flags: Any, reason_code: Any, _properties: Any = None
+    ) -> None:
+        if reason_code.is_failure:
+            logger.warning("local broker refused the connection: %s", reason_code)
+            return
+        self.handle_local_connect()
+
+    def _paho_local_on_disconnect(self, *_args: Any, **_kwargs: Any) -> None:
+        self.handle_local_disconnect()
 
     def _paho_on_message(self, _client: Any, _userdata: Any, message: Any) -> None:
+        # Stats age from receipt, so a retained copy of unknown age must not count.
+        if message.retain and message.topic == self._health.stats_topic:
+            return
         self.dispatch(message.topic, message.payload)
 
     def _paho_on_publish(self, _client: Any, _userdata: Any, mid: Any, *_a: Any, **_k: Any) -> None:
-        self.on_publish_ack(mid)
+        """Post a PUBACK without ever waiting for the lock (see module docstring)."""
+        self._acks.put(mid)
+        if self._lock.acquire(blocking=False):
+            try:
+                self._drain_acks()
+            finally:
+                self._lock.release()
 
     # --- connection lifecycle ----------------------------------------------
 
-    def handle_connect(self) -> None:
-        """On (re)connect: (re)subscribe to both inbound topics and replay the outbox.
+    @property
+    def central_connected(self) -> bool:
+        """Whether the central client currently holds an accepted connection."""
+        with self._lock:
+            return self._central_connected
+
+    def handle_central_connect(self) -> None:
+        """On central (re)connect: (re)subscribe to RF cues and replay the outbox.
 
         Replay re-sends every un-acked durable entry with its original bytes, so
         events queued during an outage reach fusion with their ``event_id`` and
-        ``timestamp`` intact (carried decision 2). Both topics are subscribed at
-        QoS 1 so a reconnect blip cannot silently drop an inbound Frigate
-        ``object_start``/``object_end`` (or an RF cue).
+        ``timestamp`` intact (carried decision 2). The cue topic is subscribed at
+        QoS 1 so a reconnect blip cannot silently drop an inbound RF cue.
         """
         with self._lock:
-            self._client.subscribe(self._frigate_topic, 1)
-            self._client.subscribe(formats.TOPIC_RF_CUES_IN, 1)
+            self._central_connected = True
+            self._central.subscribe(formats.TOPIC_RF_CUES_IN, 1)
             self._outbox.replay(self._publish)
+            # After replay, which would otherwise re-send what this release flushes.
+            self._release_held()
+            self._drain_acks()
+
+    def handle_central_disconnect(self) -> None:
+        """Central link lost: durable messages wait in the outbox until replay."""
+        with self._lock:
+            self._central_connected = False
+
+    def handle_local_connect(self) -> None:
+        """On local (re)connect: (re)subscribe to Frigate topics at QoS 1."""
+        with self._lock:
+            self._local.subscribe(self._frigate_topic, 1)
+            for topic in self._health.topics:
+                self._local.subscribe(topic, 1)
+
+    def handle_local_disconnect(self) -> None:
+        """Local link lost: cached Frigate health can no longer be verified."""
+        with self._lock:
+            self._health.reset()
 
     def on_publish_ack(self, mid: Any) -> None:
         """Broker PUBACK for a QoS-1 publish: drop the acked entry from the outbox."""
         with self._lock:
+            self._drain_acks()
+            self._outbox.ack(mid)
+
+    def _drain_acks(self) -> None:
+        """Apply PUBACKs paho posted to the mailbox. Caller holds the lock."""
+        while True:
+            try:
+                mid = self._acks.get_nowait()
+            except queue.Empty:
+                return
             self._outbox.ack(mid)
 
     def expire_tracks(self, now: Optional[float] = None) -> None:
@@ -180,6 +308,7 @@ class Bridge:
         if now is None:
             now = float(self._time_fn())
         with self._lock:
+            self._drain_acks()
             self._matcher.expire(now)
             horizon = now - self._pending_ttl_s
             self._pending_cue = {
@@ -197,6 +326,11 @@ class Bridge:
         decoded defensively and skipped — the service never crashes on a bad
         payload (carried decision 4). An unknown topic is ignored.
         """
+        with self._lock:
+            # Checked before JSON decoding: "online" and "ON" are not JSON.
+            if self._health.handles(topic):
+                self._health.update(topic, payload)
+                return
         data = self._decode_json(payload)
         if data is None:
             return
@@ -230,19 +364,27 @@ class Bridge:
         """Parse a Frigate event, observe the track, build + deliver a detection.
 
         The track is observed unconditionally (keeps the matcher fresh even in the
-        boot window). The envelope build is wrapped so a not-ready clock drops the
-        detection instead of stamping an untrusted time. A pending ``rf_cue_id`` is
-        attached to this detection and consumed only once the build succeeds.
+        boot window). With the clock unsynced a durable detection is held and an
+        ``object_update`` is dropped. A pending ``rf_cue_id`` is attached to this
+        detection and consumed only if the detection will actually be delivered.
         """
         event = parse_frigate_event(payload)
         if event is None:
             return
+        self._release_held()
 
         # Record ALL zones the track currently occupies (Frigate zones overlap), so
         # an RF cue for ANY of them can match — not just zones[0]. A track outside
         # every defined zone is recorded under a sentinel no real cue zone matches.
         zones = list(event.zones) if event.zones else [_NO_ZONE]
         self._matcher.observe_track(event.object_id, zones, float(self._time_fn()))
+
+        durable = event.event != "object_update"
+        synced = self._clock_ready()
+        if not durable and not synced:
+            # The pending cue stays for the next detection that is really delivered.
+            logger.debug("clock not NTP-synced; dropping object_update for %s", event.object_id)
+            return
 
         attributes: dict[str, Any] = {
             "bbox": list(event.bbox),
@@ -255,35 +397,29 @@ class Bridge:
         if pending is not None:
             attributes["rf_cue_id"] = pending[0]
 
-        try:
-            message = formats.detection_event(
-                node_id=self._node_id,
-                event=event.event,
-                object_id=event.object_id,
-                label=event.label,
-                confidence=event.confidence,
-                zones=list(event.zones),
-                attributes=attributes,
-                clock=self._clock,
-            )
-        except formats.ClockNotReady:
-            # A non-end detection keeps its pending cue for the next (trusted)
-            # detection; an object_end means the track is gone, so its pending cue
-            # is dropped here rather than left to leak until it ages out.
-            if event.event == "object_end":
-                self._pending_cue.pop(event.object_id, None)
-            logger.debug("clock not NTP-synced; dropping detection for %s", event.object_id)
-            return
+        message = formats.detection_event(
+            node_id=self._node_id,
+            event=event.event,
+            object_id=event.object_id,
+            label=event.label,
+            confidence=event.confidence,
+            zones=list(event.zones),
+            attributes=attributes,
+            clock=self._clock if synced else _UNSTAMPED,
+        )
 
         # Consume the pending cue now that a detection is actually emitted (this is
         # the "next detection" the match was held for); an object_end also clears it.
         self._pending_cue.pop(event.object_id, None)
 
-        durable = event.event != "object_update"
+        if not synced:
+            self._hold(formats.TOPIC_DETECTIONS, message)
+            return
+
         self._outbox.enqueue(formats.TOPIC_DETECTIONS, message, durable=durable)
         if durable:
-            self._outbox.flush(self._publish)
-        else:
+            self._flush()
+        elif self._central_connected:
             # object_update: best-effort QoS 0, published directly (never persisted).
             self._publish(formats.TOPIC_DETECTIONS, self._serialize(message), 0)
 
@@ -305,49 +441,123 @@ class Bridge:
 
         Every cue the node acts on yields a cue-ack (matched or not) so fusion
         always sees the cue was received. On a match the ``rf_cue_id`` is held for
-        the matched track's next detection. A not-ready clock drops the ack.
+        the matched track's next detection. With the clock unsynced the ack is held,
+        with the match decided now: the track may be gone by the time the clock syncs.
         """
         cue = parse_cue(payload)
         if cue is None:
             return
+        self._release_held()
 
-        try:
-            ack = handle_cue(cue, self._matcher, self._node_id, self._clock)
-        except formats.ClockNotReady:
-            logger.debug("clock not NTP-synced; dropping cue-ack for %s", cue.rf_cue_id)
-            return
+        synced = self._clock_ready()
+        ack = handle_cue(cue, self._matcher, self._node_id, self._clock if synced else _UNSTAMPED)
 
         if ack.get("matched") and ack.get("object_id") is not None:
             self._pending_cue[ack["object_id"]] = (ack["rf_cue_id"], float(self._time_fn()))
 
+        if not synced:
+            self._hold(formats.TOPIC_CUE_ACKS, ack)
+            return
+
         self._outbox.enqueue(formats.TOPIC_CUE_ACKS, ack, durable=True)
-        self._outbox.flush(self._publish)
+        self._flush()
+
+    # --- hold until NTP sync (DESIGN.md 7.5) --------------------------------
+
+    def _clock_ready(self) -> bool:
+        """Return whether the injected clock can stamp a trusted timestamp."""
+        try:
+            self._clock.now_rfc3339()
+        except formats.ClockNotReady:
+            return False
+        return True
+
+    def _hold(self, topic: str, message: dict) -> None:
+        """Hold a durable message for the clock to sync, dropping the oldest at the cap."""
+        self._held.append(_Held(topic, message, float(self._monotonic_fn())))
+        if len(self._held) > self._held_cap:
+            self._held.popleft()
+            self._held_dropped += 1
+            if self._held_dropped % _HELD_DROP_WARN_EVERY == 1:
+                logger.warning(
+                    "clock not NTP-synced and %d events held: dropping the oldest "
+                    "(%d dropped so far)",
+                    self._held_cap,
+                    self._held_dropped,
+                )
+
+    def _release_held(self) -> None:
+        """If the clock has synced, stamp every held event and enqueue them in order.
+
+        Each is stamped now minus the monotonic time elapsed since its capture, so a
+        node that booted with no uplink still reports when each event happened.
+        """
+        if not self._held or not self._clock_ready():
+            return
+        wall_now = float(self._time_fn())
+        mono_now = float(self._monotonic_fn())
+        batch = [
+            (
+                held.topic,
+                formats.with_timestamp(
+                    held.message,
+                    formats.rfc3339_from_epoch(wall_now - (mono_now - held.captured_at)),
+                ),
+            )
+            for held in self._held
+        ]
+        self._held.clear()
+        logger.info(
+            "clock synced: releasing %d held events (%d dropped at the cap)",
+            len(batch),
+            self._held_dropped,
+        )
+        self._held_dropped = 0
+        self._outbox.enqueue_many(batch)
+        self._flush()
 
     # --- status heartbeat ---------------------------------------------------
+
+    def node_state(self) -> NodeState:
+        """Evaluate current health: Frigate's topics plus the central connection."""
+        with self._lock:
+            return self._health.evaluate(link_online=self._central_connected)
 
     def publish_status(self, state: NodeState) -> None:
         """Build and durably deliver one ``camera.node-status.v0`` heartbeat.
 
-        Dropped silently while the clock is not NTP-synced (boot window).
+        Dropped silently while the clock is not NTP-synced (boot window). Also the
+        regular trigger that releases held events once the clock has synced.
         """
-        try:
-            message = build_status(state, self._node_id, self._clock)
-        except formats.ClockNotReady:
-            logger.debug("clock not NTP-synced; dropping status heartbeat")
-            return
         with self._lock:
+            self._release_held()
+            try:
+                message = build_status(state, self._node_id, self._clock)
+            except formats.ClockNotReady:
+                logger.debug("clock not NTP-synced; dropping status heartbeat")
+                return
             self._outbox.enqueue(formats.TOPIC_STATUS, message, durable=True)
-            self._outbox.flush(self._publish)
+            self._flush()
 
     # --- outbound publish ---------------------------------------------------
 
+    def _flush(self) -> None:
+        """Send queued durable entries if central is up, then apply posted acks.
+
+        While central is down the entries simply stay in the outbox; the next
+        :meth:`handle_central_connect` replays them.
+        """
+        if self._central_connected:
+            self._outbox.flush(self._publish)
+        self._drain_acks()
+
     def _publish(self, topic: str, payload: bytes, qos: int):
-        """Publish via the injected client and return the broker ``mid`` for ack.
+        """Publish via the central client and return the broker ``mid`` for ack.
 
         This is the ``publish(topic, payload_bytes, qos) -> mid`` callback the
         outbox drives for durable flush/replay.
         """
-        info = self._client.publish(topic, payload, qos)
+        info = self._central.publish(topic, payload, qos)
         return getattr(info, "mid", None)
 
     @staticmethod

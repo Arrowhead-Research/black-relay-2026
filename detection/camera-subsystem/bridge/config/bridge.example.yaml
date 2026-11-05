@@ -12,10 +12,10 @@
 # (one RLC-520A per node), so this is also the camera id on every detection.
 node_id: cam-01
 
-# Central fusion MQTT broker. Camera.* events, cue-acks and status are published
-# here; the Frigate events and RF cues are also consumed from here (v0 assumes
-# Frigate publishes to this same broker — DESIGN.md 4.2; a separate Frigate broker
-# is a documented follow-up).
+# Central fusion MQTT broker (required). Camera.* events, cue-acks and status are
+# published here and RF cues are consumed from here. This connection drives the
+# outbox: a central outage only queues durable events, which replay on reconnect.
+# Frigate does NOT publish here; see frigate.mqtt_host below (DESIGN.md 4.1).
 broker:
   host: 10.0.0.2          # central node address on the site LAN (not the WAN)
   port: 1883
@@ -42,20 +42,29 @@ outbox:
   max_bytes: 67108864      # 64 MiB on-disk cap; oldest durable entries shed first
   max_age_s: 604800        # 7 days; entries older than this are shed on overflow
 
-# Node status heartbeat cadence (seconds).
+# Node status heartbeat cadence (seconds). Frigate stats older than 3 of these count
+# as stale, and camera_online / detector_ok / recording_ok then report false. Keep
+# Frigate's mqtt.stats_interval (default 60) below 3 x this value, or a healthy node
+# will report false between stats messages.
 status_interval_s: 30
 
-# Edge Frigate. `topic` is the Frigate events topic subscribed on the broker;
+# Edge Frigate. `topic` is the Frigate events topic subscribed on the local broker
+# (its prefix must match Frigate's mqtt.topic_prefix);
 # `base_url` is the node-local Frigate address used to MINT snapshot_url on each
 # detection (service-side — the parser leaves it null; DESIGN.md 5.6). base_url is
 # reached by clients over the site LAN / by remote ops over Tailscale, never the WAN.
 frigate:
   topic: frigate/events
   base_url: http://cam-01.local:5000
-  # Frigate's MQTT endpoint. v0 uses a single MQTT connection (the broker above),
-  # so configure Frigate to publish to that broker and keep these equal to it. A
-  # dedicated node-local Frigate broker (a second connection) is a follow-up, not
-  # v0 — these keys document the intended endpoint and are not yet dialed
-  # separately by the bridge.
-  mqtt_host: 10.0.0.2
+  # The camera's name in Frigate's config: selects its entry in frigate/stats and its
+  # frigate/<camera>/recordings/state topic. If unset, camera_online and recording_ok
+  # always report false.
+  camera: cam-01
+  # The node-local MQTT broker. Point Frigate's `mqtt:` config at this same broker,
+  # never at the central one: if Frigate publishes centrally, a central outage loses
+  # every event it emits during that outage. The bridge's local connection only
+  # subscribes to Frigate topics here, and it reconnects independently of `broker`.
+  # Installing and running this broker on the node is an ops step, not done by the
+  # bridge. Defaults: 127.0.0.1:1883.
+  mqtt_host: 127.0.0.1
   mqtt_port: 1883

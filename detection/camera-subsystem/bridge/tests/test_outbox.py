@@ -354,3 +354,64 @@ def test_oversized_single_entry_logs_distinct_warning(tmp_path, caplog):
     # oversized durable event is not hidden inside the normal FIFO-overflow message.
     messages = [r.getMessage() for r in caplog.records]
     assert any("single durable entry" in m and "exceeds max_bytes" in m for m in messages)
+
+
+# --- enqueue_many: one fsync and one overflow pass for a whole batch ---------
+
+
+def _batch_msg(i: int) -> dict:
+    return {"event_id": f"e{i}", "payload": "x" * 20}
+
+
+def test_enqueue_many_persists_in_order_across_restart(tmp_path):
+    path = str(tmp_path / "o.jsonl")
+    box = Outbox(path, max_bytes=10_000_000, max_age_s=1e9)
+    box.enqueue("t", _batch_msg(0), durable=True)
+    box.enqueue_many([("t", _batch_msg(1)), ("u", _batch_msg(2))])
+
+    restarted = Outbox(path, max_bytes=10_000_000, max_age_s=1e9)
+    sent = []
+    restarted.replay(lambda topic, payload, qos: sent.append((topic, payload, qos)) or len(sent))
+    assert [(t, json.loads(p)["event_id"], q) for t, p, q in sent] == [
+        ("t", "e0", 1),
+        ("t", "e1", 1),
+        ("u", "e2", 1),
+    ]
+
+
+def test_enqueue_many_entries_flush_and_ack_like_enqueued_ones(tmp_path):
+    box = Outbox(str(tmp_path / "o.jsonl"), max_bytes=10_000_000, max_age_s=1e9)
+    box.enqueue_many([("t", _batch_msg(1)), ("t", _batch_msg(2))])
+    sent = []
+    box.flush(lambda topic, payload, qos: sent.append(payload) or len(sent))
+    assert len(sent) == 2
+    box.ack(1)
+    box.ack(2)
+    assert Outbox(str(tmp_path / "o.jsonl"), max_bytes=10_000_000, max_age_s=1e9).flush(
+        lambda *_a: 1
+    ) == []
+
+
+def test_enqueue_many_enforces_overflow_oldest_first(tmp_path):
+    box = Outbox(str(tmp_path / "o.jsonl"), max_bytes=400, max_age_s=1e9)
+    box.enqueue_many([("t", _batch_msg(i)) for i in range(20)])
+    sent = []
+    box.flush(lambda topic, payload, qos: sent.append(json.loads(payload)["event_id"]) or len(sent))
+    assert sent and len(sent) < 20
+    assert sent[-1] == "e19"  # the newest survive
+
+
+def test_enqueue_many_fsyncs_once(tmp_path, monkeypatch):
+    import camerabridge.outbox as outbox_module
+
+    calls = []
+    real = outbox_module.os.fsync
+    monkeypatch.setattr(outbox_module.os, "fsync", lambda fd: (calls.append(fd), real(fd))[1])
+    box = Outbox(str(tmp_path / "o.jsonl"), max_bytes=10_000_000, max_age_s=1e9)
+    box.enqueue_many([("t", _batch_msg(i)) for i in range(50)])
+    assert len(calls) == 1
+
+
+def test_enqueue_many_empty_is_a_noop(tmp_path):
+    Outbox(str(tmp_path / "o.jsonl"), max_bytes=10, max_age_s=1e9).enqueue_many([])
+    assert not (tmp_path / "o.jsonl").exists()
