@@ -181,6 +181,7 @@ def test_build_status_mints_event_id():
 STALE_S = 90.0
 WALL = 1_800_000_000.0
 RECORDINGS = "frigate/cam-01/recordings/state"
+HEALTHY_REPORT = {"detector_error": False, "log_read_at": int(WALL), "record_writing": True}
 
 
 def frigate_stats(
@@ -209,7 +210,7 @@ def frigate_stats(
 def heartbeat(tmp_path, stats_payload, *, link=None, address=None) -> dict:
     state_file = tmp_path / "state.json"
     if link is not None:
-        state_file.write_text(json.dumps({"updated": int(WALL), **link}))
+        state_file.write_text(json.dumps({"updated": int(WALL), **HEALTHY_REPORT, **link}))
     health = FrigateHealth(
         camera="cam-01",
         stale_after_s=STALE_S,
@@ -244,7 +245,8 @@ def test_detector_ok_false_when_a_hailo_failure_is_reported(tmp_path):
 
 
 def test_detector_ok_true_when_idle_after_real_inference(tmp_path):
-    assert heartbeat(tmp_path, frigate_stats(detection_fps=0.0))["detector_ok"] is True
+    message = heartbeat(tmp_path, frigate_stats(detection_fps=0.0), link={"state": "adopted"})
+    assert message["detector_ok"] is True
 
 
 def test_camera_online_false_at_zero_fps_and_on_stale_stats(tmp_path):
@@ -254,7 +256,7 @@ def test_camera_online_false_at_zero_fps_and_on_stale_stats(tmp_path):
 
 
 def test_recording_ok_false_when_camera_is_offline(tmp_path):
-    message = heartbeat(tmp_path, frigate_stats(fps=0.0))
+    message = heartbeat(tmp_path, frigate_stats(fps=0.0), link={"state": "adopted"})
     assert message["recording_ok"] is False
 
 
@@ -277,7 +279,9 @@ def test_unset_retry_after_and_reason_are_omitted(tmp_path):
 def test_missing_state_file_omits_the_attribute(tmp_path):
     message = heartbeat(tmp_path, frigate_stats())
     assert message["attributes"] == {}
-    assert message["detector_ok"] is True
+    # The only thing that can see a detector crash is not there, so nothing proves it healthy.
+    assert message["detector_ok"] is False
+    assert message["recording_ok"] is False
 
 
 def test_heartbeat_attributes_carry_the_node_address(tmp_path):

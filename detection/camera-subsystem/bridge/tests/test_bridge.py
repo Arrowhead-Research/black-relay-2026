@@ -915,7 +915,7 @@ def frigate_stats(camera: str = "cam-01", *, last_updated: float = WALL) -> byte
     return json.dumps(
         {
             "cameras": {camera: {"camera_fps": 5.0, "detection_enabled": True}},
-            "detectors": {"hailo": {"inference_speed": 9.5, "pid": 42}},
+            "detectors": {"hailo": {"inference_speed": 9.5, "detection_start": 0.0, "pid": 42}},
             "processes": {"recording": {"pid": 77}},
             "service": {"uptime": 3600, "last_updated": last_updated},
         }
@@ -923,6 +923,19 @@ def frigate_stats(camera: str = "cam-01", *, last_updated: float = WALL) -> byte
 
 
 HEALTHY_STATS = frigate_stats()
+
+
+def healthy_link_file(tmp_path) -> Path:
+    path = tmp_path / "state.json"
+    report = {
+        "state": "adopted",
+        "updated": WALL,
+        "detector_error": False,
+        "log_read_at": WALL,
+        "record_writing": True,
+    }
+    path.write_text(json.dumps(report))
+    return path
 
 
 def health_bridge(tmp_path, mono, central=None, local=None, connected=True):
@@ -934,7 +947,11 @@ def health_bridge(tmp_path, mono, central=None, local=None, connected=True):
         local_client=local,
         connected=connected,
         health=FrigateHealth(
-            camera="cam-01", stale_after_s=90.0, monotonic_fn=mono, wall_fn=lambda: WALL
+            camera="cam-01",
+            stale_after_s=90.0,
+            monotonic_fn=mono,
+            wall_fn=lambda: WALL,
+            link_state_path=healthy_link_file(tmp_path),
         ),
     )
 

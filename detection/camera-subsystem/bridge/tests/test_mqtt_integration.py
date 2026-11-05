@@ -378,8 +378,22 @@ def test_paho_exposes_the_thread_and_retained_state_the_service_relies_on(rig):
     svc.local.loop_start()
 
 
-def test_frigate_health_tracked_and_central_stays_up_when_local_dies(rig):
+def test_frigate_health_tracked_and_central_stays_up_when_local_dies(rig, tmp_path, monkeypatch):
     local, central, service, peer = rig
+    link_state = tmp_path / "camera-link-state.json"
+    now = time.time()
+    link_state.write_text(
+        json.dumps(
+            {
+                "state": "adopted",
+                "updated": now,
+                "detector_error": False,
+                "log_read_at": now,
+                "record_writing": True,
+            }
+        )
+    )
+    monkeypatch.setattr(cli, "_CAMERA_LINK_STATE", link_state)
     svc = service()
     frigate = peer(local.port)
     wait_until(lambda: svc.bridge.central_connected, what="central connection")
@@ -393,7 +407,7 @@ def test_frigate_health_tracked_and_central_stays_up_when_local_dies(rig):
         json.dumps(
             {
                 "cameras": {"cam-01": {"camera_fps": 5.0, "detection_enabled": True}},
-                "detectors": {"hailo": {"inference_speed": 9.0, "pid": 42}},
+                "detectors": {"hailo": {"inference_speed": 9.0, "detection_start": 0.0, "pid": 42}},
                 "processes": {"recording": {"pid": 77}},
                 "service": {"uptime": 3600, "last_updated": time.time()},
             }

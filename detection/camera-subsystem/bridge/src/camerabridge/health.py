@@ -20,11 +20,17 @@ Frigate shares this host's clock, so the two timestamps are comparable, and a cl
 step can only report False until the next stats message.
 
 **detector_ok.** Frigate gives no direct sign of a working detector. A crashed detector
-keeps its pid and its last speed, and one that never ran reports the starting value,
-so a true needs detection on, a speed other than the starting value since this Frigate
-started, and no failure claimed by ``camera-link``. A quiet scene after a fresh start
-therefore reports False until the first real inference. That is accepted: an idle scene
-gives no evidence.
+keeps its pid and its last speed, one that never ran reports the starting value, and one
+timing out on every frame reports a speed with zeros for results. So a true needs detection
+on, a speed since this Frigate started that is neither the starting value nor a timeout's,
+no detection stuck in progress, and a fresh ``camera-link`` report saying it read Frigate's
+log recently and found no failure. Without that report nothing can see a crash, so a missing,
+corrupt or stale one means False. A quiet scene after a fresh start reports False until the
+first real inference. That is accepted: an idle scene gives no evidence.
+
+**recording_ok.** Frigate's recordings state is a setting, and ``camera_fps`` is the detect
+stream's. Only ``camera-link`` can see segments being written, so a true also needs a fresh
+report of ``record_writing``.
 
 **Threading.** This class holds no lock. The bridge's single lock serializes every
 call, like the rest of its shared state.
@@ -50,10 +56,21 @@ __all__ = ["FrigateHealth", "interface_ipv4"]
 # v0.18.2: frigate/object_detection/base.py:331 starts avg_inference_speed at 0.01 s, and
 # frigate/stats/util.py:155 reports it times 1000.
 _INITIAL_INFERENCE_SPEED = 10.0
+# At or above this, the average holds a timeout. Frigate v0.18.2:
+# frigate/detectors/plugins/hailo8l.py:343 waits 1 s and then returns zeros, and
+# frigate/object_detection/base.py:182 averages the 1000 ms in at one tenth, so whatever the
+# average was, it is now at least 100 ms. Kit 1's Hailo runs at 7.65 ms.
+_INFERENCE_SPEED_CEILING = 100.0
+# A detection in progress for longer is stuck. Frigate v0.18.2: frigate/watchdog.py:125, whose
+# restart keeps the speed, so nothing else in the stats shows it.
+_DETECTION_STUCK_S = 10.0
 # Frigate's uptime and last_updated are separate whole-second readings of the clock.
 _START_TIME_TOLERANCE_S = 2.0
 # Older than this, camera-link's state file says nothing, for or against.
 _LINK_STATE_MAX_AGE_S = 300.0
+# camera-link reads Frigate's log every 30 s. Older than this, it has missed three reads, and
+# a clean result is only the value it started with.
+_LOG_READ_MAX_AGE_S = 90.0
 # NetworkManager's address for the setup AP, which is no way to reach this node.
 _SETUP_AP_IP = "10.42.0.1"
 _SIOCGIFADDR = 0x8915
@@ -61,12 +78,29 @@ _SIOCGIFADDR = 0x8915
 
 def _is_number(value: Any) -> bool:
     """Return True for a real, finite number (a bool is not a measurement)."""
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:  # an int too large for a float, which JSON can carry
+        return False
 
 
 def _positive(value: Any) -> bool:
     """Return True for a real, finite number above zero."""
     return _is_number(value) and value > 0
+
+
+def _is_inference_speed(value: Any) -> bool:
+    """Return True for a speed that holds no timeout. The starting value is the caller's."""
+    return _positive(value) and value < _INFERENCE_SPEED_CEILING
+
+
+def _is_stuck(detection_start: Any, stats_updated: float) -> bool:
+    """Timed against the stats' own clock. An unreadable start cannot show it is not stuck."""
+    if not _is_number(detection_start):
+        return True
+    return detection_start > 0 and stats_updated - detection_start > _DETECTION_STUCK_S
 
 
 def _decode_text(payload: Any) -> Optional[str]:
@@ -102,14 +136,16 @@ class _LinkReport:
     state: str
     retry_after: Optional[float]
     reason: Optional[str]
-    detector_error: bool
+    # It read Frigate's log recently and found no failure.
+    detector_clean: bool
+    record_writing: bool
 
 
 def _parse_link_report(content: bytes, now: float) -> Optional[_LinkReport]:
     """Return the report in a state file's ``content``, or ``None`` if it says nothing usable."""
     try:
         report = json.loads(content)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     if not isinstance(report, dict):
         return None
@@ -119,13 +155,17 @@ def _parse_link_report(content: bytes, now: float) -> Optional[_LinkReport]:
     if abs(now - updated) > _LINK_STATE_MAX_AGE_S:
         return None
     retry_after, reason = report.get("retry_after"), report.get("reason")
-    claim = report.get("detector_error")
+    read_at = report.get("log_read_at")
     return _LinkReport(
         state=state,
         retry_after=retry_after if _is_number(retry_after) else None,
         reason=reason if isinstance(reason, str) else None,
-        # Anything but a plain false or nothing is a claim: this field only ever costs a true.
-        detector_error=claim is not None and claim is not False,
+        detector_clean=(
+            report.get("detector_error") is False
+            and _positive(read_at)
+            and abs(now - read_at) <= _LOG_READ_MAX_AGE_S
+        ),
+        record_writing=report.get("record_writing") is True,
     )
 
 
@@ -203,7 +243,7 @@ class FrigateHealth:
         text = _decode_text(payload)
         try:
             stats = json.loads(text) if text is not None else None
-        except ValueError:
+        except (ValueError, RecursionError):
             stats = None
         if isinstance(stats, dict):
             self._stats = stats
@@ -235,7 +275,7 @@ class FrigateHealth:
         if isinstance(detectors, dict):
             for name, detector in detectors.items():
                 speed = detector.get("inference_speed") if isinstance(detector, dict) else None
-                if _positive(speed) and speed != _INITIAL_INFERENCE_SPEED:
+                if _is_inference_speed(speed) and speed != _INITIAL_INFERENCE_SPEED:
                     self._inferred.add(name)
 
     @staticmethod
@@ -280,11 +320,13 @@ class FrigateHealth:
         detectors = stats.get("detectors")
         if not isinstance(detectors, dict) or not detectors:
             return False
+        updated = self._service(stats).get("last_updated")
         return all(
             isinstance(detector, dict)
             and name in self._inferred
-            and _positive(detector.get("inference_speed"))
+            and _is_inference_speed(detector.get("inference_speed"))
             and _positive(detector.get("pid"))
+            and not _is_stuck(detector.get("detection_start"), updated)
             for name, detector in detectors.items()
         )
 
@@ -305,17 +347,20 @@ class FrigateHealth:
         return NodeState(
             camera_online=camera_online,
             link_online=link_online,
-            # The recordings state is Frigate's setting: it stays ON with no frames.
+            # The recordings state is Frigate's setting: it stays ON with no frames or disk.
             recording_ok=(
                 stats is not None
                 and self._recording_on
                 and camera_online
                 and self._recorder_running(stats)
+                and report is not None
+                and report.record_writing
             ),
             detector_ok=(
                 stats is not None
                 and self._detector_ok(stats)
-                and not (report is not None and report.detector_error)
+                and report is not None
+                and report.detector_clean
             ),
             camera_link_state=report.state if report else None,
             retry_after=report.retry_after if report else None,

@@ -8,6 +8,8 @@ fail-safe: no data, stale stats, or Frigate offline must report False, never Tru
 from __future__ import annotations
 
 import json
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -22,6 +24,16 @@ RECORDINGS = f"frigate/{CAMERA}/recordings/state"
 
 WALL = 1_800_000_000.0
 STARTED = WALL - 3600
+# What a healthy camera-link reports. detector_ok and recording_ok cannot be true without it.
+HEALTHY_LINK = {
+    "state": "adopted",
+    "updated": int(WALL),
+    "detector_error": False,
+    "log_read_at": int(WALL),
+    "record_writing": True,
+}
+_HEALTHY_LINK_FILE = Path(tempfile.mkdtemp(prefix="link-state-")) / "state.json"
+_HEALTHY_LINK_FILE.write_text(json.dumps(HEALTHY_LINK))
 
 
 class Mono:
@@ -76,7 +88,11 @@ def stats(
 
 def make_health(mono=None, camera=CAMERA, wall_fn=wall) -> FrigateHealth:
     return FrigateHealth(
-        camera=camera, stale_after_s=STALE_S, monotonic_fn=mono or Mono(), wall_fn=wall_fn
+        camera=camera,
+        stale_after_s=STALE_S,
+        monotonic_fn=mono or Mono(),
+        wall_fn=wall_fn,
+        link_state_path=_HEALTHY_LINK_FILE,
     )
 
 
@@ -92,7 +108,9 @@ def flags(state) -> tuple[bool, bool, bool]:
 
 def test_topics_follow_the_configured_prefix_and_camera():
     assert set(make_health().topics) == {AVAILABLE, STATS, RECORDINGS}
-    health = FrigateHealth(camera="front", topic_prefix="site1", stale_after_s=STALE_S, wall_fn=wall)
+    health = FrigateHealth(
+        camera="front", topic_prefix="site1", stale_after_s=STALE_S, wall_fn=wall
+    )
     assert set(health.topics) == {"site1/available", "site1/stats", "site1/front/recordings/state"}
 
 
@@ -343,7 +361,8 @@ def test_a_lost_local_broker_keeps_a_real_value_provable():
     health = make_health()
     online(health, stats(detectors=HAILO_WORKING))
     health.reset()
-    online(health, stats(detectors=HAILO_WORKING))
+    # The starting value could not earn the proof again, so a true here is the proof kept.
+    online(health, stats(detectors=HAILO_AT_START))
     assert health.evaluate(link_online=True).detector_ok is True
 
 
@@ -438,7 +457,17 @@ def link_health(tmp_path, content, *, address=None, age=0.0) -> FrigateHealth:
     if isinstance(content, (bytes, str)):
         path.write_bytes(content.encode() if isinstance(content, str) else content)
     elif content is not None:
-        path.write_text(json.dumps({"updated": int(WALL - age), **content}))
+        path.write_text(
+            json.dumps(
+                {
+                    "detector_error": False,
+                    "log_read_at": int(WALL),
+                    "record_writing": True,
+                    "updated": int(WALL - age),
+                    **content,
+                }
+            )
+        )
     return FrigateHealth(
         camera=CAMERA,
         stale_after_s=STALE_S,
@@ -518,54 +547,246 @@ def test_a_detector_error_makes_detector_ok_false_and_touches_nothing_else(tmp_p
     assert state.recording_ok is True
 
 
-@pytest.mark.parametrize("claim", ["yes", 1, 0, {}])
+@pytest.mark.parametrize("claim", ["yes", 1, 0, {}, None])
 def test_a_detector_error_that_is_not_plainly_false_counts_as_a_claim(tmp_path, claim):
     health = link_health(tmp_path, {"state": "adopted", "detector_error": claim})
     online(health, stats())
     assert health.evaluate(link_online=True).detector_ok is False
 
 
-@pytest.mark.parametrize(
-    "report", [{"state": "adopted", "detector_error": False}, {"state": "adopted"}, None, b"nope"]
-)
-def test_no_error_claim_leaves_detector_ok_to_the_stats(tmp_path, report):
-    health = link_health(tmp_path, report)
+def test_a_clean_fresh_report_lets_the_stats_decide(tmp_path):
+    health = link_health(tmp_path, {"state": "adopted"})
     online(health, stats())
     assert health.evaluate(link_online=True).detector_ok is True
 
 
+def test_detector_ok_is_false_with_no_report_at_all(tmp_path):
+    # camera-link is the only thing that can see a crash, and it is not there to say.
+    health = link_health(tmp_path, None)
+    online(health, stats())
+    state = health.evaluate(link_online=True)
+    assert state.detector_ok is False
+    assert state.camera_online is True
+
+
+@pytest.mark.parametrize("content", [b"", b"not json{", b"\xff\xfe", b"[]", b"null"])
+def test_detector_ok_is_false_with_a_corrupt_report(tmp_path, content):
+    health = link_health(tmp_path, content)
+    online(health, stats())
+    assert health.evaluate(link_online=True).detector_ok is False
+
+
+def test_detector_ok_is_false_when_the_report_does_not_mention_the_detector(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"state": "adopted", "updated": WALL, "log_read_at": WALL}))
+    health = FrigateHealth(
+        camera=CAMERA, stale_after_s=STALE_S, wall_fn=wall, link_state_path=path
+    )
+    online(health, stats())
+    assert health.evaluate(link_online=True).detector_ok is False
+
+
 def test_a_state_file_at_the_age_limit_is_believed(tmp_path):
-    health = link_health(tmp_path, {"state": "adopted", "detector_error": True}, age=300)
+    health = link_health(tmp_path, {"state": "adopted"}, age=300)
     online(health, stats())
     state = health.evaluate(link_online=True)
     assert state.camera_link_state == "adopted"
-    assert state.detector_ok is False
+    assert state.detector_ok is True
 
 
 @pytest.mark.parametrize("age", [301, -301])
-def test_a_stale_state_file_is_not_believed_either_way(tmp_path, age):
+@pytest.mark.parametrize("claim", [True, False])
+def test_a_stale_state_file_gives_no_attributes_and_no_true(tmp_path, age, claim):
     health = link_health(
-        tmp_path, {"state": "needs_reset", "reason": "old", "detector_error": True}, age=age
+        tmp_path, {"state": "needs_reset", "reason": "old", "detector_error": claim}, age=age
     )
     online(health, stats())
     state = health.evaluate(link_online=True)
     assert state.camera_link_state is None
     assert state.reason is None
-    # Its claim of an error is as old as the rest of it.
-    assert state.detector_ok is True
+    assert state.detector_ok is False
+    assert state.recording_ok is False
 
 
 @pytest.mark.parametrize("updated", [None, "now", True])
 def test_a_state_file_with_no_usable_time_is_not_believed(tmp_path, updated):
     path = tmp_path / "state.json"
-    path.write_text(json.dumps({"state": "adopted", "updated": updated, "detector_error": True}))
+    path.write_text(
+        json.dumps({"state": "adopted", "updated": updated, "detector_error": False})
+    )
     health = FrigateHealth(
         camera=CAMERA, stale_after_s=STALE_S, wall_fn=wall, link_state_path=path
     )
     online(health, stats())
     state = health.evaluate(link_online=True)
     assert state.camera_link_state is None
+    assert state.detector_ok is False
+
+
+# --- the log scan's own evidence -------------------------------------------------
+
+
+def test_a_log_read_at_the_limit_counts(tmp_path):
+    health = link_health(tmp_path, {"state": "adopted", "log_read_at": WALL - 90})
+    online(health, stats())
+    assert health.evaluate(link_online=True).detector_ok is True
+
+
+@pytest.mark.parametrize(
+    "read_at", [WALL - 91, WALL + 91, None, "recently", True, 0], ids=str
+)
+def test_no_recent_log_read_is_unknown_and_so_false(tmp_path, read_at):
+    # A clean detector_error from a scan that has not run is only its starting value.
+    health = link_health(tmp_path, {"state": "adopted", "log_read_at": read_at})
+    online(health, stats())
+    state = health.evaluate(link_online=True)
+    assert state.detector_ok is False
+    assert state.camera_link_state == "adopted"
+
+
+# --- a detector that answers without inferring -----------------------------------
+
+
+def hailo(speed=7.65, started=0.0):
+    return {"hailo": {"inference_speed": speed, "detection_start": started, "pid": 42}}
+
+
+def test_a_detector_timing_out_from_the_start_never_earns_the_proof():
+    # hailo8l.py:343 gives up after 1 s and returns zeros, and base.py:182 averages that in:
+    # (10 * 9 + 1000) / 10 is 109 ms, with a live pid and no crash.
+    health = make_health()
+    online(health, stats(detectors=hailo(109.0)))
+    assert health.evaluate(link_online=True).detector_ok is False
+
+
+@pytest.mark.parametrize("speed", [100.0, 109.0, 1000.0])
+def test_a_working_detector_that_starts_timing_out_goes_false(speed):
+    health = make_health()
+    online(health, stats(detectors=hailo()))
+    health.update(STATS, stats(detectors=hailo(speed)))
+    assert health.evaluate(link_online=True).detector_ok is False
+
+
+def test_just_below_the_ceiling_counts():
+    # Whatever the average was, one 1000 ms sample leaves it at 100 ms or more.
+    health = make_health()
+    online(health, stats(detectors=hailo(99.99)))
+    assert health.evaluate(link_online=True).detector_ok is True
+
+
+def test_a_detector_recovered_below_the_ceiling_reads_true_again():
+    health = make_health()
+    online(health, stats(detectors=hailo()))
+    health.update(STATS, stats(detectors=hailo(109.0)))
+    health.update(STATS, stats(detectors=hailo(98.8)))
+    assert health.evaluate(link_online=True).detector_ok is True
+
+
+def test_a_detection_stuck_for_over_ten_seconds_is_false():
+    # watchdog.py:125 calls the same thing stuck, and restarting keeps the speed.
+    health = make_health()
+    online(health, stats(detectors=hailo(started=WALL - 60)))
+    assert health.evaluate(link_online=True).detector_ok is False
+
+
+def test_a_detection_running_right_now_is_no_fault():
+    health = make_health()
+    online(health, stats(detectors=hailo(started=WALL - 10)))
+    assert health.evaluate(link_online=True).detector_ok is True
+
+
+def test_detection_start_is_timed_against_the_stats_own_clock():
+    health = make_health()
+    online(health, stats(detectors=hailo(started=WALL - 70), last_updated=WALL - 60))
+    assert health.evaluate(link_online=True).detector_ok is True
+
+
+@pytest.mark.parametrize("started", [None, "0", True, float("nan")])
+def test_an_unreadable_detection_start_is_false(started):
+    health = make_health()
+    online(health, stats(detectors=hailo(started=started)))
+    assert health.evaluate(link_online=True).detector_ok is False
+
+
+# --- recording_ok needs segments really being written ------------------------------
+
+
+def test_recording_ok_with_segments_being_written(tmp_path):
+    health = link_health(tmp_path, {"state": "adopted", "record_writing": True})
+    online(health, stats())
+    assert health.evaluate(link_online=True).recording_ok is True
+
+
+def test_a_dead_main_stream_is_not_recording(tmp_path):
+    # The sub stream keeps camera_fps up, and the setting stays ON.
+    health = link_health(tmp_path, {"state": "adopted", "record_writing": False})
+    online(health, stats(camera_fps=5.1))
+    state = health.evaluate(link_online=True)
+    assert state.recording_ok is False
+    assert state.camera_online is True
     assert state.detector_ok is True
+
+
+@pytest.mark.parametrize("claim", [None, "true", 1])
+def test_record_writing_must_be_exactly_true(tmp_path, claim):
+    health = link_health(tmp_path, {"state": "adopted", "record_writing": claim})
+    online(health, stats())
+    assert health.evaluate(link_online=True).recording_ok is False
+
+
+def test_recording_ok_is_false_with_no_report(tmp_path):
+    health = link_health(tmp_path, None)
+    online(health, stats())
+    assert health.evaluate(link_online=True).recording_ok is False
+
+
+def test_segments_alone_do_not_make_recording_ok(tmp_path):
+    health = link_health(tmp_path, {"state": "adopted", "record_writing": True})
+    online(health, stats(camera_fps=0.0))
+    assert health.evaluate(link_online=True).recording_ok is False
+
+
+# --- malformed payloads never raise ------------------------------------------------
+
+HUGE = "1" + "0" * 400
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        ('{"service": {"last_updated": %s, "uptime": 1}}' % HUGE).encode(),
+        ('{"service": {"last_updated": 1800000000, "uptime": %s}}' % HUGE).encode(),
+        ('{"cameras": {"cam-01": {"camera_fps": %s}}}' % HUGE).encode(),
+        ('{"detectors": {"hailo": {"inference_speed": %s, "pid": 1}}}' % HUGE).encode(),
+        ('{"detectors": {"hailo": {"detection_start": %s, "pid": 1}}}' % HUGE).encode(),
+        ('{"processes": {"recording": {"pid": %s}}}' % HUGE).encode(),
+        b"[" * 200000,
+        b'{"a":' * 200000,
+    ],
+    ids=["updated", "uptime", "fps", "speed", "start", "pid", "array-nest", "object-nest"],
+)
+def test_a_hostile_stats_payload_never_raises_and_is_no_evidence(payload):
+    health = make_health()
+    feed_healthy(health)
+    health.update(STATS, payload)
+    assert flags(health.evaluate(link_online=True))[1] is False
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        ('{"state": "adopted", "updated": %s}' % HUGE).encode(),
+        ('{"state": "adopted", "updated": 1800000000, "retry_after": %s}' % HUGE).encode(),
+        ('{"state": "adopted", "updated": 1800000000, "log_read_at": %s}' % HUGE).encode(),
+        b"[" * 200000,
+        b'{"a":' * 200000,
+    ],
+    ids=["updated", "retry", "read-at", "array-nest", "object-nest"],
+)
+def test_a_hostile_state_file_never_raises_and_gives_no_true(tmp_path, content):
+    health = link_health(tmp_path, content)
+    online(health, stats())
+    assert health.evaluate(link_online=True).detector_ok is False
 
 
 def test_attributes_survive_frigate_being_down(tmp_path):
