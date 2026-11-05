@@ -13,9 +13,15 @@ camera-link = "cameralink.__main__:main"
 
 [dependency-groups]
 dev = [
+    # Test-only: proves the portal's copy of render's rules has not drifted. Never a runtime
+    # dependency of the camera link.
+    "cameraprovision",
     "pytest>=8.0",
     "ruamel-yaml>=0.18,<0.19",
 ]
+
+[tool.uv.sources]
+cameraprovision = { path = "../provision", editable = true }
 
 [build-system]
 requires = ["hatchling"]

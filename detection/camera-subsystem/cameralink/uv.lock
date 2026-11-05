@@ -216,6 +216,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "cameraprovision" },
     { name = "pytest" },
     { name = "ruamel-yaml" },
 ]
@@ -228,8 +229,26 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "cameraprovision", editable = "../provision" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "ruamel-yaml", specifier = ">=0.18,<0.19" },
+]
+
+[[package]]
+name = "cameraprovision"
+version = "0.0.0"
+source = { editable = "../provision" }
+dependencies = [
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pyyaml", specifier = ">=6.0" }]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "camerabridge", editable = "../bridge" },
+    { name = "pytest", specifier = ">=8.0" },
 ]
 
 [[package]]
