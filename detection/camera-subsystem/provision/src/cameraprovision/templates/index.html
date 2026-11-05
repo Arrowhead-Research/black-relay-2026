@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Camera node setup</title>
+<style>
+body { margin: 0 auto; max-width: 30rem; padding: 1rem; font: 16px/1.4 system-ui, sans-serif; }
+h1 { font-size: 1.4rem; }
+fieldset { margin: 0 0 1rem; border: 1px solid #bbb; border-radius: 4px; }
+label { display: block; margin: 0.75rem 0; }
+input[type=text], input[type=password] {
+  display: block; box-sizing: border-box; width: 100%; padding: 0.6rem; margin-top: 0.25rem;
+  font-size: 1rem; border: 1px solid #888; border-radius: 4px;
+}
+input[type=checkbox] { width: 1.2rem; height: 1.2rem; vertical-align: middle; }
+button { width: 100%; padding: 0.8rem; font-size: 1.1rem; }
+.errors { padding: 0.5rem 1rem; color: #900; border: 2px solid #900; border-radius: 4px; }
+small { color: #555; }
+</style>
+</head>
+<body>
+<h1>Camera node setup</h1>
+$errors
+<form method="post" action="/">
+<fieldset>
+<legend>Site WiFi</legend>
+<label>Network name
+<input type="text" name="wifi_ssid" list="scanned-ssids" value="$wifi_ssid" required autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+<small>Pick a scanned network or type the name.</small>
+</label>
+<datalist id="scanned-ssids">$ssid_options</datalist>
+<label>Password
+<input type="password" name="wifi_psk" required autocomplete="off">
+</label>
+</fieldset>
+<fieldset>
+<legend>This node</legend>
+<label>Node ID
+<input type="text" name="node_id" value="$node_id" required placeholder="cam-01" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+</label>
+<label>Hostname
+<input type="text" name="hostname" value="$hostname" required placeholder="cam-01" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+</label>
+<label>Covered zones
+<input type="text" name="covered_zones" value="$covered_zones" required placeholder="perimeter-north, driveway" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+<small>Separate zones with commas.</small>
+</label>
+<label>Frigate address
+<input type="text" name="frigate_base_url" value="$frigate_base_url" required placeholder="http://cam-01.local:5000" inputmode="url" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+</label>
+</fieldset>
+<fieldset>
+<legend>Central node</legend>
+<label>Broker address
+<input type="text" name="broker_host" value="$broker_host" required placeholder="10.0.0.2" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+</label>
+<label>Broker port
+<input type="text" name="broker_port" value="$broker_port" required inputmode="numeric" autocomplete="off">
+</label>
+<label>Broker username
+<input type="text" name="broker_username" value="$broker_username" required autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+</label>
+<label>Broker password
+<input type="password" name="broker_password" required autocomplete="off">
+</label>
+<label>MediaMTX address
+<input type="text" name="mediamtx_address" value="$mediamtx_address" required placeholder="10.0.0.2:8554" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+</label>
+</fieldset>
+<fieldset>
+<legend>Remote access</legend>
+<label><input type="checkbox" name="vpn_requested" value="on" $vpn_checked> Join Tailscale</label>
+<label>Tailscale auth key
+<input type="password" name="tailscale_auth_key" autocomplete="off">
+<small>Needed only when joining Tailscale.</small>
+</label>
+</fieldset>
+<button type="submit">Save and connect</button>
+</form>
+</body>
+</html>
