@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 from pathlib import Path
@@ -437,10 +438,12 @@ def test_chown_gets_the_staged_bridge_config_only(paths: Paths) -> None:
     assert "bridge.yaml" in seen[0].name and seen[0].name.endswith(".tmp")
 
 
-def test_staged_keyfile_is_hidden_from_networkmanager(
+def test_staged_keyfile_has_a_dot_name(
     paths: Paths, monkeypatch: pytest.MonkeyPatch, store: NodeStore
 ) -> None:
-    """NM's keyfile plugin ignores dot-files, so it can never load half a transaction."""
+    # Dot-names are meant to keep NetworkManager's keyfile plugin from loading a half
+    # transaction. That NetworkManager really ignores them needs hardware verification:
+    # this test only pins the names.
     seen: list[str] = []
     real = os.replace
 
@@ -454,8 +457,6 @@ def test_staged_keyfile_is_hidden_from_networkmanager(
 
     extra = [name for name in seen if name != paths.nm_keyfile.name]
     assert extra and all(name.startswith(".") for name in extra)
-
-
 
 
 # --- WiFi repair ------------------------------------------------------------------------
@@ -496,17 +497,52 @@ def test_save_wifi_works_once_the_tailscale_key_is_gone(store: NodeStore, paths:
     assert not paths.tailscale_key.exists()
 
 
-def test_save_wifi_never_rewrites_the_bridge_config_or_revalidates_it(
-    store: NodeStore, paths: Paths, monkeypatch: pytest.MonkeyPatch
+def test_i4_save_wifi_works_with_the_bridge_config_missing(store: NodeStore, paths: Paths) -> None:
+    store.save(config(hostname="kept-name"))
+    paths.bridge_config.unlink()
+
+    store.save_wifi("Fixed-WiFi", "new-wifi-psk")
+
+    text = paths.nm_keyfile.read_text()
+    assert "psk=new-wifi-psk" in text and "dhcp-hostname=kept-name" in text
+    assert not paths.bridge_config.exists()
+
+
+def test_i4_save_wifi_works_with_the_bridge_config_invalid(store: NodeStore, paths: Paths) -> None:
+    store.save(config(hostname="kept-name"))
+    damaged = paths.bridge_config.read_text().replace("status_interval_s: 30", "status_interval_s: -1")
+    paths.bridge_config.write_text(damaged)
+
+    store.save_wifi("Fixed-WiFi", "new-wifi-psk")
+
+    assert "psk=new-wifi-psk" in paths.nm_keyfile.read_text()
+    assert paths.bridge_config.read_text() == damaged
+
+
+def test_i4_save_wifi_never_builds_or_validates_a_node_config(
+    store: NodeStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store.save(config())
 
-    def must_not_run(*args: Any) -> None:
-        raise AssertionError("a WiFi repair rewrote the bridge config")
+    def must_not_run(*args: Any) -> Any:
+        raise AssertionError("a WiFi repair went through the NodeConfig path")
 
     monkeypatch.setattr(store_module, "write_bridge_config", must_not_run)
+    monkeypatch.setattr(store_module, "validate", must_not_run)
+    monkeypatch.setattr(store_module, "NodeConfig", must_not_run)
 
     store.save_wifi("Fixed-WiFi", "new-wifi-psk")
+
+
+def test_i4_save_wifi_needs_a_hostname(store: NodeStore, paths: Paths) -> None:
+    store.save(config())
+    paths.node_file.write_text('{"wifi_ssid": "x"}')
+    before = snapshot(paths)
+
+    with pytest.raises(ValueError):
+        store.save_wifi("Fixed-WiFi", "new-wifi-psk")
+
+    assert snapshot(paths) == before
 
 
 @pytest.mark.parametrize("ssid,psk", [("", "new-wifi-psk"), ("Fixed-WiFi", "short")])
@@ -544,3 +580,239 @@ def test_failed_save_wifi_rolls_back(
         store.save_wifi("Fixed-WiFi", "new-wifi-psk")
 
     assert snapshot(paths) == before
+
+
+# --- has_config, journal and durability -------------------------------------------------
+
+
+def test_c1_has_config_needs_only_the_keyfile_and_a_hostname(
+    store: NodeStore, paths: Paths
+) -> None:
+    assert store.has_config() is False
+    store.save(config())
+    assert store.has_config() is True
+
+    paths.bridge_config.write_text("status_interval_s: -1\n")
+    assert store.has_config() is True
+    assert store.load() is None
+
+    paths.bridge_config.unlink()
+    paths.mediamtx_env.unlink()
+    assert store.has_config() is True
+
+    data = paths.nm_keyfile.read_bytes()
+    paths.nm_keyfile.unlink()
+    assert store.has_config() is False
+    paths.nm_keyfile.write_bytes(data)
+
+    paths.node_file.write_text('{"wifi_ssid": "only"}')
+    assert store.has_config() is False
+
+
+def test_c1_pending_login_ignores_a_damaged_bridge_config(store: NodeStore, paths: Paths) -> None:
+    store.save(config())
+    paths.bridge_config.unlink()
+
+    assert store.pending_login_hostname() == "edge-7"
+
+    store.delete_tailscale_key()
+
+    assert store.pending_login_hostname() is None
+
+
+@pytest.mark.parametrize(
+    "journal",
+    [
+        "",
+        "{not json",
+        "[]",
+        '{"a": 1}',
+        "[1]",
+        '[{"target": 1, "write": true}]',
+        '[{"target": "x"}]',
+    ],
+)
+def test_i1_an_unreadable_journal_counts_as_none_and_restores_backups(
+    store: NodeStore, paths: Paths, monkeypatch: pytest.MonkeyPatch, journal: str
+) -> None:
+    store.save(config(hostname="old-name", wifi_psk="old-wifi-psk"))
+    before = snapshot(paths)
+    with monkeypatch.context() as patch:
+        fail_nth_replace(patch, 2, SimulatedPowerCut())
+        with pytest.raises(SimulatedPowerCut):
+            store.save(config(node_id="cam-02", wifi_psk="new-wifi-psk"))
+    paths.journal.write_text(journal)
+
+    store.recover()
+
+    assert snapshot(paths) == before
+
+
+def test_i1_a_journal_cannot_name_a_file_outside_the_store(
+    store: NodeStore, paths: Paths, tmp_path: Path
+) -> None:
+    store.save(config())
+    victim = tmp_path / "victim"
+    victim.write_text("keep me")
+    paths.journal.write_text(json.dumps([{"target": str(victim), "write": False}]))
+
+    store.recover()
+
+    assert victim.read_text() == "keep me"
+    assert not paths.journal.exists()
+
+
+def test_i1_recover_survives_a_directory_it_cannot_change(
+    store: NodeStore, paths: Paths, caplog: pytest.LogCaptureFixture
+) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory modes")
+    store.save(config())
+    stale = paths.bridge_config.with_name(".bridge.yaml.abc.tmp")
+    stale.write_text("partial")
+    paths.bridge_config.parent.chmod(0o500)
+    try:
+        store.recover()
+    finally:
+        paths.bridge_config.parent.chmod(0o755)
+
+    assert stale.exists()
+    assert "PermissionError" in caplog.text
+
+
+def test_i1_recover_survives_a_state_dir_it_cannot_create(paths: Paths, tmp_path: Path) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory modes")
+    parent = paths.state_dir.parent
+    parent.mkdir(parents=True)
+    parent.chmod(0o500)
+    try:
+        NodeStore(paths, chown=lambda path: None).recover()
+    finally:
+        parent.chmod(0o755)
+
+    assert not paths.state_dir.exists()
+
+
+def test_i1_a_failed_roll_forward_keeps_the_journal_for_next_time(
+    store: NodeStore, paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.save(config(hostname="old-name"))
+    with monkeypatch.context() as patch:
+        fail_nth_replace(patch, 1, SimulatedPowerCut())
+        with pytest.raises(SimulatedPowerCut):
+            store.save(config(hostname="new-name"))
+    with monkeypatch.context() as patch:
+        fail_nth_replace(patch, 1, OSError("I/O error"))
+        store.recover()
+    assert paths.journal.exists()
+
+    store.recover()
+
+    assert not paths.journal.exists()
+    saved = store.load()
+    assert saved is not None and saved.hostname == "new-name"
+
+
+def test_m2_recover_sweeps_stale_journal_temp_files(store: NodeStore, paths: Paths) -> None:
+    store.save(config())
+    stale = paths.journal.with_name(".apply.journal.abc.tmp")
+    stale.write_text("partial")
+
+    store.recover()
+
+    assert not stale.exists()
+
+
+def test_m3_target_directories_are_synced_before_the_journal_goes(
+    store: NodeStore, paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[tuple[str, str]] = []
+    real_sync = store_module._fsync_dir
+    real_unlink = Path.unlink
+
+    def sync(path: Path) -> None:
+        events.append(("sync", str(path)))
+        real_sync(path)
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name.endswith(".prev.tmp"):
+            events.append(("backup", str(self.parent)))
+        if self == paths.journal:
+            events.append(("journal", str(self.parent)))
+        real_unlink(self, missing_ok=missing_ok)
+
+    store.save(config())
+    monkeypatch.setattr(store_module, "_fsync_dir", sync)
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+    store.save(config(hostname="again"))
+
+    journal_at = events.index(("journal", str(paths.state_dir)))
+    for directory in {paths.bridge_config.parent, paths.nm_connections_dir, paths.state_dir}:
+        last_backup = max(
+            i for i, event in enumerate(events) if event == ("backup", str(directory))
+        )
+        synced = ("sync", str(directory))
+        assert synced in events[last_backup:journal_at], directory
+    assert events[-1] == ("sync", str(paths.state_dir))
+
+
+def test_m3_a_rollback_makes_the_journal_removal_durable_first(
+    store: NodeStore, paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.save(config(hostname="old-name"))
+    events: list[str] = []
+    real_sync = store_module._fsync_dir
+    real_restore = store_module._restore
+
+    def sync(path: Path) -> None:
+        events.append(f"sync:{path}")
+        real_sync(path)
+
+    def restore(target: Path) -> None:
+        events.append("restore")
+        real_restore(target)
+
+    monkeypatch.setattr(store_module, "_fsync_dir", sync)
+    monkeypatch.setattr(store_module, "_restore", restore)
+    fail_nth_replace(monkeypatch, 1, OSError("I/O error"))
+
+    with pytest.raises(OSError):
+        store.save(config(hostname="new-name"))
+
+    assert events[events.index("restore") - 1] == f"sync:{paths.state_dir}"
+
+
+def test_a_failure_tidying_up_after_the_commit_still_counts_as_saved(
+    store: NodeStore, paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.save(config(hostname="old-name"))
+
+    def fails(self: NodeStore, entries: Any) -> None:
+        raise OSError("I/O error")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(NodeStore, "_finish_commit", fails)
+        store.save(config(hostname="new-name"))
+
+    store.recover()
+
+    saved = store.load()
+    assert saved is not None and saved.hostname == "new-name"
+    assert not paths.journal.exists()
+
+
+def test_m5_the_saved_profile_names_the_interface(paths: Paths) -> None:
+    NodeStore(paths, chown=lambda path: None, interface="wlan7").save(config())
+
+    assert "interface-name=wlan7" in paths.nm_keyfile.read_text()
+
+
+def test_m5_a_wifi_repair_keeps_naming_the_interface(paths: Paths) -> None:
+    store = NodeStore(paths, chown=lambda path: None, interface="wlan7")
+    store.save(config())
+
+    store.save_wifi("Fixed-WiFi", "new-wifi-psk")
+
+    assert "interface-name=wlan7" in paths.nm_keyfile.read_text()

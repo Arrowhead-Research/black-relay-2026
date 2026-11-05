@@ -8,7 +8,10 @@ are all real, so each test drives what a node would do. Time comes from a fake c
 from __future__ import annotations
 
 import io
+import json
 import logging
+import os
+import re
 import signal
 import socket
 import threading
@@ -42,6 +45,8 @@ FORM_TYPE = "application/x-www-form-urlencoded"
 JOIN_TIMEOUT = 120.0
 AP_WINDOW = 300.0
 AP_CAP = 1800.0
+AP_CHECK = 10.0
+JOIN_TICKS_PAST_EXIT_LIMIT = 61
 
 
 def valid_form(**overrides: str) -> dict[str, str]:
@@ -105,6 +110,9 @@ class FakeSystem:
         self.failing: dict[str, Exception] = {}
         self.tailscale_args: list[tuple[Path, str]] = []
         self.chowned: list[Path] = []
+        self.hostnames: list[str] = []
+        self.ap_alive = False
+        self.on_start_ap: Callable[[], None] = lambda: None
 
     def _do(self, name: str) -> None:
         self.calls.append(name)
@@ -125,9 +133,20 @@ class FakeSystem:
 
     def start_ap(self) -> None:
         self._do("start_ap")
+        self.on_start_ap()
+        self.ap_alive = True
 
     def stop_ap(self) -> None:
         self._do("stop_ap")
+        self.ap_alive = False
+
+    def ap_active(self) -> bool:
+        self._do("ap_active")
+        return self.ap_alive
+
+    def set_hostname(self, hostname: str) -> None:
+        self.hostnames.append(hostname)
+        self._do("set_hostname")
 
     def reload_connections(self) -> None:
         self._do("reload")
@@ -656,10 +675,12 @@ def test_corrupt_state_file_fires_boot(node: Node) -> None:
 @pytest.mark.parametrize(
     "content",
     [
-        '{"boot_id": "boot-1", "state": "nonsense", "entered_at": 1}',
+        '{"boot_id": "boot-1", "state": "nonsense", "entered_at": 1, "window_started": 1}',
+        '{"boot_id": "boot-1", "state": "joining", "entered_at": 1}',
+        '{"boot_id": "boot-1", "state": "ap_up", "entered_at": 1, "window_started": "x"}',
         '{"boot_id": "boot-1", "state": "joining"}',
         '{"boot_id": "boot-1", "state": "joining", "entered_at": "soon"}',
-        '{"boot_id": "boot-1", "state": "unprovisioned", "entered_at": 1}',
+        '{"boot_id": "boot-1", "state": "unprovisioned", "entered_at": 1, "window_started": 1}',
         "[]",
     ],
 )
@@ -740,11 +761,11 @@ def test_a_blank_node_keeps_its_ap_open_past_the_cap(node: Node) -> None:
 
 
 def test_has_config_is_read_at_each_event(node: Node) -> None:
-    """A config removed while the AP is up: nothing to rejoin with, so the AP stays."""
+    """A WiFi profile removed while the AP is up: nothing to join with, so the AP stays."""
     node.seed_config()
     node.system.button = True
     node.boot()
-    node.paths.bridge_config.unlink()
+    node.paths.nm_keyfile.unlink()
 
     node.tick(AP_WINDOW)
 
@@ -914,7 +935,7 @@ def test_fallback_with_no_config_gets_a_new_full_server(node: Node) -> None:
     node.boot()
     node.tick(JOIN_TIMEOUT)
     wifi_only = node.listener()
-    node.paths.bridge_config.unlink()
+    node.paths.node_file.unlink()
     before = node.disk()
 
     # The old server has not been replaced yet, and refuses without writing.
@@ -943,7 +964,7 @@ def test_a_full_save_in_fallback_is_not_cut_off_by_the_mode_change(node: Node) -
     node.seed_config()
     node.boot()
     node.tick(JOIN_TIMEOUT)
-    node.paths.bridge_config.unlink()
+    node.paths.node_file.unlink()
     node.tick()
     full = node.listener()
     response = node.request("POST", valid_form())
@@ -962,12 +983,12 @@ def test_a_saved_config_restores_wifi_only_mode_in_fallback(node: Node) -> None:
     node.seed_config()
     node.boot()
     node.tick(JOIN_TIMEOUT)
-    content = node.paths.bridge_config.read_bytes()
-    node.paths.bridge_config.unlink()
+    content = node.paths.node_file.read_bytes()
+    node.paths.node_file.unlink()
     node.tick()
     assert 'name="broker_host"' in node.request().body
 
-    node.paths.bridge_config.write_bytes(content)
+    node.paths.node_file.write_bytes(content)
     node.tick()
 
     assert 'name="broker_host"' not in node.request().body
@@ -1177,12 +1198,12 @@ def test_failing_to_delete_the_key_does_not_repeat_the_login(
     )
 
     node.tick(1)
-    node.tick(1)
+    node.tick(30)
     assert node.system.count("tailscale_up") == 1
     assert node.paths.tailscale_key.exists()
 
     monkeypatch.setattr(NodeStore, "delete_tailscale_key", real_delete)
-    node.tick(1)
+    node.tick(60)
 
     assert node.system.count("tailscale_up") == 1
     assert not node.paths.tailscale_key.exists()
@@ -1484,6 +1505,563 @@ def test_end_to_end_blank_boot_to_provisioned_and_vpn(node: Node) -> None:
     node.system.link_up()
     node.tick(1)
     assert node.state is S.PROVISIONED
+
+
+# --- review findings --------------------------------------------------------------------
+
+BAD_BRIDGE_EDITS = {
+    "negative status interval": lambda text: text.replace(
+        "status_interval_s: 30", "status_interval_s: -1"
+    ),
+    "unknown broker key": lambda text: text.replace("broker:\n", "broker:\n  surprise: 1\n"),
+    "missing cue window": lambda text: re.sub(r"cue_window_s: .*\n", "", text),
+}
+
+
+@pytest.mark.parametrize("edit", BAD_BRIDGE_EDITS.values(), ids=BAD_BRIDGE_EDITS.keys())
+def test_c1_a_damaged_bridge_config_still_joins_and_never_opens_the_full_form(
+    node: Node, caplog: pytest.LogCaptureFixture, edit: Callable[[str], str]
+) -> None:
+    node.seed_config()
+    original = node.paths.bridge_config.read_text()
+    edited = edit(original)
+    assert edited != original
+    node.paths.bridge_config.write_text(edited)
+
+    node.boot()
+
+    assert node.state is S.JOINING
+    assert node.system.count("join") == 1
+    assert node.system.count("start_ap") == 0
+    assert "bridge config" in caplog.text
+    assert json.loads(node.paths.state_file.read_text())["bridge_config_valid"] is False
+
+    node.system.link_up()
+    for _ in range(120):  # two hours of fake time
+        node.tick(60)
+
+    assert node.state is S.PROVISIONED
+    assert node.system.count("start_ap") == 0
+    assert node.listeners == []
+
+
+@pytest.mark.parametrize("edit", BAD_BRIDGE_EDITS.values(), ids=BAD_BRIDGE_EDITS.keys())
+def test_c1_a_damaged_bridge_config_offers_only_the_wifi_repair(
+    node: Node, edit: Callable[[str], str]
+) -> None:
+    node.seed_config()
+    node.paths.bridge_config.write_text(edit(node.paths.bridge_config.read_text()))
+    node.boot()
+
+    node.tick(JOIN_TIMEOUT)
+
+    assert node.state is S.FALLBACK_AP
+    assert 'name="broker_host"' not in node.request().body
+    node.tick(AP_WINDOW)
+    assert node.state is S.JOINING
+
+
+def test_c1_a_missing_bridge_config_still_joins(node: Node) -> None:
+    node.seed_config()
+    node.paths.bridge_config.unlink()
+
+    node.boot()
+
+    assert node.state is S.JOINING
+    assert node.system.count("join") == 1
+
+
+@pytest.mark.parametrize("content", ["{not json", "[]", "{}", '{"hostname": ""}', '{"hostname": 7}'])
+def test_c1_a_node_file_without_a_hostname_cannot_attempt_a_join(
+    node: Node, content: str
+) -> None:
+    node.seed_config()
+    node.paths.node_file.write_text(content)
+
+    node.boot()
+
+    assert node.state is S.AP_UP
+    assert 'name="broker_host"' in node.request().body
+
+
+def test_c1_a_valid_config_reports_as_valid(node: Node) -> None:
+    node.seed_config()
+
+    node.boot()
+
+    assert json.loads(node.paths.state_file.read_text())["bridge_config_valid"] is True
+
+
+def test_c1_a_damaged_bridge_config_does_not_stop_the_tailscale_login(node: Node) -> None:
+    """Remote access is how someone would come and fix that file."""
+    node.seed_config(node_config(vpn_requested=True, tailscale_auth_key=TAILSCALE_KEY))
+    node.paths.bridge_config.write_text("status_interval_s: -1\n")
+    node.boot()
+    node.system.link_up()
+
+    node.tick(1)
+
+    assert node.state is S.PROVISIONED
+    assert node.system.tailscale_args == [(node.paths.tailscale_key, "edge-7")]
+    assert not node.paths.tailscale_key.exists()
+
+
+@pytest.mark.parametrize("journal", ["", "{not json", "[]", '{"a": 1}', "[1]"])
+def test_i1_an_unreadable_journal_does_not_stop_the_daemon(node: Node, journal: str) -> None:
+    node.seed_config()
+    node.paths.journal.write_text(journal)
+
+    node.boot()
+
+    assert node.state is S.JOINING
+    assert node.system.count("join") == 1
+    assert not node.paths.journal.exists()
+
+
+def read_only_state_dir(node: Node) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory modes")
+    node.paths.state_dir.chmod(0o500)
+
+
+@pytest.fixture
+def restore_state_dir(node: Node) -> Iterator[None]:
+    yield
+    node.paths.state_dir.chmod(0o700)
+
+
+def test_i2_a_read_only_state_dir_still_reaches_fallback_and_never_exits(
+    node: Node, caplog: pytest.LogCaptureFixture, restore_state_dir: None
+) -> None:
+    """A wrong PSK must reach the AP with the disk full or read-only."""
+    node.seed_config()
+    read_only_state_dir(node)
+
+    node.boot()
+    for _ in range(JOIN_TICKS_PAST_EXIT_LIMIT):
+        node.tick(1)
+        if node.state is not S.JOINING:
+            break
+    assert node.state is S.JOINING or node.state is S.FALLBACK_AP
+    node.tick(JOIN_TIMEOUT)
+
+    assert node.state is S.FALLBACK_AP
+    for _ in range(70):  # past the 60-tick exit limit
+        node.tick(1)
+    assert node.system.count("gpio") == 1  # one boot, fired once
+    assert node.system.count("join") == 1
+    assert caplog.text.count("saving state failed") == 1  # not once per tick
+
+
+def test_i2_a_persist_failure_alone_never_counts_as_a_failed_tick(
+    node: Node, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    node.seed_config()
+    monkeypatch.setattr(
+        "cameraprovision.daemon._write_private_atomic",
+        lambda path, text: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    node.boot(max_consecutive_failures=3)
+
+    for _ in range(10):
+        node.tick(1)
+
+    assert node.state is S.JOINING
+
+
+def test_i2_persisting_resumes_once_the_disk_recovers(
+    node: Node, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    node.seed_config()
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            "cameraprovision.daemon._write_private_atomic",
+            lambda path, text: (_ for _ in ()).throw(OSError("disk full")),
+        )
+        node.boot()
+        node.tick(1)
+        assert not node.paths.state_file.exists()
+
+    node.tick(1)
+
+    assert json.loads(node.paths.state_file.read_text())["state"] == "joining"
+
+
+def test_i3_a_restart_does_not_restart_the_ap_window(node: Node) -> None:
+    node.seed_config()
+    node.system.button = True
+    node.boot()
+    node.tick(200)
+    node.daemon.shutdown()
+
+    node.boot()
+    node.tick(99)
+    assert node.state is S.AP_UP
+    node.tick(1)
+
+    assert node.state is S.JOINING
+
+
+def test_i3_a_form_request_survives_a_restart(node: Node) -> None:
+    node.seed_config()
+    node.system.button = True
+    node.boot()
+    node.tick(200)
+    node.request("GET")
+    node.tick()
+    node.daemon.shutdown()
+
+    node.boot()
+    node.tick(299)
+    assert node.state is S.AP_UP
+    node.tick(1)
+
+    assert node.state is S.JOINING
+
+
+def test_i3_a_clean_stop_saves_a_form_request_from_the_last_tick(node: Node) -> None:
+    node.seed_config()
+    node.system.button = True
+    node.boot()
+    node.tick(200)
+    node.request("GET")
+    node.daemon.shutdown()
+
+    node.boot()
+    node.tick(299)
+
+    assert node.state is S.AP_UP
+
+
+def test_i3_failing_to_bind_leaves_after_one_window_not_the_cap(node: Node) -> None:
+    def broken(app: Any, ip: str, port: int, interface: str) -> Any:
+        raise OSError("cannot bind")
+
+    node.seed_config()
+    node.system.button = True
+    node.boot(server_factory=broken, max_consecutive_failures=100000)
+
+    for _ in range(29):
+        node.tick(10)
+        assert node.state is S.AP_UP
+    node.tick(10)
+
+    assert node.state is S.JOINING
+
+
+def test_i3_a_mode_rebuild_does_not_move_the_window(node: Node) -> None:
+    node.seed_config()
+    node.boot()
+    node.tick(JOIN_TIMEOUT)
+    assert node.state is S.FALLBACK_AP
+    content = node.paths.node_file.read_bytes()
+
+    node.tick(200)
+    node.paths.node_file.unlink()
+    node.tick()  # rebuilds as FULL
+    node.paths.node_file.write_bytes(content)
+    node.tick()  # rebuilds as WIFI_ONLY
+    assert len(node.listeners) == 3
+    node.tick(99)
+    assert node.state is S.FALLBACK_AP
+    node.tick(1)
+
+    assert node.state is S.JOINING
+
+
+def test_i3_a_replaced_portal_thread_does_not_move_the_window(node: Node) -> None:
+    node.seed_config()
+    node.system.button = True
+    node.boot()
+    node.tick(200)
+    first = node.listener()
+    first.was_shut_down.set()
+    deadline = time.monotonic() + 5
+    while first.closed is False and time.monotonic() < deadline:
+        node.tick()
+        time.sleep(0.001)
+    assert first.closed
+
+    node.tick(100)
+
+    assert node.state is S.JOINING
+
+
+def test_i3_the_window_starts_at_the_first_open_after_the_ap_starts(node: Node) -> None:
+    """Bringing the AP up can take most of a minute, which must not eat the window."""
+    node.seed_config()
+    node.system.button = True
+    node.system.on_start_ap = lambda: node.clock.advance(40)
+    node.boot()
+
+    node.tick(299)
+    assert node.state is S.AP_UP
+    node.tick(1)
+
+    assert node.state is S.JOINING
+
+
+def test_i5_entering_joining_sets_the_hostname_not_apply(node: Node) -> None:
+    node.boot()
+    response = node.request("POST", valid_form())
+    assert node.system.hostnames == []
+
+    response.finish()
+    node.tick()
+
+    assert node.state is S.JOINING
+    assert node.system.hostnames == ["edge-7"]
+    node.tick(1)
+    assert node.system.hostnames == ["edge-7"]  # once per entry
+
+
+def test_i5_a_power_cut_after_save_still_applies_the_hostname(node: Node) -> None:
+    node.boot()
+    node.request("POST", valid_form())
+    assert node.system.hostnames == []
+    node.daemon.shutdown()  # the response never finished: the power went
+
+    node.system.boot = "boot-2"
+    node.boot()
+
+    assert node.state is S.JOINING
+    assert node.system.hostnames == ["edge-7"]
+
+
+def test_i5_a_restart_during_joining_applies_it_again(node: Node) -> None:
+    node.seed_config()
+    node.system.failing["set_hostname"] = SystemCommandError("hostnamectl failed")
+    node.boot()
+    node.daemon.shutdown()
+    del node.system.failing["set_hostname"]
+    node.system.hostnames.clear()
+
+    node.boot()
+
+    assert node.system.hostnames == ["edge-7"]
+
+
+def test_i5_hostname_failure_retries_without_blocking_or_counting(node: Node) -> None:
+    node.seed_config()
+    node.system.failing["set_hostname"] = SystemCommandError("hostnamectl failed")
+    node.boot(max_consecutive_failures=3)
+
+    assert node.system.count("join") == 1
+    attempts = node.system.count("set_hostname")
+    assert attempts == 1
+
+    node.tick(1)
+    assert node.system.count("set_hostname") == attempts  # backing off
+    for _ in range(6):
+        node.tick(30)
+    assert node.system.count("set_hostname") > attempts
+    assert node.state in (S.JOINING, S.FALLBACK_AP)
+
+
+def test_i5_hostname_retry_continues_after_the_link_comes_up(node: Node) -> None:
+    node.seed_config()
+    node.system.failing["set_hostname"] = SystemCommandError("hostnamectl failed")
+    node.boot()
+    node.system.link_up()
+    node.tick(1)
+    assert node.state is S.PROVISIONED
+    del node.system.failing["set_hostname"]
+    failed_attempts = node.system.count("set_hostname")
+
+    node.tick(30)
+    assert node.system.count("set_hostname") == failed_attempts + 1
+    node.tick(300)
+
+    assert node.system.count("set_hostname") == failed_attempts + 1  # applied, so finished
+
+
+def test_i5_an_option_like_hostname_never_reaches_the_command(node: Node) -> None:
+    """node.json can be hand-edited, and a leading hyphen would read as a flag."""
+    node.seed_config()
+    data = json.loads(node.paths.node_file.read_text())
+    data["hostname"] = "--static"
+    node.paths.node_file.write_text(json.dumps(data))
+
+    node.boot()
+
+    assert node.state is S.JOINING
+    assert node.system.hostnames == []
+    assert node.system.count("join") == 1
+
+
+def test_i6_an_ap_that_dies_is_restarted_on_a_blank_node(node: Node) -> None:
+    node.boot()
+    first = node.listener()
+    node.system.ap_alive = False
+
+    node.tick(AP_CHECK)
+
+    assert node.system.count("start_ap") == 2
+    assert node.system.ap_alive
+    assert first.closed
+    assert node.listener() is not first
+    assert after(node.calls[node.calls.index("ap_active"):], "start_ap", "listen")
+
+
+def test_i6_a_live_ap_is_left_alone(node: Node) -> None:
+    node.boot()
+    first = node.listener()
+
+    for _ in range(5):
+        node.tick(AP_CHECK)
+
+    assert node.system.count("start_ap") == 1
+    assert node.listener() is first
+    assert node.system.count("ap_active") == 5
+
+
+def test_i6_the_check_is_periodic(node: Node) -> None:
+    node.boot()
+
+    node.tick(AP_CHECK - 1)
+    assert node.system.count("ap_active") == 0
+    node.tick(1)
+
+    assert node.system.count("ap_active") == 1
+
+
+def test_i6_a_failing_check_does_not_restart_the_ap(node: Node) -> None:
+    node.boot()
+    node.system.failing["ap_active"] = SystemCommandError("nmcli failed")
+
+    node.tick(AP_CHECK)
+
+    assert node.system.count("start_ap") == 1
+
+
+def test_i6_a_restart_after_the_ap_died_keeps_the_window(node: Node) -> None:
+    node.seed_config()
+    node.system.button = True
+    node.boot()
+    node.tick(200)
+    node.system.ap_alive = False
+    node.tick()  # not due yet
+    node.tick(AP_CHECK)
+    assert node.system.count("start_ap") == 2
+
+    node.tick(100 - AP_CHECK)
+
+    assert node.state is S.JOINING
+
+
+def test_i7_a_lost_link_reissues_the_join_every_minute_and_never_opens_the_ap(node: Node) -> None:
+    node.seed_config()
+    node.boot()
+    node.system.link_up()
+    node.tick(1)
+    assert node.state is S.PROVISIONED
+    node.system.link_down()
+    joins = node.system.count("join")
+
+    node.tick(59)
+    assert node.system.count("join") == joins
+    node.tick(1)
+    assert node.system.count("join") == joins + 1
+    node.tick(59)
+    assert node.system.count("join") == joins + 1
+    node.tick(1)
+    assert node.system.count("join") == joins + 2
+
+    assert node.state is S.PROVISIONED
+    assert node.system.count("start_ap") == 0
+    assert node.listeners == []
+
+
+def test_i7_a_healthy_link_gets_no_join_calls(node: Node) -> None:
+    node.seed_config()
+    node.boot()
+    node.system.link_up()
+    node.tick(1)
+    joins = node.system.count("join")
+
+    for _ in range(10):
+        node.tick(60)
+
+    assert node.system.count("join") == joins
+
+
+def test_i7_a_failing_rejoin_is_not_a_daemon_failure(node: Node) -> None:
+    node.seed_config()
+    node.boot(max_consecutive_failures=3)
+    node.system.link_up()
+    node.tick(1)
+    node.system.link_down()
+    node.system.failing["join"] = SystemCommandError("nmcli failed")
+
+    for _ in range(10):
+        node.tick(60)
+
+    assert node.state is S.PROVISIONED
+
+
+def test_i7_a_restart_while_provisioned_keeps_rejoining(node: Node) -> None:
+    node.seed_config()
+    node.boot()
+    node.system.link_up()
+    node.tick(1)
+    node.daemon.shutdown()
+    node.system.link_down()
+    joins = node.system.count("join")
+
+    node.boot()
+    node.tick(60)
+
+    assert node.system.count("join") == joins + 1
+
+
+def test_m1_a_link_already_up_is_not_reactivated(node: Node) -> None:
+    node.seed_config()
+    node.system.link_up()
+
+    node.boot()
+    assert node.system.count("join") == 0
+    node.tick(1)
+
+    assert node.state is S.PROVISIONED
+    assert node.system.count("join") == 0
+
+
+def test_m8_a_failing_key_delete_backs_off(
+    node: Node, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attempts: list[float] = []
+
+    def failing(self: NodeStore) -> None:
+        attempts.append(node.clock.now)
+        raise OSError("busy")
+
+    provisioned_with_vpn(node)
+    monkeypatch.setattr(NodeStore, "delete_tailscale_key", failing)
+
+    node.tick(1)
+    assert len(attempts) == 1
+    node.tick(1)
+    assert len(attempts) == 1
+    node.tick(29)
+    assert len(attempts) == 2
+    node.tick(59)
+    assert len(attempts) == 2
+    node.tick(1)
+    assert len(attempts) == 3
+
+
+def test_m6_a_button_read_failure_logs_at_error(
+    node: Node, caplog: pytest.LogCaptureFixture
+) -> None:
+    node.seed_config()
+    node.system.failing["gpio"] = SystemCommandError("no libgpiod")
+
+    node.boot()
+
+    assert any(
+        record.levelno == logging.ERROR and "setup button" in record.message
+        for record in caplog.records
+    )
 
 
 # --- run loop and CLI -------------------------------------------------------------------

@@ -29,7 +29,9 @@ _PASSPHRASE_ALPHABET = "".join(c for c in string.ascii_letters + string.digits i
 _PASSPHRASE_LENGTH = 20
 
 
-def nm_wifi_profile(ssid: str, psk: str, hostname: str) -> dict[str, dict[str, str]]:
+def nm_wifi_profile(
+    ssid: str, psk: str, hostname: str, *, interface: str = "wlan0"
+) -> dict[str, dict[str, str]]:
     """Return the NetworkManager keyfile sections for the site WiFi client profile.
 
     Values are unescaped strings; :func:`render_nm_keyfile` turns them into a file.
@@ -42,6 +44,7 @@ def nm_wifi_profile(ssid: str, psk: str, hostname: str) -> dict[str, dict[str, s
             "id": UPLINK_PROFILE_ID,
             "uuid": str(uuid.uuid5(uuid.NAMESPACE_DNS, UPLINK_PROFILE_ID)),
             "type": "wifi",
+            "interface-name": interface,
             "autoconnect": "true",
             "autoconnect-retries": "0",
         },
@@ -88,13 +91,19 @@ def render_nm_keyfile(profile: dict[str, dict[str, str]]) -> str:
     return "\n".join(blocks)
 
 
-def tailscale_up_args(auth_key_file: str | os.PathLike[str], hostname: str) -> list[str]:
-    """Return the ``tailscale up`` argv, naming the key by file so it stays out of argv."""
+def tailscale_up_args(
+    auth_key_file: str | os.PathLike[str], hostname: str, *, force_reauth: bool = False
+) -> list[str]:
+    """Return the ``tailscale up`` argv, naming the key by file so it stays out of argv.
+
+    ``force_reauth`` makes a node that is already logged in take a new key.
+    """
     return [
         "tailscale",
         "up",
         f"--auth-key=file:{os.fspath(auth_key_file)}",
         f"--hostname={hostname}",
+        *(["--force-reauth"] if force_reauth else []),
     ]
 
 

@@ -1,4 +1,4 @@
-"""The real side effects: thin adapters over nmcli, tailscale and libgpiod.
+"""The real side effects: thin adapters over nmcli, hostnamectl, tailscale and libgpiod.
 
 Every command is an argv list with a timeout, and never a shell. Secrets reach commands
 by file only. A failure raises ``SystemCommandError``, built only from the program name
@@ -33,13 +33,17 @@ _TAILSCALE_TIMEOUT_S = 60.0
 class SystemCommandError(Exception):
     """A command failed. The message never holds its output or arguments."""
 
-    def __init__(self, message: str, returncode: int | None = None) -> None:
+    def __init__(
+        self, message: str, returncode: int | None = None, *, not_installed: bool = False
+    ) -> None:
         super().__init__(message)
         self.returncode = returncode
+        self.not_installed = not_installed
 
 
 def _run(argv: list[str], *, timeout: float = _QUICK_TIMEOUT_S) -> str:
     program = argv[0]
+    not_installed = False
     # C locale: nmcli translates the states parsed below.
     env = {**os.environ, "LC_ALL": "C"}
     try:
@@ -60,11 +64,12 @@ def _run(argv: list[str], *, timeout: float = _QUICK_TIMEOUT_S) -> str:
         message = f"{program} timed out after {timeout:g} s"
     except OSError as exc:
         returncode = None
+        not_installed = isinstance(exc, FileNotFoundError)
         message = f"{program} could not run: {type(exc).__name__}"
     else:
         return done.stdout
     logger.warning("%s", message)
-    raise SystemCommandError(message, returncode)
+    raise SystemCommandError(message, returncode, not_installed=not_installed)
 
 
 def parse_ssids(output: str) -> list[str]:
@@ -130,6 +135,21 @@ class RealSystem:
             if exc.returncode != _NMCLI_NOT_FOUND:  # not active is already what we want
                 raise
 
+    def ap_active(self) -> bool:
+        """True only if the AP profile is activated. An inactive profile prints nothing."""
+        return (
+            _run(
+                [
+                    "nmcli", "--terse", "--mode", "multiline", "--fields", "GENERAL.STATE",
+                    "connection", "show", AP_PROFILE_ID,
+                ]
+            ).strip()
+            == "GENERAL.STATE:activated"
+        )
+
+    def set_hostname(self, hostname: str) -> None:
+        _run(["hostnamectl", "set-hostname", hostname])
+
     def reload_connections(self) -> None:
         _run(["nmcli", "connection", "reload"])
 
@@ -155,14 +175,27 @@ class RealSystem:
         return self._uplink()[1]
 
     def tailscale_up(self, key_file: Path, hostname: str) -> None:
-        _run(tailscale_up_args(key_file, hostname), timeout=_TAILSCALE_TIMEOUT_S)
+        # Only ever called with a new key, which must replace any earlier login.
+        _run(tailscale_up_args(key_file, hostname, force_reauth=True), timeout=_TAILSCALE_TIMEOUT_S)
 
     def gpio_reprovision_held(self) -> bool:
-        """Read the active-low button by line name, with libgpiod 1.6 as on Bookworm."""
-        found = _run(["gpiofind", self._button_line]).split()
-        if len(found) != 2:
-            raise SystemCommandError("gpiofind gave unexpected output")
-        return _run(["gpioget", "--active-low", "--bias=pull-up", *found]).strip() == "1"
+        """Read the active-low button by line name, with libgpiod 1.x or 2.x.
+
+        ``gpiofind`` exists only in 1.x. If neither version is installed the second
+        command raises, and the caller must not take that for a released button.
+        """
+        options = ["--active-low", "--bias=pull-up"]
+        try:
+            found = _run(["gpiofind", self._button_line]).split()
+        except SystemCommandError as exc:
+            if not exc.not_installed:
+                raise
+            argv = ["gpioget", "--numeric", *options, self._button_line]
+        else:
+            if len(found) != 2:
+                raise SystemCommandError("gpiofind gave unexpected output")
+            argv = ["gpioget", *options, *found]
+        return _run(argv).strip() == "1"
 
     def chown_to_service_user(self, path: Path) -> None:
         shutil.chown(path, user=self._service_user)

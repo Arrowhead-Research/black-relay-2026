@@ -120,14 +120,51 @@ def _restore(target: Path) -> None:
 
 
 class NodeStore:
-    def __init__(self, paths: Paths, *, chown: Callable[[Path], None]) -> None:
+    def __init__(
+        self, paths: Paths, *, chown: Callable[[Path], None], interface: str = "wlan0"
+    ) -> None:
         self._paths = paths
         self._chown = chown
+        self._interface = interface
 
     # --- reading ------------------------------------------------------------------
 
+    def _node(self) -> dict[str, Any]:
+        """Return ``node.json``, raising unless it holds a hostname."""
+        node = json.loads(self._paths.node_file.read_text(encoding="utf-8"))
+        hostname = node.get("hostname") if isinstance(node, dict) else None
+        if not hostname or not isinstance(hostname, str):
+            raise ValueError("node file without a hostname")
+        return node
+
+    def hostname(self) -> str | None:
+        """Return the saved hostname, whatever state the rest of the config is in."""
+        try:
+            return self._node()["hostname"]
+        except _LOAD_ERRORS:
+            return None
+
+    def has_config(self) -> bool:
+        """True if this node can attempt a join: a WiFi profile and a hostname.
+
+        Deliberately not ``load() is not None``. A damaged bridge config must not send a
+        configured node to the setup AP, since the WiFi it needs is intact. That is
+        reported separately, using :meth:`load`.
+        """
+        return self._paths.nm_keyfile.exists() and self.hostname() is not None
+
+    def pending_login_hostname(self) -> str | None:
+        """Return the hostname to log in to Tailscale with, if a login is owed."""
+        try:
+            node = self._node()
+        except _LOAD_ERRORS:
+            return None
+        if node.get("vpn_requested") and self._paths.tailscale_key.exists():
+            return node["hostname"]
+        return None
+
     def load(self) -> NodeConfig | None:
-        """Return the saved config, or ``None`` if it is missing, incomplete or invalid.
+        """Return the full saved config, or ``None`` if it is missing, incomplete or invalid.
 
         ``wifi_psk`` is always empty, since only the keyfile holds it.
         ``vpn_requested`` means a Tailscale login is still owed: it is false once the key
@@ -209,19 +246,21 @@ class NodeStore:
     def save_wifi(self, ssid: str, psk: str) -> None:
         """Repair the WiFi alone: re-render the keyfile from these and the saved hostname.
 
-        The bridge config and any pending Tailscale key are untouched and not revalidated.
+        Reads ``node.json`` directly and never builds a ``NodeConfig``, so a repair works
+        with the bridge config missing or invalid. That file and any pending Tailscale
+        key are not touched.
         """
         errors = validate_wifi(ssid, psk)
         if errors:
             raise ValueError("invalid WiFi settings: " + "; ".join(errors))
-        saved = self.load()
-        if saved is None:
-            raise ValueError("there is no saved config to repair")
-        node = json.loads(self._paths.node_file.read_text(encoding="utf-8"))
+        try:
+            node = self._node()
+        except _LOAD_ERRORS:
+            raise ValueError("there is no saved hostname to repair with") from None
         node["wifi_ssid"] = ssid
         self._transact(
             [
-                (self._paths.nm_keyfile, self._text(self._keyfile(ssid, psk, saved.hostname))),
+                (self._paths.nm_keyfile, self._text(self._keyfile(ssid, psk, node["hostname"]))),
                 (self._paths.node_file, self._text(json.dumps(node))),
             ]
         )
@@ -230,9 +269,8 @@ class NodeStore:
         self._paths.tailscale_key.unlink(missing_ok=True)
         _fsync_dir(self._paths.tailscale_key.parent)
 
-    @staticmethod
-    def _keyfile(ssid: str, psk: str, hostname: str) -> str:
-        return render_nm_keyfile(nm_wifi_profile(ssid, psk, hostname))
+    def _keyfile(self, ssid: str, psk: str, hostname: str) -> str:
+        return render_nm_keyfile(nm_wifi_profile(ssid, psk, hostname, interface=self._interface))
 
     @staticmethod
     def _text(text: str) -> Callable[[Path], None]:
@@ -266,11 +304,15 @@ class NodeStore:
             self._roll_forward(entries)
         except Exception:
             # Journal first: a power cut from here on must finish the rollback instead.
-            self._paths.journal.unlink(missing_ok=True)
+            self._drop_journal()
             for target in reversed(targets):
                 _restore(target)
             raise
-        self._finish_commit(entries)
+        try:
+            self._finish_commit(entries)
+        except OSError as exc:
+            # The new config is in force. The journal, if still there, settles it at startup.
+            logger.error("tidying up after a save failed: %s", type(exc).__name__)
 
     @staticmethod
     def _roll_forward(entries: list[dict[str, Any]]) -> None:
@@ -281,33 +323,83 @@ class NodeStore:
             elif _staged(target).exists():
                 os.replace(_staged(target), target)
 
-    def _finish_commit(self, entries: list[dict[str, Any]]) -> None:
-        """Make the renames durable, then drop the backups and only then the journal.
-
-        Backups with no journal mean an unfinished rollback, so that order matters.
-        """
-        targets = [Path(entry["target"]) for entry in entries]
-        for directory in {target.parent for target in targets}:
-            _fsync_dir(directory)
-        for target in targets:
-            _backup(target).unlink(missing_ok=True)
+    def _drop_journal(self) -> None:
         self._paths.journal.unlink(missing_ok=True)
         _fsync_dir(self._paths.state_dir)
 
-    def recover(self) -> None:
-        """Run at startup: settle an interrupted save and remove stale working files."""
+    def _finish_commit(self, entries: list[dict[str, Any]]) -> None:
+        """Make the renames durable, then drop the backups and only then the journal.
+
+        Backups with no journal mean an unfinished rollback, so if the journal's removal
+        reached the disk before a backup's, a power cut would undo a finished save. Hence
+        the second round of syncs.
+        """
+        targets = [Path(entry["target"]) for entry in entries]
+        directories = {target.parent for target in targets}
+        for directory in directories:
+            _fsync_dir(directory)
+        for target in targets:
+            _backup(target).unlink(missing_ok=True)
+        for directory in directories:
+            _fsync_dir(directory)
+        self._drop_journal()
+
+    def _read_journal(self) -> list[dict[str, Any]] | None:
+        """Return the journal's entries, or ``None`` if it is not one this store wrote."""
+        try:
+            entries = json.loads(self._paths.journal.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        known = {str(target) for target in self._paths.targets()}
+        valid = (
+            isinstance(entries, list)
+            and entries
+            and all(
+                isinstance(entry, dict)
+                and entry.get("target") in known
+                and isinstance(entry.get("write"), bool)
+                for entry in entries
+            )
+        )
+        return entries if valid else None
+
+    def _settle_interrupted_save(self) -> None:
         paths = self._paths
-        paths.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if paths.journal.exists():
-            entries = json.loads(paths.journal.read_text(encoding="utf-8"))
+        entries = self._read_journal() if paths.journal.exists() else None
+        if entries is not None:
             self._roll_forward(entries)
             self._finish_commit(entries)
-        else:
-            for target in paths.targets():
-                if _backup(target).exists():
-                    _restore(target)
-        for target in (*paths.targets(), paths.state_file):
+            return
+        if paths.journal.exists():
+            logger.error("ignoring an unreadable save journal")
+            self._drop_journal()
+        for target in paths.targets():
+            if _backup(target).exists():
+                _restore(target)
+
+    def _sweep(self) -> None:
+        paths = self._paths
+        if paths.journal.exists():
+            return  # a commit is still unfinished, and needs its staged files next time
+        for target in (*paths.targets(), paths.state_file, paths.journal):
             for pattern in (f".{target.name}.*.tmp", f"..{target.name}.*.tmp"):
-                if target.parent.is_dir():
-                    for stale in target.parent.glob(pattern):
-                        stale.unlink(missing_ok=True)
+                for stale in target.parent.glob(pattern):
+                    stale.unlink(missing_ok=True)
+
+    def recover(self) -> None:
+        """Run at startup: settle an interrupted save and remove stale working files.
+
+        Never raises for a disk problem. The node has to keep joining or serving the AP,
+        and exiting would only repeat this on the same disk.
+        """
+        paths = self._paths
+        steps = (
+            lambda: paths.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True),
+            self._settle_interrupted_save,
+            self._sweep,
+        )
+        for step in steps:
+            try:
+                step()
+            except OSError as exc:
+                logger.error("recovering the saved config failed: %s", type(exc).__name__)

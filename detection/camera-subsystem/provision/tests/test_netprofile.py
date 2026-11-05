@@ -299,3 +299,17 @@ def test_passphrase_does_not_come_from_the_seedable_random_module() -> None:
     first = generate_ap_passphrase()
     random.seed(1234)
     assert generate_ap_passphrase() != first
+
+
+def test_m5_profile_is_bound_to_the_interface() -> None:
+    assert nm_wifi_profile("s", "p", "h")["connection"]["interface-name"] == "wlan0"
+    assert (
+        nm_wifi_profile("s", "p", "h", interface="wlan7")["connection"]["interface-name"]
+        == "wlan7"
+    )
+
+
+def test_m7_force_reauth_only_when_asked() -> None:
+    assert "--force-reauth" not in tailscale_up_args("/k", "h")
+    assert "--force-reauth" in tailscale_up_args("/k", "h", force_reauth=True)
+

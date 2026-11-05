@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Protocol
 from wsgiref.types import StartResponse, WSGIEnvironment
 
+from cameraprovision.config import _RFC1123_LABEL_RE as RFC1123_LABEL_RE
 from cameraprovision.config import _write_private_atomic
 from cameraprovision.portal import PortalMode, WifiChange, make_app, make_server
 from cameraprovision.state import ProvisionEvent as E
@@ -53,6 +54,8 @@ class System(Protocol):
     def gpio_reprovision_held(self) -> bool: ...
     def scan_ssids(self) -> list[str]: ...
     def start_ap(self) -> None: ...
+    def ap_active(self) -> bool: ...
+    def set_hostname(self, hostname: str) -> None: ...
     def stop_ap(self) -> None: ...
     def reload_connections(self) -> None: ...
     def join_uplink(self) -> None: ...
@@ -74,6 +77,9 @@ class Settings:
     ap_ip: str = "10.42.0.1"
     ap_port: int = 80
     interface: str = "wlan0"
+    ap_check_s: float = 10.0
+    rejoin_s: float = 60.0
+    hostname_retry_s: float = 30.0
     tailscale_backoff_s: float = 30.0
     tailscale_backoff_max_s: float = 3600.0
 
@@ -124,7 +130,9 @@ class Provisioner:
         self._system = system
         self._clock = clock
         self._server_factory = server_factory
-        self._store = NodeStore(paths, chown=system.chown_to_service_user)
+        self._store = NodeStore(
+            paths, chown=system.chown_to_service_user, interface=self.settings.interface
+        )
 
         self._gate = threading.Lock()
         self._state = S.UNPROVISIONED
@@ -134,6 +142,15 @@ class Provisioner:
         self._config_pending = False
         self._session: _PortalSession | None = None
         self._persisted: dict[str, Any] | None = None
+        self._persist_failing = False
+        self._bridge_config_valid = True
+        # The window restarts at the first portal open after the AP starts, and not at a
+        # later reopen or a daemon restart.
+        self._window_awaits_first_open = False
+        self._hostname_owed = False
+        self._hostname_next = 0.0
+        self._ap_check_next = 0.0
+        self._rejoin_next = 0.0
         self._failures = 0
 
         self._ssids_lock = threading.Lock()
@@ -168,21 +185,23 @@ class Provisioner:
         self._boot_id = self._system.boot_id()
         if not self._restore_state():
             self._fire_boot_events()
-        self._guarded("saving state", self._persist)
+        self._check_bridge_config()
+        self._persist()
         self._guarded("reconciling", self._reconcile)
 
     def tick(self) -> None:
         results = [
             self._guarded("checking events", self._poll),
-            self._guarded("saving state", self._persist),
             self._guarded("reconciling", self._reconcile),
         ]
+        self._persist()
         self._failures = 0 if all(results) else self._failures + 1
         if self._failures >= self.settings.max_consecutive_failures:
             raise ProvisionerFailed(f"{self._failures} failed ticks in a row")
 
     def shutdown(self) -> None:
         """Leave no AP without a portal. A restart brings both back from the saved state."""
+        self._persist()
         self._guarded("closing the portal", self._close_portal)
         if self._ap_stop_owed:
             if self._guarded("stopping the AP", self._system.stop_ap):
@@ -209,13 +228,16 @@ class Provisioner:
             # CLOCK_MONOTONIC runs across process restarts within one boot, so a crash
             # loop cannot keep extending the join timeout or the AP cap.
             entered_at = float(saved["entered_at"])
+            window_started = float(saved["window_started"])
         except (OSError, ValueError, KeyError, TypeError):
             return False
         if not same_boot or state is S.UNPROVISIONED:
             return False
         self._state = state
         self._entered_at = entered_at
-        self._window_started = self._clock()
+        self._window_started = window_started
+        self._hostname_owed = state is S.JOINING
+        self._rejoin_next = self._clock() + self.settings.rejoin_s
         logger.info("restored state %s after a daemon restart", state.value)
         return True
 
@@ -232,7 +254,7 @@ class Provisioner:
             return False
 
     def _fire(self, event: E) -> None:
-        has_config = self._store.load() is not None
+        has_config = self._store.has_config()
         new = next_state(self._state, event, has_config=has_config)
         if new is self._state and event not in (E.BOOT, E.REPROVISION_BUTTON):
             return
@@ -247,7 +269,13 @@ class Provisioner:
         self._scanned = False
         self._ap_started = False
         self._join_issued = False
+        self._window_awaits_first_open = True
+        self._check_bridge_config()
+        if new is S.JOINING:
+            self._hostname_owed = True
+            self._hostname_next = now
         if new is S.PROVISIONED:
+            self._rejoin_next = now + self.settings.rejoin_s
             self._tailscale_settled = False
             self._tailscale_next = now
             self._tailscale_delay = self.settings.tailscale_backoff_s
@@ -295,15 +323,41 @@ class Provisioner:
             self._window_started = now
             self._entered_at = now
 
+    def _check_bridge_config(self) -> None:
+        """Report a bad bridge config. It stops the bridge, but never the join or the AP logic."""
+        valid = self._store.load() is not None or not self._store.has_config()
+        if valid != self._bridge_config_valid:
+            if valid:
+                logger.info("the bridge config is valid again")
+            else:
+                logger.error("the bridge config is missing or invalid; the bridge cannot run")
+        self._bridge_config_valid = valid
+
     def _persist(self) -> None:
+        """Save the state if it changed. A failure is only logged.
+
+        Exiting over it would not help: a restart would find the old state file, fire boot
+        again and restart the join timer, so a full disk could keep a node from ever falling
+        back. This process carries on with its state in memory, so it fires boot only once.
+        """
         record = {
             "boot_id": self._boot_id,
             "state": self._state.value,
             "entered_at": self._entered_at,
+            "window_started": self._window_started,
+            "bridge_config_valid": self._bridge_config_valid,
         }
-        if record != self._persisted:
+        if record == self._persisted:
+            return
+        try:
             _write_private_atomic(self.paths.state_file, json.dumps(record))
-            self._persisted = record
+        except Exception as exc:
+            if not self._persist_failing:
+                logger.error("saving state failed: %s", type(exc).__name__)
+            self._persist_failing = True
+            return
+        self._persisted = record
+        self._persist_failing = False
 
     # --- making the system match the state ------------------------------------------
 
@@ -315,14 +369,54 @@ class Provisioner:
         if self._ap_stop_owed:
             self._system.stop_ap()
             self._ap_stop_owed = False
+        self._reconcile_hostname()
         if self._state is S.JOINING and not self._join_issued:
             self._system.reload_connections()
-            self._system.join_uplink()
+            # A link NetworkManager already joined must not be torn down and re-activated.
+            if not self._probe_uplink():
+                self._system.join_uplink()
             self._join_issued = True
         elif self._state is S.PROVISIONED:
+            self._reconcile_rejoin()
             self._reconcile_tailscale()
 
+    def _reconcile_hostname(self) -> None:
+        """Apply the hostname on entering JOINING. A failure must not hold up the join."""
+        now = self._clock()
+        if not self._hostname_owed or now < self._hostname_next:
+            return
+        hostname = self._store.hostname()
+        if hostname is None or not RFC1123_LABEL_RE.fullmatch(hostname):
+            # node.json can be edited by hand, and "--static" would be read as a flag.
+            logger.error("the saved hostname is not valid, so it was not applied")
+            self._hostname_owed = False
+            return
+        try:
+            self._system.set_hostname(hostname)
+        except Exception as exc:
+            logger.warning("setting the hostname failed: %s", type(exc).__name__)
+            self._hostname_next = now + self.settings.hostname_retry_s
+            return
+        self._hostname_owed = False
+
+    def _reconcile_rejoin(self) -> None:
+        """Nudge NetworkManager, which can stop autoconnecting after a no-secrets failure.
+
+        A provisioned node never opens the AP over a lost link, so this is all it does.
+        """
+        now = self._clock()
+        if now < self._rejoin_next:
+            return
+        self._rejoin_next = now + self.settings.rejoin_s
+        if self._probe_uplink():
+            return
+        try:
+            self._system.join_uplink()
+        except Exception as exc:
+            logger.warning("re-issuing the join failed: %s", type(exc).__name__)
+
     def _reconcile_ap(self) -> None:
+        self._check_ap_alive()
         # In this order: the radio cannot scan while serving the AP, and the listener's
         # address does not exist until the AP profile is active.
         if not self._scanned:
@@ -332,6 +426,7 @@ class Provisioner:
             self._ap_stop_owed = True
             self._system.start_ap()
             self._ap_started = True
+            self._ap_check_next = self._clock() + self.settings.ap_check_s
         with self._gate:
             mode = self._portal_mode()
             session = self._session
@@ -347,9 +442,25 @@ class Provisioner:
         if self._session is None:
             self._open_portal(mode)
 
+    def _check_ap_alive(self) -> None:
+        """Restart an AP NetworkManager dropped, which would otherwise leave a dead portal."""
+        now = self._clock()
+        if not self._ap_started or now < self._ap_check_next:
+            return
+        self._ap_check_next = now + self.settings.ap_check_s
+        try:
+            alive = self._system.ap_active()
+        except Exception as exc:
+            logger.warning("checking the AP failed: %s", type(exc).__name__)
+            return
+        if not alive:
+            logger.error("the AP is no longer active, so restarting it")
+            self._close_portal()
+            self._ap_started = False
+
     def _portal_mode(self) -> PortalMode:
         """WiFi-only for a fallback AP with a config to repair, otherwise everything."""
-        if self._state is S.FALLBACK_AP and self._store.load() is not None:
+        if self._state is S.FALLBACK_AP and self._store.has_config():
             return PortalMode.WIFI_ONLY
         return PortalMode.FULL
 
@@ -392,7 +503,9 @@ class Provisioner:
         )
         session.thread.start()
         with self._gate:
-            self._window_started = self._clock()
+            if self._window_awaits_first_open:
+                self._window_awaits_first_open = False
+                self._window_started = self._clock()
             self._session = session
         logger.info("portal listening in %s mode", mode.value)
 
@@ -414,32 +527,37 @@ class Provisioner:
         if self._tailscale_settled or now < self._tailscale_next:
             return
         if not self._tailscale_logged_in:
-            saved = self._store.load()
-            if saved is None or not saved.vpn_requested:
+            hostname = self._store.pending_login_hostname()
+            if hostname is None:
                 self._tailscale_settled = True
                 return
             try:
-                self._system.tailscale_up(self.paths.tailscale_key, saved.hostname)
+                self._system.tailscale_up(self.paths.tailscale_key, hostname)
             except Exception as exc:
                 logger.warning(
                     "tailscale login failed, retrying in %g s: %s",
                     self._tailscale_delay,
                     type(exc).__name__,
                 )
-                self._tailscale_next = now + self._tailscale_delay
-                self._tailscale_delay = min(
-                    self._tailscale_delay * 2, self.settings.tailscale_backoff_max_s
-                )
+                self._tailscale_back_off(now)
                 return
             self._tailscale_logged_in = True
+            self._tailscale_delay = self.settings.tailscale_backoff_s
             logger.info("tailscale login succeeded")
         try:
             self._store.delete_tailscale_key()
         except OSError as exc:
             logger.error("deleting the used tailscale key failed: %s", type(exc).__name__)
+            self._tailscale_back_off(now)
             return
         self._tailscale_logged_in = False
         self._tailscale_settled = True
+
+    def _tailscale_back_off(self, now: float) -> None:
+        self._tailscale_next = now + self._tailscale_delay
+        self._tailscale_delay = min(
+            self._tailscale_delay * 2, self.settings.tailscale_backoff_max_s
+        )
 
     # --- called from portal request threads -----------------------------------------
 

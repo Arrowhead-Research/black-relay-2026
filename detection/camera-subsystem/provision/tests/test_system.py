@@ -1,49 +1,40 @@
 """Tests for ``cameraprovision.system``: argv shape, timeouts and output parsing.
 
-No real command ever runs: ``subprocess.run`` is replaced for every test here. The
-nmcli text below follows nmcli(1)'s terse format, and has NOT been recorded from a
-target device, because this suite must not run nmcli on a development machine. Task 7's
-checklist confirms the formats on Bookworm.
+No real command ever runs: ``subprocess.run`` is replaced for every test here. The nmcli
+text comes from ``fixtures/nmcli``, recorded from nmcli 1.52.1 on a development laptop and
+redacted (see its README). The target image's nmcli has not been recorded.
 """
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from cameraprovision.daemon import Provisioner, Settings
 from cameraprovision.netprofile import tailscale_up_args
+from cameraprovision.state import ProvisionState as S
+from cameraprovision.store import Paths
 from cameraprovision.system import RealSystem, SystemCommandError, parse_ssids
 
-SITE_ACTIVE = """\
-GENERAL.STATE:activated
-802-11-wireless.mode:infrastructure
-DHCP4.OPTION[1]:dhcp_lease_time = 86400
-DHCP4.OPTION[2]:ip_address = 192.168.1.50
-"""
-SITE_ACTIVE_NO_LEASE = """\
-GENERAL.STATE:activated
-802-11-wireless.mode:infrastructure
-"""
-SITE_ACTIVATING = """\
-GENERAL.STATE:activating
-802-11-wireless.mode:infrastructure
-"""
-SITE_INACTIVE = """\
-802-11-wireless.mode:infrastructure
-"""
-AP_MODE = """\
-GENERAL.STATE:activated
-802-11-wireless.mode:ap
-DHCP4.OPTION[2]:ip_address = 10.42.0.1
-"""
-ADHOC_MODE = """\
-GENERAL.STATE:activated
-802-11-wireless.mode:adhoc
-DHCP4.OPTION[2]:ip_address = 10.42.0.1
-"""
+FIXTURES = Path(__file__).parent / "fixtures" / "nmcli"
+SITE_ACTIVE = (FIXTURES / "site_active.txt").read_text()
+SITE_INACTIVE = (FIXTURES / "site_inactive.txt").read_text()
+STATE_ACTIVATED = (FIXTURES / "state_activated.txt").read_text()
+STATE_INACTIVE = (FIXTURES / "state_inactive.txt").read_text()
+SCAN = (FIXTURES / "scan.txt").read_text()
+
+# Edited from the recording, for states it could not catch.
+SITE_ACTIVE_NO_LEASE = "".join(
+    line for line in SITE_ACTIVE.splitlines(keepends=True) if "ip_address" not in line
+)
+SITE_ACTIVATING = SITE_ACTIVE_NO_LEASE.replace("activated", "activating")
+SITE_NO_MODE = "".join(
+    line for line in SITE_ACTIVE.splitlines(keepends=True) if "wireless.mode" not in line
+)
 
 
 class FakeRun:
@@ -83,6 +74,8 @@ def every_adapter(system: RealSystem, tmp_path: Path) -> None:
     system.ipv4_lease()
     system.tailscale_up(tmp_path / "key", "edge-7")
     system.gpio_reprovision_held()
+    system.ap_active()
+    system.set_hostname("edge-7")
 
 
 def test_every_adapter_uses_an_argv_list_with_a_timeout_and_no_shell(
@@ -109,7 +102,8 @@ def test_the_tailscale_key_is_passed_by_file_only(
 
     system.tailscale_up(key_file, "edge-7")
 
-    assert run.calls[0][0] == tailscale_up_args(key_file, "edge-7")
+    assert run.calls[0][0] == tailscale_up_args(key_file, "edge-7", force_reauth=True)
+    assert "--force-reauth" in run.calls[0][0]
     assert "tskey-auth-s3cret" not in " ".join(run.calls[0][0])
 
 
@@ -141,8 +135,7 @@ def test_failures_become_system_errors_with_no_output_or_argv(
         (SITE_ACTIVE_NO_LEASE, True, False),
         (SITE_ACTIVATING, False, False),
         (SITE_INACTIVE, False, False),
-        (AP_MODE, False, False),
-        (ADHOC_MODE, False, False),
+        (SITE_NO_MODE, False, False),
         ("", False, False),
     ],
 )
@@ -239,6 +232,74 @@ def test_boot_id_is_read_from_proc(tmp_path: Path) -> None:
     assert RealSystem(boot_id_path=source).boot_id() == "abc-123"
 
 
+def test_recorded_scan_parses_to_unique_names_with_no_blanks(
+    run: FakeRun, system: RealSystem
+) -> None:
+    run.results["wifi list"] = SCAN
+
+    names = system.scan_ssids()
+
+    assert names and all(name.startswith("Redacted-") for name in names)
+    assert len(names) == len(set(names))
+
+
+def test_ap_active_reads_the_recorded_states(run: FakeRun, system: RealSystem) -> None:
+    run.results["connection show"] = STATE_ACTIVATED
+    assert system.ap_active() is True
+    assert run.calls[-1][0][-3:] == ["connection", "show", "black-relay-setup-ap"]
+    assert "GENERAL.STATE" in run.calls[-1][0]
+
+    run.results["connection show"] = STATE_INACTIVE
+    assert STATE_INACTIVE == ""
+    assert system.ap_active() is False
+
+
+def test_set_hostname_uses_hostnamectl(run: FakeRun, system: RealSystem) -> None:
+    system.set_hostname("edge-7")
+
+    assert run.calls[0][0] == ["hostnamectl", "set-hostname", "edge-7"]
+
+
+def missing(program: str) -> FileNotFoundError:
+    return FileNotFoundError(program)
+
+
+def test_m6_gpio_v2_reads_by_name_without_gpiofind(run: FakeRun, system: RealSystem) -> None:
+    run.results["gpiofind"] = missing("gpiofind")
+    run.results["gpioget"] = "1\n"
+
+    assert system.gpio_reprovision_held() is True
+
+    argv = run.calls[-1][0]
+    assert argv[0] == "gpioget" and argv[-1] == "GPIO17"
+    assert "--numeric" in argv and "--active-low" in argv and "--bias=pull-up" in argv
+
+
+def test_m6_gpio_v2_released_reads_false(run: FakeRun, system: RealSystem) -> None:
+    run.results["gpiofind"] = missing("gpiofind")
+    run.results["gpioget"] = "0\n"
+
+    assert system.gpio_reprovision_held() is False
+
+
+def test_m6_a_real_gpiofind_failure_is_not_taken_for_v2(run: FakeRun, system: RealSystem) -> None:
+    """An unknown line name on 1.x must stay an error, not fall through."""
+    run.results["gpiofind"] = subprocess.CalledProcessError(1, ["gpiofind"])
+
+    with pytest.raises(SystemCommandError):
+        system.gpio_reprovision_held()
+
+    assert len(run.calls) == 1
+
+
+def test_m6_no_libgpiod_is_an_error(run: FakeRun, system: RealSystem) -> None:
+    run.results["gpiofind"] = missing("gpiofind")
+    run.results["gpioget"] = missing("gpioget")
+
+    with pytest.raises(SystemCommandError):
+        system.gpio_reprovision_held()
+
+
 def test_chown_uses_the_service_user(
     system: RealSystem, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -254,3 +315,114 @@ def test_the_module_never_asks_for_a_shell() -> None:
     source = Path(__file__).parent.parent / "src/cameraprovision/system.py"
 
     assert "shell=" not in source.read_text()
+
+
+# --- RealSystem wired to Provisioner, faked only at the process boundary ----------------
+
+
+class Machine:
+    """Answers commands with recorded nmcli output, tracking what NetworkManager would do."""
+
+    def __init__(self) -> None:
+        self.argv: list[list[str]] = []
+        self.ap_up = False
+        self.site_up = False
+        self.site_connects = False
+
+    def __call__(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert kwargs["timeout"] > 0 and not kwargs.get("shell")
+        self.argv.append(argv)
+        line = " ".join(argv)
+        stdout = ""
+        if argv[0] in ("gpiofind", "gpioget"):
+            raise FileNotFoundError(argv[0])
+        if "wifi list" in line:
+            stdout = SCAN
+        elif "connection show black-relay-setup-ap" in line:
+            stdout = STATE_ACTIVATED if self.ap_up else STATE_INACTIVE
+        elif "connection show black-relay-uplink" in line:
+            stdout = SITE_ACTIVE if self.site_up else SITE_INACTIVE
+        elif "connection up black-relay-setup-ap" in line:
+            self.ap_up, self.site_up = True, False
+        elif "connection down black-relay-setup-ap" in line:
+            if not self.ap_up:
+                raise subprocess.CalledProcessError(10, argv)
+            self.ap_up = False
+        elif "connection up black-relay-uplink" in line:
+            self.site_up = self.site_connects
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+
+class NoSocket:
+    def __init__(self, app: Any, ip: str, port: int, interface: str) -> None:
+        self.closed = False
+
+    def serve_forever(self, poll_interval: float = 0.5) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        return None
+
+    def server_close(self) -> None:
+        self.closed = True
+
+
+def test_real_system_drives_the_daemon_through_recorded_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    machine = Machine()
+    monkeypatch.setattr(subprocess, "run", machine)
+    monkeypatch.setattr("shutil.chown", lambda *a, **k: None)
+    boot_id = tmp_path / "boot_id"
+    boot_id.write_text("boot-1\n")
+    paths = Paths(
+        bridge_config=tmp_path / "etc/camerabridge/bridge.yaml",
+        mediamtx_env=tmp_path / "etc/camerabridge/mediamtx.env",
+        nm_connections_dir=tmp_path / "etc/NetworkManager/system-connections",
+        state_dir=tmp_path / "var/lib/camera-provision",
+    )
+    now = [1000.0]
+    daemon = Provisioner(
+        system=RealSystem(boot_id_path=boot_id),
+        paths=paths,
+        clock=lambda: now[0],
+        settings=Settings(),
+        server_factory=NoSocket,
+    )
+    paths.nm_connections_dir.mkdir(parents=True)
+    paths.nm_keyfile.write_text("[connection]\n")
+    paths.state_dir.mkdir(parents=True)
+    paths.node_file.write_text('{"hostname": "edge-7", "vpn_requested": false}')
+
+    def tick(seconds: float) -> None:
+        now[0] += seconds
+        daemon.tick()
+
+    daemon.start()
+    try:
+        # No libgpiod here: reads as not held, and says so.
+        assert "setup button" in caplog.text
+        # Recorded inactive output means no uplink, so this times out to the setup AP.
+        assert daemon.state is S.JOINING
+        assert ["hostnamectl", "set-hostname", "edge-7"] in machine.argv
+        assert ["nmcli", "--wait", "0", "connection", "up", "black-relay-uplink"] in machine.argv
+        tick(120)
+        assert daemon.state is S.FALLBACK_AP and machine.ap_up
+
+        # Recorded "activated" keeps the AP alone; losing it restarts it.
+        starts = sum("black-relay-setup-ap" in a and "up" in a for a in machine.argv)
+        tick(10)
+        assert sum("black-relay-setup-ap" in a and "up" in a for a in machine.argv) == starts
+        machine.ap_up = False
+        tick(10)
+        assert machine.ap_up
+
+        # Back to joining, where the recorded active output with a lease means uplink.
+        machine.site_connects = True
+        tick(300)
+        assert daemon.state is S.JOINING and not machine.ap_up and machine.site_up
+        tick(1)
+        assert daemon.state is S.PROVISIONED
+    finally:
+        daemon.shutdown()
