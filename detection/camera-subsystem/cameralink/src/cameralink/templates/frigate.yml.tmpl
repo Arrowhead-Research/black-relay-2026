@@ -1,0 +1,67 @@
+# Rendered by cameralink. Secrets are references, expanded from the 0600 env file.
+version: "0.18-0"
+mqtt:
+  host: 127.0.0.1
+  port: 1883
+auth:
+  enabled: false
+proxy:
+  auth_secret: "{FRIGATE_PROXY_SECRET}"
+tls:
+  enabled: true
+detectors:
+  hailo:
+    type: hailo8l
+    device: PCIe
+model:
+  path: /config/model_cache/yolov6n.hef
+  width: 320
+  height: 320
+  input_tensor: nhwc
+  input_pixel_format: rgb
+  input_dtype: int
+  model_type: yolo-generic
+  labelmap_path: /labelmap/coco-80.txt
+objects:
+  track:
+    - person
+    - car
+go2rtc:
+  streams:
+    $node_id:
+      - "rtsp://admin:{FRIGATE_CAMERA_PASSWORD}@10.77.0.10:554/h264Preview_01_sub"
+  publish:
+    $node_id:
+      - "$publish_url"
+cameras:
+  $node_id:
+    ffmpeg:
+      input_args: preset-rtsp-restream
+      inputs:
+        - path: "rtsp://admin:{FRIGATE_CAMERA_PASSWORD}@10.77.0.10:554/h264Preview_01_sub"
+          input_args: -rtsp_transport tcp
+          roles:
+            - detect
+        - path: "rtsp://admin:{FRIGATE_CAMERA_PASSWORD}@10.77.0.10:554/h264Preview_01_main"
+          input_args: -rtsp_transport tcp
+          roles:
+            - record
+    detect:
+      enabled: true
+      width: 640
+      height: 480
+      fps: 5
+    record:
+      enabled: true
+      continuous:
+        days: 0
+      motion:
+        days: 1
+      alerts:
+        retain:
+          days: 7
+      detections:
+        retain:
+          days: 7
+    zones:
+$zones

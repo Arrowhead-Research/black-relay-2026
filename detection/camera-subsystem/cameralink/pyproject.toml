@@ -4,6 +4,7 @@ version = "0.0.0"
 description = "Black Relay camera subsystem camera link: configures a factory-fresh Reolink RLC-520A from the edge node."
 requires-python = ">=3.11"
 dependencies = [
+    "pyyaml>=6.0",
     "reolink_aio==0.22.0",
 ]
 
