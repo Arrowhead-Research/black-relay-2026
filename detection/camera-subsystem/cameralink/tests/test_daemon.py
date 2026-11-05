@@ -531,6 +531,20 @@ def test_a_link_file_of_the_wrong_shape_counts_as_damaged(live, content):
     assert live.step.last.generation >= NOW
 
 
+@pytest.mark.parametrize("held_mac", [5, True, ["x"], {"a": 1}])
+def test_a_held_mac_of_the_wrong_type_counts_as_damaged(live, held_mac):
+    """It reaches adopt.step as a lease's MAC, where it would crash every tick."""
+    live.daemon.tick()
+    link = json.loads(live.paths.link_state.read_text())
+    live.paths.link_state.write_text(json.dumps({**link, "held_mac": held_mac}))
+    live.clock_epoch = NOW + 2 * 3600  # so that only the hold could give a lease
+    live.restart_daemon()
+    live.daemon.tick()
+    live.daemon.tick()
+    assert live.step.last.generation >= NOW
+    assert live.step.last.lease is None
+
+
 def test_a_generation_is_on_disk_before_any_step_can_use_it(live):
     live.daemon.tick()
     live.set_carrier(False)
@@ -942,6 +956,7 @@ def test_a_very_short_password_hides_a_quoted_reason_but_says_what_failed(live):
 def test_a_very_short_password_does_not_hide_reasons_with_no_settings_in_them(live):
     live.provision(broker={"username": "kit1", "password": "e"})
     live.daemon.tick()
+    live.seed(phase="needs_reset")
     live.step.state = LinkState.NEEDS_RESET
     live.daemon.tick()
     assert live.state()["reason"] == "the camera needs a factory reset"
@@ -1007,8 +1022,9 @@ def test_an_unplugged_camera_keeps_frigate(live):
     assert "frigate.service" in live.systemd.running
 
 
-def test_any_needs_reset_stops_frigate_even_with_a_saved_password(live):
+def test_a_refusal_stops_frigate_even_with_a_saved_password(live):
     live.daemon.tick()
+    live.seed(phase="needs_reset")
     live.step.state = LinkState.NEEDS_RESET
     live.daemon.tick()
     live.daemon.tick()
@@ -1016,8 +1032,93 @@ def test_any_needs_reset_stops_frigate_even_with_a_saved_password(live):
     assert CAMERA_PASSWORD == CameraStore(live.paths.store).load(MAC).password
 
 
+def test_a_locked_camera_stops_frigate(live):
+    live.daemon.tick()
+    live.seed(locked=True)
+    live.step.state = LinkState.NEEDS_RESET
+    live.daemon.tick()
+    assert live.systemd.frigate_calls() == ["restart", "stop"]
+    assert live.state()["reason"] == "the camera needs a factory reset"
+
+
+def _real_step_daemon(live, seed, *, probe=lambda host, port: True):
+    """The real step in a new generation's first look, settled, with a camera that accepts the
+    saved password if it is ever asked. Returns the logins it was asked for."""
+    live.daemon.tick()
+    generation = json.loads(live.paths.link_state.read_text())["generation"]
+    live.seed(settle_key=f"{MAC}/{generation}", settle_since=-1000.0, attempted=None, **seed)
+    logins = []
+
+    class Camera:
+        def __init__(self, ip):
+            pass
+
+        def login(self, user, password):
+            logins.append(password)
+
+        def logout(self):
+            pass
+
+    live.daemon = Daemon(
+        live.paths,
+        live.systemd,
+        step_fn=functools.partial(step, probe=probe),
+        clock=live.clock,
+        client_factory=Camera,
+    )
+    return logins
+
+
+CAPPED = (NOW - 100.0,) * FAILURE_CAP
+
+
+def test_a_healthy_camera_at_the_rolling_cap_keeps_frigate(live):
+    """Unknown login outcomes filled the cap, so no login is sent, and nothing has said that
+    the password is wrong. A day without detection on a working camera would be the outage."""
+    logins = _real_step_daemon(live, {"phase": "failed", "failures": CAPPED})
+    live.daemon.tick()
+    state = live.state()
+    assert state["state"] == "needs_reset"
+    assert logins == []
+    assert live.systemd.frigate_calls() == ["restart"]
+    assert "frigate.service" in live.systemd.running
+    assert "factory reset" not in state["reason"]
+    assert "clear-limits" in state["reason"]
+    assert state["retry_after"] == NOW - 100.0 + FAILURE_WINDOW_SECONDS
+
+
+def test_a_spent_signature_limit_on_a_healthy_camera_keeps_frigate(live):
+    """Port 80 refusing once on a working camera must not bounce Frigate."""
+    logins = _real_step_daemon(
+        live,
+        {"phase": "adopted", "signature_failures": (NOW - 100.0,)},
+        probe=lambda host, port: port == 9000,
+    )
+    live.daemon.tick()
+    assert live.state()["state"] == "needs_reset"
+    assert logins == []
+    assert live.systemd.frigate_calls() == ["restart"]
+    assert "factory reset" not in live.state()["reason"]
+
+
+def test_a_refusal_that_then_reaches_the_cap_still_stops_frigate(live):
+    logins = _real_step_daemon(live, {"phase": "needs_reset", "failures": CAPPED})
+    live.daemon.tick()
+    assert logins == []
+    assert live.systemd.frigate_calls() == ["restart", "stop"]
+    assert live.state()["reason"] == "the camera needs a factory reset"
+
+
+def test_a_locked_camera_at_the_cap_still_stops_frigate(live):
+    _real_step_daemon(live, {"phase": "failed", "failures": CAPPED, "locked": True})
+    live.daemon.tick()
+    assert live.systemd.frigate_calls() == ["restart", "stop"]
+    assert live.state()["reason"] == "the camera needs a factory reset"
+
+
 def test_frigate_comes_back_after_needs_reset_with_no_rewrite(live):
     live.daemon.tick()
+    live.seed(phase="needs_reset")
     live.step.state = LinkState.NEEDS_RESET
     live.daemon.tick()
     live.step.state = LinkState.ADOPTED
@@ -1645,6 +1746,7 @@ def test_an_anonymous_broker_is_reported_when_nothing_matters_more(live):
 def test_more_important_reasons_come_before_the_anonymous_one(live):
     provision_anonymous(live)
     live.daemon.tick()
+    live.seed(phase="needs_reset")
     live.step.state = LinkState.NEEDS_RESET
     live.daemon.tick()
     assert live.state()["reason"] == "the camera needs a factory reset"
@@ -1841,6 +1943,7 @@ def test_dhcp_unit_is_the_sequence_proven_on_kit_1_with_exact_hardening():
         "--interface=eth0",
         "--except-interface=lo",
         "--dhcp-range=10.77.0.10,10.77.0.10,255.255.255.0,1h",
+        "--dhcp-authoritative",
         "--dhcp-option=3",
         "--dhcp-option=6",
         "--dhcp-leasefile=/var/lib/camera-link/dnsmasq.leases",

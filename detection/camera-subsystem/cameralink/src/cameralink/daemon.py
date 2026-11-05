@@ -73,6 +73,10 @@ _HIDDEN_REASON = (
     "because it would show a secret"
 )
 _NO_CENTRAL_PROXY = "central_proxy_unavailable"
+_NEEDS_RESET = "the camera needs a factory reset"
+_LIMIT_REACHED = (
+    "the camera's login limit is reached, see retry_after, or run camera-link clear-limits"
+)
 _LOCAL_SECRET_RE = re.compile(rb"[0-9a-f]{64}\s*")
 
 
@@ -300,7 +304,7 @@ class Daemon:
         if problem:
             problems.append(problem)
         if state is LinkState.NEEDS_RESET:
-            problems.append("the camera needs a factory reset")
+            problems.append(_NEEDS_RESET if _password_in_doubt(record) else _LIMIT_REACHED)
         if provisioning is not None and not provisioning.relay_password:
             problems.append(_NO_CENTRAL_PROXY)
         self._publish(state, mac, record, problems[0] if problems else None)
@@ -426,16 +430,15 @@ class Daemon:
                     problem = f"Frigate's files cannot be written: {type(err).__name__}"
         self._frigate_down_ticks = 0
 
-        # The env file holds another camera's password, or this one's has been refused, or
-        # locked out, or is held back by a limit. Frigate would go on sending it either way.
+        # The env file holds another camera's password, or this one's was refused, and Frigate
+        # would go on sending it. A limit alone says nothing against a working password.
         foreign = (
             mac is not None
             and self._link.frigate_mac is not None
             and self._link.frigate_mac != mac
         )
-        if (foreign or state is LinkState.NEEDS_RESET) and (
-            self._systemd.state(FRIGATE_UNIT) in RUNNING_STATES
-        ):
+        doubted = state is LinkState.NEEDS_RESET and _password_in_doubt(record)
+        if (foreign or doubted) and self._systemd.state(FRIGATE_UNIT) in RUNNING_STATES:
             self._systemd.stop(FRIGATE_UNIT)
         return problem
 
@@ -610,11 +613,23 @@ def _decode_link(content: bytes) -> _Link | None:
         and isinstance(link.carrier, bool | None)
         and isinstance(link.carrier_changes, str | None)
         and isinstance(link.ip, str | None)
+        and isinstance(link.held_mac, str | None)
         and isinstance(link.frigate_mac, str | None)
         and isinstance(link.restart_owed, bool)
         and isinstance(link.dhcp_reset_owed, bool)
     )
     return link if valid else None
+
+
+def _password_in_doubt(record: CameraRecord | None) -> bool:
+    """For a camera in NEEDS_RESET. The other way there is a limit holding back a login, which
+    leaves the phase as it was and is no verdict on the saved password."""
+    return (
+        record is None
+        or record.locked
+        or not record.password
+        or record.phase == LinkState.NEEDS_RESET.value
+    )
 
 
 def _retry_after(state: LinkState, record: CameraRecord | None, now: float) -> float | None:

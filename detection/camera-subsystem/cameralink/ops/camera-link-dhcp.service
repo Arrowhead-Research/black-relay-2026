@@ -14,9 +14,11 @@ Type=simple
 # out. Once running it survives the address going and coming back. So Restart=always is what brings
 # it up when the link does, and the backoff keeps a node with no camera from filling the journal.
 # camera-link stops and starts it on a rising carrier, which is meant not to wait for the delay.
+# Authoritative: camera-link wipes the leases, and a camera that renews after that gets an ACK that
+# rebuilds its lease, where it would otherwise get a NAK "lease not found" (measured).
 ExecStart=/usr/sbin/dnsmasq --conf-file=/dev/null --port=0 --bind-interfaces --interface=eth0 \
     --except-interface=lo --dhcp-range=10.77.0.10,10.77.0.10,255.255.255.0,1h \
-    --dhcp-option=3 --dhcp-option=6 --dhcp-leasefile=/var/lib/camera-link/dnsmasq.leases \
+    --dhcp-authoritative --dhcp-option=3 --dhcp-option=6 --dhcp-leasefile=/var/lib/camera-link/dnsmasq.leases \
     --keep-in-foreground --pid-file=/run/camera-link-dhcp/dnsmasq.pid
 Restart=always
 RestartSec=5
