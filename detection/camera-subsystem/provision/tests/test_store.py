@@ -997,11 +997,11 @@ def test_save_writes_central_hosts_nft_atomically_with_the_config(
     store.save(config())
 
     assert paths.central_hosts in paths.targets()
-    assert "elements = { 10.0.0.2 }" in paths.central_hosts.read_text()
+    assert "central_hosts { 10.0.0.2 }" in paths.central_hosts.read_text()
 
     store.save(config(broker=replace(config().broker, host="10.0.0.9")))
 
-    assert "elements = { 10.0.0.9 }" in paths.central_hosts.read_text()
+    assert "central_hosts { 10.0.0.9 }" in paths.central_hosts.read_text()
     assert yaml.safe_load(paths.bridge_config.read_text())["broker"]["host"] == "10.0.0.9"
 
 
@@ -1029,7 +1029,7 @@ def test_a_power_cut_mid_commit_finishes_the_firewall_set_too(
 
     store.recover()
 
-    assert "elements = { 10.0.0.9 }" in paths.central_hosts.read_text()
+    assert "central_hosts { 10.0.0.9 }" in paths.central_hosts.read_text()
     assert yaml.safe_load(paths.bridge_config.read_text())["broker"]["host"] == "10.0.0.9"
 
 
@@ -1108,13 +1108,21 @@ def test_an_old_tailscale_key_is_deleted_on_load(store: NodeStore, paths: Paths)
     old_image_files(store, paths)
     key = paths.state_dir / "tailscale.key"
     key.write_text("tskey-auth-s3cret")
-    copy = paths.state_dir / ".tailscale.key.prev.tmp"
-    copy.write_text("tskey-auth-s3cret")
+    copies = [
+        paths.state_dir / name
+        for name in (
+            ".tailscale.key.prev.tmp",
+            ".tailscale.key.staged.tmp",
+            "..tailscale.key.staged.tmp.abc123.tmp",
+        )
+    ]
+    for copy in copies:
+        copy.write_text("tskey-auth-s3cret")
 
     assert store.load() is not None
 
     assert not key.exists()
-    assert not copy.exists()
+    assert [copy for copy in copies if copy.exists()] == []
 
 
 def test_an_old_tailscale_key_is_deleted_even_with_no_usable_config(
@@ -1164,3 +1172,29 @@ def test_a_save_writes_no_tailscale_key_at_all(store: NodeStore, paths: Paths) -
 
     assert "vpn_requested" not in json.loads(paths.node_file.read_text())
     assert not (paths.state_dir / "tailscale.key").exists()
+
+
+@pytest.mark.parametrize("value", ["yes", 1, "true", None, []])
+def test_only_a_plain_true_flips_the_picture(
+    store: NodeStore, paths: Paths, value: Any
+) -> None:
+    store.save(config())
+    node = json.loads(paths.node_file.read_text())
+    node["camera_upside_down"] = value
+    paths.node_file.write_text(json.dumps(node))
+
+    saved = store.load()
+
+    assert saved is not None and saved.camera_upside_down is False
+
+
+def test_a_journal_lists_only_targets_to_finish(store: NodeStore, paths: Paths, monkeypatch: pytest.MonkeyPatch) -> None:
+    store.save(config())
+    fail_nth_replace(monkeypatch, 1, SimulatedPowerCut())
+    with pytest.raises(SimulatedPowerCut):
+        store.save(config(hostname="again"))
+    monkeypatch.undo()
+
+    entries = json.loads(paths.journal.read_text())
+
+    assert [set(entry) for entry in entries] == [{"target"}] * len(entries)

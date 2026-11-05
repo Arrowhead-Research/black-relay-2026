@@ -362,7 +362,7 @@ def test_anonymous_box_with_credentials_is_rejected() -> None:
     apply = Mock()
     result = handle_submit(valid_form(broker_anonymous="on"), apply=apply)
     assert not result.ok
-    assert any(e.startswith("broker.username") for e in result.errors)
+    assert any("(broker.username)" in e for e in result.errors)
     apply.assert_not_called()
 
 
@@ -489,7 +489,9 @@ def test_bad_form_names_the_field_and_applies_nothing(named: str, form: dict[str
     result = handle_submit(form, apply=apply)
 
     assert result.ok is False
-    assert any(error.startswith(named) for error in result.errors), result.errors
+    assert any(
+        error.startswith(named) or f"({named})" in error for error in result.errors
+    ), result.errors
     apply.assert_not_called()
 
 
@@ -1050,7 +1052,7 @@ def test_failed_post_redisplays_values_without_secrets(harness: Harness) -> None
 
     assert response.code == 400
     harness.apply.assert_not_called()
-    assert "node_id must be" in response.text
+    assert "(node_id) must be" in response.text
     assert controls["node_id"]["value"] == "BAD ID"
     assert controls["wifi_ssid"]["value"] == "Site <b>"
     assert Page(response.text).options() == ["Alpha", "Beta"]
@@ -1810,3 +1812,37 @@ def test_hostname_as_broker_address_is_rejected() -> None:
     assert not result.ok
     assert any("broker.host" in error and "IPv4" in error for error in result.errors)
     apply.assert_not_called()
+
+
+def test_the_broker_field_does_not_ask_for_a_decimal_keypad() -> None:
+    # Some phones show a comma and no dot on one, and an address could not be typed.
+    assert "inputmode" not in Page(render_form([])).controls()["broker_host"]
+
+
+def test_errors_use_the_forms_own_label() -> None:
+    result = handle_submit(valid_form(broker_host="broker.lan"), apply=Mock())
+
+    assert any(error.startswith("Broker address (broker.host)") for error in result.errors)
+
+
+def test_a_malformed_broker_with_a_blank_time_server_blames_only_the_broker() -> None:
+    result = handle_submit(valid_form(broker_host="not a host", ntp_server=""), apply=Mock())
+
+    assert len(result.errors) == 1
+    assert "Broker address" in result.errors[0]
+
+
+def test_the_saved_page_warns_who_can_reach_the_node_now() -> None:
+    page = Harness().post(valid_form(broker_host="10.0.0.2")).text
+
+    assert "only from 10.0.0.2" in page
+    assert "console" in page
+
+
+def test_a_wifi_repair_page_makes_no_such_claim() -> None:
+    harness = Harness(mode=PortalMode.WIFI_ONLY)
+
+    page = harness.post({"wifi_ssid": "Site-WiFi", "wifi_psk": WIFI_PSK}).text
+
+    assert "Settings saved" in page
+    assert "only from" not in page

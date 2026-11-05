@@ -2429,3 +2429,24 @@ def test_upside_down_checkbox_is_saved_and_shown_on_reprovision(node: Node) -> N
 
     assert node.state is S.AP_UP
     assert re.search(r'name="camera_upside_down"[^>]* checked', node.request().body)
+
+
+@pytest.mark.parametrize("state", [S.PROVISIONED, S.FALLBACK_AP])
+def test_a_daemon_restart_reloads_the_set_in_a_restored_state(node: Node, state: S) -> None:
+    """Not only on the way through JOINING: a crash can follow a save in any state."""
+    node.seed_config()
+    node.boot()
+    node.system.link_up()
+    node.tick(1)
+    if state is S.FALLBACK_AP:
+        node.system.link_down()
+    node.daemon.shutdown()
+    record = json.loads(node.paths.state_file.read_text())
+    record["state"] = state.value
+    node.paths.state_file.write_text(json.dumps(record))
+    before = node.system.count("reload_firewall")
+
+    node.boot()
+
+    assert node.state is state
+    assert node.system.count("reload_firewall") == before + 1

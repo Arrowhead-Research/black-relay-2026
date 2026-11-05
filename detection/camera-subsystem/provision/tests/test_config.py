@@ -731,9 +731,7 @@ def test_the_mapped_form_of_a_tailscale_address_stays_rejected() -> None:
 def test_the_central_hosts_file_names_the_broker() -> None:
     text = render_central_hosts("10.0.0.2")
 
-    assert "set central_hosts {" in text
-    assert "type ipv4_addr" in text
-    assert "elements = { 10.0.0.2 }" in text
+    assert "add element inet black_relay central_hosts { 10.0.0.2 }" in text
 
 
 # --- values camera-link's render would refuse --------------------------------------
@@ -783,3 +781,52 @@ def test_validate_saved_keeps_the_rules_of_older_configs_only() -> None:
 
     assert validate_saved(old) == []
     assert validate(old) != []
+
+
+@pytest.mark.parametrize(
+    ("host", "kind"),
+    [
+        ("0.0.0.0", "unspecified"),
+        ("0.1.2.3", "unspecified"),
+        ("127.0.0.1", "loopback"),
+        ("127.8.8.8", "loopback"),
+        ("169.254.1.1", "link-local"),
+        ("224.0.0.1", "multicast"),
+        ("239.255.255.255", "multicast"),
+        ("240.0.0.1", "reserved"),
+        ("255.255.255.255", "broadcast"),
+        ("10.42.0.5", "setup AP"),
+        ("10.42.0.1", "setup AP"),
+        ("10.77.0.10", "camera"),
+        ("10.77.0.1", "camera"),
+    ],
+)
+def test_a_broker_address_that_cannot_be_a_central_node_is_refused_by_name(
+    host: str, kind: str
+) -> None:
+    errors = validate(make_config(broker=broker(host=host)))
+
+    assert len(errors) == 1
+    assert errors[0].startswith("broker.host")
+    assert kind in errors[0]
+
+
+@pytest.mark.parametrize(
+    "host", ["10.42.1.5", "10.77.1.10", "10.41.255.255", "192.168.8.21", "172.16.0.2", "8.8.8.8"]
+)
+def test_addresses_next_to_the_refused_ones_are_fine(host: str) -> None:
+    assert validate(make_config(broker=broker(host=host))) == []
+
+
+def test_a_blank_time_server_does_not_report_the_brokers_fault() -> None:
+    bad = "not a host"
+    errors = validate(make_config(broker=broker(host=bad), ntp_server=bad))
+
+    assert not any(error.startswith("ntp_server") for error in errors)
+    assert any(error.startswith("broker.host") for error in errors)
+
+
+def test_a_bad_time_server_of_its_own_is_still_reported() -> None:
+    errors = validate(make_config(ntp_server="bad_name"))
+
+    assert any(error.startswith("ntp_server") for error in errors)

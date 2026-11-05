@@ -180,8 +180,9 @@ class NodeStore:
         state_dir = self._paths.state_dir
         try:
             # Its staged and backup copies hold the same secret.
-            for stale in state_dir.glob(f".{_LEGACY_KEY_NAME}.*.tmp"):
-                stale.unlink(missing_ok=True)
+            for pattern in (f".{_LEGACY_KEY_NAME}.*.tmp", f"..{_LEGACY_KEY_NAME}.*.tmp"):
+                for stale in state_dir.glob(pattern):
+                    stale.unlink(missing_ok=True)
             if (state_dir / _LEGACY_KEY_NAME).exists():
                 (state_dir / _LEGACY_KEY_NAME).unlink(missing_ok=True)
                 _fsync_dir(state_dir)
@@ -290,29 +291,27 @@ class NodeStore:
     def _text(text: str) -> Callable[[Path], None]:
         return lambda staged: _write_private_atomic(staged, text)
 
-    def _transact(self, plan: Sequence[tuple[Path, Callable[[Path], None] | None]]) -> None:
-        """Apply ``plan``: (target, how to stage its new content, or None to delete it)."""
+    def _transact(self, plan: Sequence[tuple[Path, Callable[[Path], None]]]) -> None:
+        """Apply ``plan``: (target, how to stage its new content)."""
         for target, _ in plan:
             target.parent.mkdir(parents=True, exist_ok=True)
         try:
             for target, stage in plan:
-                if stage is not None:
-                    stage(_staged(target))
-            self._commit(plan)
+                stage(_staged(target))
+            self._commit([target for target, _ in plan])
         except Exception:
             for target, _ in plan:
                 _staged(target).unlink(missing_ok=True)
             raise
 
-    def _commit(self, plan: Sequence[tuple[Path, Callable[[Path], None] | None]]) -> None:
-        targets = [target for target, _ in plan]
+    def _commit(self, targets: Sequence[Path]) -> None:
         for target in targets:
             _backup(target).unlink(missing_ok=True)
             if target.exists():
                 os.link(target, _backup(target))
         for directory in {target.parent for target in targets}:
             _fsync_dir(directory)
-        entries = [{"target": str(t), "write": stage is not None} for t, stage in plan]
+        entries = [{"target": str(target)} for target in targets]
         _write_private_atomic(self._paths.journal, json.dumps(entries))  # the commit point
         try:
             self._roll_forward(entries)
@@ -332,9 +331,7 @@ class NodeStore:
     def _roll_forward(entries: list[dict[str, Any]]) -> None:
         for entry in entries:
             target = Path(entry["target"])
-            if not entry["write"]:
-                target.unlink(missing_ok=True)
-            elif _staged(target).exists():
+            if _staged(target).exists():
                 os.replace(_staged(target), target)
 
     def _drop_journal(self) -> None:
@@ -372,7 +369,6 @@ class NodeStore:
                 isinstance(entry, dict)
                 and isinstance(entry.get("target"), str)
                 and entry.get("target") in known
-                and isinstance(entry.get("write"), bool)
                 for entry in entries
             )
         )

@@ -9,8 +9,9 @@
 # Interfaces are matched by name, because wlan0 may not exist at load time.
 #
 # Only the central node reaches this node's services: its address is the one element of
-# central_hosts, in a file the portal replaces on each save. That file is empty in the image,
-# so a blank node admits nobody over the network. The setup AP and a console stay as they are.
+# central_hosts. The set is declared here and its element comes from a file the portal replaces
+# on each save, through a glob, so a missing or empty file means the firewall with nobody admitted.
+# A damaged file fails the whole load: see README, "If nftables fails at boot".
 
 define WIFI_IF = "wlan0"
 define CAMERA_IF = "eth0"
@@ -26,7 +27,9 @@ table inet black_relay
 delete table inet black_relay
 
 table inet black_relay {
-    include "/etc/black-relay/central-hosts.nft"
+    set central_hosts {
+        type ipv4_addr
+    }
 
     chain input {
         type filter hook input priority filter; policy drop;
@@ -86,3 +89,5 @@ table inet black_relay {
         oifname $CAMERA_IF counter drop
     }
 }
+
+include "/etc/black-relay/central-hosts*.nft"

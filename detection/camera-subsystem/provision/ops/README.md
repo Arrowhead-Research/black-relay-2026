@@ -16,7 +16,8 @@ Builds the SD image for a camera edge node and defines how to check it in the fi
 | `seed-kit.sh` | `/opt/black-relay/ops/` | Renders the profile, prints the kit label |
 | `black-relay-captive.conf` | `/etc/NetworkManager/dnsmasq-shared.d/` | Captive DNS |
 | `black-relay.nft` | `/etc/nftables.conf` | Firewall |
-| `central-hosts.nft` | `/etc/black-relay/central-hosts.nft` | The set of addresses admitted to SSH, Frigate and RTSP. Empty in the image, and replaced by each portal save |
+| `central-hosts.nft` | `/etc/black-relay/central-hosts.nft` | The element of the `central_hosts` set, the address admitted to SSH, Frigate and RTSP. None in the image, and replaced by each portal save |
+| `ssh-needs-firewall.conf` | `/etc/systemd/system/ssh.service.d/black-relay.conf` | Stops sshd starting with no firewall table |
 | `camera-provision.service` | `/etc/systemd/system/` | Provisioning daemon, the only watchdog |
 | `camerabridge.service` | `/etc/systemd/system/` | Sample bridge unit |
 | `camerabridge-config.path`, `camerabridge-config-changed.service` | `/etc/systemd/system/` | Start or restart the bridge when `bridge.yaml` changes |
@@ -83,14 +84,17 @@ roles, told apart by address: anything from `10.42.0.0/24` or to `10.42.0.1` is 
 - **Camera link:** the camera is statically addressed (DESIGN 11), so `eth0` needs no DHCP. The node
   opens RTSP to the camera, so the reply is accepted. RTSP must use TCP: UDP RTP from the camera
   starts a new flow and is dropped.
-- **Only the central node reaches the node (owner decision, DESIGN 4.2).** `central_hosts` holds one
-  address, the broker's, from `/etc/black-relay/central-hosts.nft`. The portal saves that file together
+- **Only the central node reaches the node (owner decision, DESIGN 4.2).** `central_hosts` is declared in
+  `black-relay.nft` and holds one address, the broker's, added by `/etc/black-relay/central-hosts.nft`
+  through a glob. A missing or empty file therefore means the firewall with nobody admitted. The portal saves that file together
   with the rest of the config, so the set follows the broker address and the two cannot disagree. The
   daemon then reloads the firewall. A failed reload is logged as `reloading the firewall failed`
   and retried every 30 s, the join is never held up, and until it works the old set stays in force.
 - **The broker address must be an IPv4 literal.** The set can hold nothing else, so the portal refuses a
   hostname and an IPv6 address. It also refuses `100.64.0.0/10`, because fusion must not depend on
-  Tailscale (DESIGN 7.2). A config saved before this rule still loads and runs, and only a new save must
+  Tailscale (DESIGN 7.2), and addresses that can never be a central node, by name: unspecified, loopback,
+  link-local, multicast, reserved, broadcast, the setup AP's `10.42.0.0/24` and the camera link's
+  `10.77.0.0/24`. A config saved before this rule still loads and runs, and only a new save must
   meet it.
 - **Frigate:** port 8971 has Frigate's login off, and a proxy secret shared with the central node protects
   it (DESIGN 5.6). No rule here opens any other Frigate port, so they are reachable only from the node
@@ -101,10 +105,25 @@ roles, told apart by address: anything from `10.42.0.0/24` or to `10.42.0.1` is 
   that NetworkManager owns. **Do not run `systemctl stop nftables` or
   `systemctl restart nftables`:** the Debian unit's `ExecStop` runs `nft flush ruleset`, which removes
   every table, including that one, and restart runs it too.
-- **If nftables fails at boot:** with host networking, Frigate's ports are then open on every
-  interface, including port 5000 on `eth0` and to AP clients, and nothing signals it. The daemon
-  refuses to start, so no AP opens, but that does not protect Frigate. Plan 3's `Requires=nftables.service`
-  on the Frigate unit covers this: Frigate does not start without the firewall.
+- **If nftables fails at boot:** this takes a damaged `central-hosts.nft`, not a missing one, because nft
+  loads all or nothing. The node then has no firewall table, and the guards hold: sshd
+  (`ssh-needs-firewall.conf`), Frigate (`Requires=nftables.service` and its table check) and the
+  provisioning daemon all refuse to start, so no port answers and no AP opens. Detection stops, and the
+  bridge's heartbeat, which has no such guard, reports it false. Recover from a console, then re-provision
+  to save the broker address again:
+
+  ```bash
+  systemctl status nftables --no-pager
+  sudo install -m 0644 /opt/black-relay/ops/central-hosts.nft /etc/black-relay/central-hosts.nft
+  sudo systemctl start nftables ssh
+  sudo systemctl restart camera-provision
+  ```
+
+  A damaged file met by a reload rather than a boot leaves the old rules in force.
+- **Sessions already open survive a change of central host.** The rule accepting established connections
+  comes first, and a reload does not flush conntrack, so an SSH or RTSP session from the old address carries
+  on until it ends. C45 shows this. There is no flush on purpose: nothing about the old host's session is
+  unsafe enough to justify dropping the new one's too.
 
 ### SSH policy
 
@@ -176,6 +195,8 @@ central outage, if the server is the default. Until `timedatectl show -p NTPSync
 3. Docker runs with no bridge of its own, in `/etc/docker/daemon.json`:
    `{"bridge": "none", "iptables": false, "ip6tables": false}`. This is not required for
    isolation, since a drop in this rule set is final, but it keeps Docker's rules out of the way.
+   It also rotates container logs at 3 files of 10 MB, so that `camera-link`'s first read of Frigate's
+   log after a restart finishes inside its 20 s timeout. `cameralink/ops/daemon.json` is the file.
 4. `eth0` has a static NetworkManager profile with `ipv4.method=manual`, `ipv4.never-default=yes`,
    `ipv6.method=disabled`, never `shared`. Delete the automatic `Wired connection 1` profile.
 5. go2rtc reads `MEDIAMTX_ADDRESS` from `EnvironmentFile=/etc/camerabridge/mediamtx.env`, never
@@ -252,7 +273,7 @@ unless marked. `<CC>`, `<build-pi>`, and `<sdX>` are placeholders.
    ```bash
    cd /opt/black-relay/src/provision/ops
    sudo install -d /opt/black-relay/ops /etc/NetworkManager/dnsmasq-shared.d \
-     /etc/systemd/system/mosquitto.service.d /etc/black-relay
+     /etc/systemd/system/mosquitto.service.d /etc/systemd/system/ssh.service.d /etc/black-relay
    sudo install -m 0644 README.md black-relay-setup-ap.nmconnection.tmpl central-hosts.nft \
      /opt/black-relay/ops/
    sudo install -m 0755 seed-kit.sh /opt/black-relay/ops/
@@ -261,8 +282,8 @@ unless marked. `<CC>`, `<build-pi>`, and `<sdX>` are placeholders.
    sudo install -m 0644 mosquitto-service-override.conf \
      /etc/systemd/system/mosquitto.service.d/black-relay.conf
    sudo install -m 0644 black-relay.nft /etc/nftables.conf
-   # The firewall will not load without this file, so it is in the image from the start.
    sudo install -m 0644 central-hosts.nft /etc/black-relay/central-hosts.nft
+   sudo install -m 0644 ssh-needs-firewall.conf /etc/systemd/system/ssh.service.d/black-relay.conf
    sudo install -m 0644 camera-provision.service camerabridge.service camerabridge-config.path \
      camerabridge-config-changed.service /etc/systemd/system/
    sudo nft -c -f /etc/nftables.conf
@@ -450,6 +471,8 @@ mosquitto_sub -h <central> -u <typed-user> -P <typed-password> -t detection/came
 | Time server from the portal, and a move to another broker | C44 |
 | Only the central node reaches SSH, Frigate and RTSP, and the set follows a re-provision | C24, C45 |
 | The heartbeat does not claim a detector it cannot show working | C34, C46 |
+| The heartbeat does not claim recording it cannot show happening | C47 |
+| Tailscale is gone from a node re-provisioned from the old image | C48 |
 
 ### Static checks and adapters
 
@@ -1133,8 +1156,8 @@ mosquitto_sub -h 127.0.0.1 -t 'frigate/stats' -C 1 | python3 -c "import json,sys
 mosquitto_sub -h <central> -u <user> -P <password> -t 'detection/camera/status/nodes' -C 1
 ```
 
-Expect: each detector with a non-empty `pid` and an `inference_speed` above 0 and not `10.0`, and
-`detector_ok=true`. If the speed reads 0 when idle, `detector_ok` is falsely false, and the bridge needs
+Expect: each detector with a non-empty `pid`, an `inference_speed` above 0, under 100 and not `10.0`, a
+`detection_start` of 0 or under 10 s old, and `detector_ok=true`. If the speed reads 0 when idle, `detector_ok` is falsely false, and the bridge needs
 a change. Record the Frigate version, because the bridge reads `inference_speed`, `detection_enabled`,
 `processes.recording.pid`, `service.uptime` and `service.last_updated` as v0.18.2 sends them.
 
@@ -1291,6 +1314,8 @@ journalctl -b -u camera-provision --no-pager -g 'firewall'
 2. Make the reload fail, with `sudo mv /etc/nftables.conf /etc/nftables.conf.saved`, then submit another
    change. Expect `reloading the firewall failed` every 30 s, the node still joining and reaching
    `provisioned`, and the old set still live. Restore the file: the next retry loads the new set.
+   Also confirm what a change leaves open: an SSH session opened from the old address before the
+   save carries on, because a reload does not flush conntrack, and a new one from that address times out.
 3. The camera-link daemon's unit reaches docker: `journalctl -b -u camera-link --no-pager` shows no
    failure, and C46 below passes.
 
@@ -1305,7 +1330,62 @@ cat /run/camera-link/state.json
 2. After a fresh Frigate start with nothing moving in view: expect `detector_ok=false` until the first
    person or motion, then `true`, and still `true` with nothing moving afterwards.
 3. Make the Hailo detector fail, for instance by removing `force_desc_page_size=4096` and rebooting.
-   Within about 30 s of `[HailoRT] [error]` in `docker logs frigate`, expect `detector_error: true` in
-   the state file and `detector_ok=false`. Restart Frigate with the fault cleared: the error clears.
-4. Stop `camera-link` for over 5 minutes. Expect the `camera_link_state` attribute to drop from the
-   heartbeat. `node_address` stays, and is `wlan0`'s address.
+   Save the real `docker logs frigate` lines: the tests' fixtures are built from Frigate's source, and
+   these should replace them. Within about 30 s of a line, expect `detector_error: true` in the state
+   file, a `reason`, and `detector_ok=false`.
+4. **Recovery is automatic.** `camera-link` restarts Frigate once the error has lasted 120 s, at most once
+   per 10 minutes, even across its own restarts. Only the new container clears the error. With the fault
+   still there, expect a restart about every 10 minutes and `detector_ok=false` throughout, and with it
+   cleared, the error gone after the next restart. To retry sooner, an operator can run
+   `sudo systemctl restart frigate`. Record any line that sets the error on a clean start or stop:
+   each costs a restart.
+5. Stop `camera-link`, or make docker unreachable to it. Expect `detector_ok=false` at once when the state
+   file goes, or within 90 s of the last good read if the daemon is alive but blind, with `log_read_at`
+   standing still in the state file. After 5 minutes of a frozen file, the `camera_link_state` attribute
+   drops from the heartbeat. `node_address` stays, and is `wlan0`'s address.
+
+**C47. `recording_ok` follows real segments. NOT YET RUN.**
+
+```bash
+sudo ls -la --time-style=full-iso /run/frigate-cache | tail -5
+findmnt /run/frigate-cache
+python3 -c "import json; print(json.load(open('/run/camera-link/state.json'))['record_writing'])"
+mosquitto_sub -h <central> -u <user> -P <password> -t 'detection/camera/status/nodes' -C 1
+```
+
+Expect: a `tmpfs` of 256 MB, mode 0700, a `<cam>@<time>.mp4` whose time keeps moving, even with nothing
+moving in view and motion-only retention, and `record_writing` and `recording_ok` true. Record how far
+behind the clock the in-use segment's time ever falls: the limit is 60 s. Then:
+
+1. **Dead main stream:** block the record stream only, for instance by giving the camera input a wrong
+   path for `h264Preview_01_main` on the bench. Within 60 s expect `record_writing=false` and
+   `recording_ok=false`, with `camera_online=true`, because detection's sub stream carries on.
+2. **Full disk:** fill the media disk to under 5% free with a scratch file, and remove it afterwards.
+   Expect the same two false, and both true again once it is gone.
+3. `camera-link` must also see the mount from inside its sandbox. If `record_writing` stays false with
+   segments visible on the host, its unit is the place to look.
+
+**C48. Tailscale removed from a node on the old image. NOT YET RUN.** Kit 1 is re-provisioned, not
+re-imaged, so the firewall change leaves the package, daemon and login behind. From a console, after
+the portal save:
+
+```bash
+sudo tailscale logout
+sudo systemctl disable --now tailscaled.service
+sudo apt-get purge -y tailscale
+sudo rm -rf /var/lib/tailscale /etc/apt/sources.list.d/tailscale.list \
+  /usr/share/keyrings/tailscale-archive-keyring.gpg
+```
+
+Then check:
+
+```bash
+dpkg -s tailscale 2>&1 | head -1
+systemctl status tailscaled.service --no-pager 2>&1 | head -1
+ip link show tailscale0 2>&1 | head -1
+sudo ls -la /var/lib/tailscale /var/lib/camera-provision/tailscale.key 2>&1
+python3 -c "import json; print(sorted(json.load(open('/var/lib/camera-provision/node.json'))))"
+```
+
+Expect: the package not installed, the unit not found, no `tailscale0`, both paths missing, and no
+`vpn_requested` in `node.json`. Also remove the node from the tailnet's admin console.

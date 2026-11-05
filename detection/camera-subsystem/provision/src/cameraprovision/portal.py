@@ -86,6 +86,18 @@ _FULL_ONLY_REDISPLAYED_FIELDS = (
     "covered_zones",
 )
 
+_FORM_LABELS = {
+    "broker.host": "Broker address",
+    "broker.port": "Broker port",
+    "broker.username": "Broker username",
+    "broker.password": "Broker password",
+    "covered_zones": "Covered zones",
+    "frigate.base_url": "Frigate address",
+    "mediamtx_address": "MediaMTX address",
+    "node_id": "Node ID",
+    "ntp_server": "Time server",
+}
+
 _APPLY_FAILED_ERROR = "The settings could not be saved. Check them and try again."
 _REENTER_NOTE = "Passwords are never shown back, so enter them again."
 
@@ -155,6 +167,7 @@ _SAVED_PAGE = Template("""<!doctype html>
 <p>If the setup network comes back after a few minutes, the node could not join.
 Reconnect to it and check the WiFi name and password.</p>
 $time_server
+$central_only
 </body>
 </html>
 """)
@@ -169,10 +182,16 @@ def _escape(value: str) -> str:
     return html.escape(value, quote=True)
 
 
-def _saved_page(ntp_server: str) -> str:
-    """The page for a saved form. A WiFi repair leaves the time server alone, so has none."""
-    line = f"<p>Time server: {_escape(ntp_server)}</p>" if ntp_server else ""
-    return _SAVED_PAGE.substitute(time_server=line)
+def _saved_page(ntp_server: str, broker_host: str) -> str:
+    """The page for a saved form. A WiFi repair changes neither of these, so shows neither."""
+    time_server = f"<p>Time server: {_escape(ntp_server)}</p>" if ntp_server else ""
+    central_only = (
+        f"<p>SSH, Frigate and live view now accept connections only from {_escape(broker_host)}. "
+        "If that address is wrong, use the setup button or a console to change it.</p>"
+        if broker_host
+        else ""
+    )
+    return _SAVED_PAGE.substitute(time_server=time_server, central_only=central_only)
 
 
 def _errors_html(errors: Sequence[str]) -> str:
@@ -228,6 +247,8 @@ class SubmitResult:
     errors: list[str] = field(default_factory=list)
     # The time server a full save will use, for the page to confirm.
     ntp_server: str = field(default="", compare=False)
+    # The one address a full save admits to the node's services, for the page to warn about.
+    broker_host: str = field(default="", compare=False)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -299,6 +320,14 @@ def _apply_safely(apply: Callable[[Any], None], change: NodeConfig | WifiChange)
     return SubmitResult(ok=True)
 
 
+def _with_form_label(error: str) -> str:
+    """Put the name the operator sees on the form ahead of the config's name for a field."""
+    for name, label in _FORM_LABELS.items():
+        if error.startswith(name):
+            return f"{label} ({name}){error[len(name):]}"
+    return error
+
+
 def handle_submit(
     form: Mapping[str, str],
     *,
@@ -312,9 +341,11 @@ def handle_submit(
     cfg = _build_config(form, previous_broker)
     errors = validate(cfg)
     if errors:
-        return SubmitResult(ok=False, errors=errors)
+        return SubmitResult(ok=False, errors=[_with_form_label(error) for error in errors])
     result = _apply_safely(apply, cfg)
-    return replace(result, ntp_server=effective_ntp_server(cfg)) if result.ok else result
+    if not result.ok:
+        return result
+    return replace(result, ntp_server=effective_ntp_server(cfg), broker_host=cfg.broker.host)
 
 
 def handle_wifi_submit(
@@ -499,7 +530,7 @@ def make_app(
         with submit_lock:
             result = submit(form)
         if result.ok:
-            return _html_response("200 OK", _saved_page(result.ntp_server))
+            return _html_response("200 OK", _saved_page(result.ntp_server, result.broker_host))
         page = render_form(_scan(scan_ssids), values=form, errors=result.errors, mode=mode)
         return _html_response("400 Bad Request", page)
 

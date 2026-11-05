@@ -56,6 +56,21 @@ _PORT_DIGITS_RE = re.compile(r"[0-9]{1,5}")
 # Where Tailscale numbers its nodes. Fusion traffic must stay on the site LAN (DESIGN 7.3).
 _TAILSCALE_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 _BROKER_HOST_RULE = "broker.host must be a plain hostname or IP address"
+# Addresses that save fine and can never be a central node, and each one's name. Loopback is the
+# worst: the bridge would reach this node's own broker, and report the central link as up.
+_NOT_A_CENTRAL_NODE = tuple(
+    (ipaddress.ip_network(network), name)
+    for network, name in (
+        ("255.255.255.255/32", "the broadcast address"),
+        ("0.0.0.0/8", "unspecified"),
+        ("127.0.0.0/8", "loopback, which is this node itself"),
+        ("169.254.0.0/16", "link-local"),
+        ("224.0.0.0/4", "multicast"),
+        ("240.0.0.0/4", "reserved"),
+        ("10.42.0.0/24", "in the setup AP's subnet"),
+        ("10.77.0.0/24", "in the camera link's subnet"),
+    )
+)
 
 # Copies of the rules in cameralink.frigate_config, which this package cannot import at run
 # time. A value they refuse makes camera-link's render raise, and that stops Frigate, so the
@@ -162,6 +177,15 @@ def _is_ipv4_literal(value: Any) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _central_address_problems(host: Any) -> list[str]:
+    """Why an IPv4 ``host`` cannot be a central node, naming the kind of address it is."""
+    address = ipaddress.IPv4Address(host)
+    for network, name in _NOT_A_CENTRAL_NODE:
+        if address in network:
+            return [f"broker.host must be the central node's site LAN address, and this is {name}"]
+    return []
 
 
 def _is_tailscale_address(value: Any) -> bool:
@@ -291,6 +315,8 @@ def validate(cfg: NodeConfig) -> list[str]:
             "broker.host must be an IPv4 address and not a name: "
             "the node's firewall admits only this address for SSH and Frigate"
         )
+    else:
+        problems += _central_address_problems(broker.host)
     problems += frigate_problems(cfg.node_id, cfg.covered_zones, broker.username, broker.password)
     return problems
 
@@ -311,7 +337,8 @@ def validate_saved(cfg: NodeConfig) -> list[str]:
         ),
         (_is_port(broker.port), "broker.port must be a whole number from 1 to 65535"),
         (
-            cfg.ntp_server == "" or _is_host(cfg.ntp_server),
+            # Following the broker: a bad address is reported once, against the broker.
+            cfg.ntp_server in ("", broker.host) or _is_host(cfg.ntp_server),
             "ntp_server must be a plain hostname or IP address, or blank to use the broker",
         ),
         *_credential_checks(cfg),
@@ -352,16 +379,13 @@ def effective_ntp_server(cfg: NodeConfig) -> str:
 
 
 def render_central_hosts(broker_host: str) -> str:
-    """The nftables file behind ``ip saddr @central_hosts``, admitting the central node.
+    """The nftables file adding the central node to ``central_hosts``, which the rules declare.
 
-    Included inside the ``black_relay`` table, and only ever given a validated address.
+    Only ever given a validated address.
     """
     return (
         "# Written by camera-provision on each save. Included by /etc/nftables.conf.\n"
-        "set central_hosts {\n"
-        "    type ipv4_addr\n"
-        f"    elements = {{ {broker_host} }}\n"
-        "}\n"
+        f"add element inet black_relay central_hosts {{ {broker_host} }}\n"
     )
 
 
