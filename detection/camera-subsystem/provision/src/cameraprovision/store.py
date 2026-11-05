@@ -8,7 +8,8 @@ What lives where:
 * the NetworkManager keyfile (0600): the WiFi PSK, and the only copy of it.
 * ``node.json`` (0600): provisioning-only fields the bridge YAML does not hold. A WiFi
   repair needs the hostname from here.
-* ``tailscale.key`` (0600): exists only while a login is owed.
+* ``central-hosts.nft`` (0644, root): the firewall set admitting the central node to SSH,
+  Frigate and RTSP. It follows the broker address, so the two cannot disagree.
 * the timesyncd drop-in (0644, root): the time server, read by ``systemd-timesyncd``.
 
 A save stages every file beside its target, then commits. A failure before the commit
@@ -35,7 +36,9 @@ from cameraprovision.config import (
     OutboxConfig,
     _write_private_atomic,
     effective_ntp_server,
+    render_central_hosts,
     validate,
+    validate_saved,
     validate_wifi,
     write_bridge_config,
 )
@@ -52,6 +55,9 @@ logger = logging.getLogger(__name__)
 # Stands in for the PSK when validating, because the PSK stays in the keyfile.
 _PSK_PLACEHOLDER = "held-by-networkmanager"
 _LOAD_ERRORS = (OSError, ValueError, KeyError, TypeError, AttributeError, yaml.YAMLError)
+# Left by the node Tailscale login of older images. Nothing reads them.
+_LEGACY_KEY_NAME = "tailscale.key"
+_LEGACY_NODE_KEYS = ("vpn_requested",)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -61,6 +67,7 @@ class Paths:
     nm_connections_dir: Path = Path("/etc/NetworkManager/system-connections")
     state_dir: Path = Path("/var/lib/camera-provision")
     ntp_dropin: Path = Path("/etc/systemd/timesyncd.conf.d/black-relay.conf")
+    central_hosts: Path = Path("/etc/black-relay/central-hosts.nft")
 
     @property
     def nm_keyfile(self) -> Path:
@@ -69,10 +76,6 @@ class Paths:
     @property
     def node_file(self) -> Path:
         return self.state_dir / "node.json"
-
-    @property
-    def tailscale_key(self) -> Path:
-        return self.state_dir / "tailscale.key"
 
     @property
     def state_file(self) -> Path:
@@ -87,7 +90,7 @@ class Paths:
         return (
             self.bridge_config,
             self.mediamtx_env,
-            self.tailscale_key,
+            self.central_hosts,
             self.ntp_dropin,
             self.nm_keyfile,
             self.node_file,
@@ -157,30 +160,34 @@ class NodeStore:
         """
         return self._paths.nm_keyfile.exists() and self.hostname() is not None
 
-    def pending_login_hostname(self) -> str | None:
-        """Return the hostname to log in to Tailscale with, if a login is owed."""
-        try:
-            node = self._node()
-        except _LOAD_ERRORS:
-            return None
-        if node.get("vpn_requested") and self._paths.tailscale_key.exists():
-            return node["hostname"]
-        return None
-
     def load(self) -> NodeConfig | None:
         """Return the full saved config, or ``None`` if it is missing, incomplete or invalid.
 
-        ``wifi_psk`` is always empty, since only the keyfile holds it.
-        ``vpn_requested`` means a Tailscale login is still owed: it is false once the key
-        is gone, so a node that has logged in still has a valid config.
+        ``wifi_psk`` is always empty, since only the keyfile holds it. A file from an older
+        image may hold keys nobody reads any more, and they are ignored. Its Tailscale key
+        is deleted here, and that goes first because no config has to be usable for it.
         """
+        self._delete_legacy_key()
         try:
             cfg = self._read()
         except _LOAD_ERRORS as exc:
             # The type only: YAML errors quote the text they could not parse.
             logger.debug("no usable saved config: %s", type(exc).__name__)
             return None
-        return cfg if not validate(replace(cfg, wifi_psk=_PSK_PLACEHOLDER)) else None
+        return cfg if not validate_saved(replace(cfg, wifi_psk=_PSK_PLACEHOLDER)) else None
+
+    def _delete_legacy_key(self) -> None:
+        state_dir = self._paths.state_dir
+        try:
+            # Its staged and backup copies hold the same secret.
+            for stale in state_dir.glob(f".{_LEGACY_KEY_NAME}.*.tmp"):
+                stale.unlink(missing_ok=True)
+            if (state_dir / _LEGACY_KEY_NAME).exists():
+                (state_dir / _LEGACY_KEY_NAME).unlink(missing_ok=True)
+                _fsync_dir(state_dir)
+                logger.info("deleted a Tailscale key left by an older image")
+        except OSError as exc:
+            logger.error("deleting an old Tailscale key failed: %s", type(exc).__name__)
 
     def _read(self) -> NodeConfig:
         paths = self._paths
@@ -188,11 +195,6 @@ class NodeStore:
             raise FileNotFoundError("no WiFi profile")
         bridge = yaml.safe_load(paths.bridge_config.read_text(encoding="utf-8"))
         node = json.loads(paths.node_file.read_text(encoding="utf-8"))
-        key = (
-            paths.tailscale_key.read_text(encoding="utf-8")
-            if node["vpn_requested"] and paths.tailscale_key.exists()
-            else ""
-        )
         return NodeConfig(
             node_id=bridge["node_id"],
             broker=BrokerConfig(**bridge["broker"]),
@@ -205,8 +207,7 @@ class NodeStore:
             hostname=node["hostname"],
             wifi_ssid=node["wifi_ssid"],
             wifi_psk="",
-            tailscale_auth_key=key,
-            vpn_requested=bool(key),
+            camera_upside_down=node.get("camera_upside_down") is True,
             broker_anonymous=node["broker_anonymous"],
             ntp_server=node.get("ntp_server", ""),
         )
@@ -223,7 +224,7 @@ class NodeStore:
         node = {
             "hostname": cfg.hostname,
             "wifi_ssid": cfg.wifi_ssid,
-            "vpn_requested": cfg.vpn_requested,
+            "camera_upside_down": cfg.camera_upside_down,
             "broker_anonymous": cfg.broker_anonymous,
             "ntp_server": ntp_server,
         }
@@ -240,12 +241,15 @@ class NodeStore:
             _write_private_atomic(staged, f"[Time]\nNTP={ntp_server}\n")
             staged.chmod(0o644)
 
-        key = cfg.tailscale_auth_key if cfg.vpn_requested else None
+        def stage_central_hosts(staged: Path) -> None:
+            _write_private_atomic(staged, render_central_hosts(cfg.broker.host))
+            staged.chmod(0o644)
+
         self._transact(
             [
                 (paths.bridge_config, stage_bridge),
                 (paths.mediamtx_env, stage_mediamtx),
-                (paths.tailscale_key, None if key is None else self._text(key)),
+                (paths.central_hosts, stage_central_hosts),
                 (paths.ntp_dropin, stage_ntp),
                 (
                     paths.nm_keyfile,
@@ -259,8 +263,8 @@ class NodeStore:
         """Repair the WiFi alone: re-render the keyfile from these and the saved hostname.
 
         Reads ``node.json`` directly and never builds a ``NodeConfig``, so a repair works
-        with the bridge config missing or invalid. That file, the time server and any
-        pending Tailscale key are not touched.
+        with the bridge config missing or invalid. That file, the time server and the
+        firewall set are not touched.
         """
         errors = validate_wifi(ssid, psk)
         if errors:
@@ -270,16 +274,14 @@ class NodeStore:
         except _LOAD_ERRORS:
             raise ValueError("there is no saved hostname to repair with") from None
         node["wifi_ssid"] = ssid
+        for legacy in _LEGACY_NODE_KEYS:
+            node.pop(legacy, None)
         self._transact(
             [
                 (self._paths.nm_keyfile, self._text(self._keyfile(ssid, psk, node["hostname"]))),
                 (self._paths.node_file, self._text(json.dumps(node))),
             ]
         )
-
-    def delete_tailscale_key(self) -> None:
-        self._paths.tailscale_key.unlink(missing_ok=True)
-        _fsync_dir(self._paths.tailscale_key.parent)
 
     def _keyfile(self, ssid: str, psk: str, hostname: str) -> str:
         return render_nm_keyfile(nm_wifi_profile(ssid, psk, hostname, interface=self._interface))

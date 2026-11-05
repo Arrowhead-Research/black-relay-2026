@@ -15,7 +15,6 @@ from typing import Any
 import pytest
 
 from cameraprovision.daemon import Provisioner, Settings
-from cameraprovision.netprofile import tailscale_up_args
 from cameraprovision.state import ProvisionState as S
 from cameraprovision.store import Paths
 from cameraprovision.system import RealSystem, SystemCommandError, parse_ssids
@@ -72,11 +71,11 @@ def every_adapter(system: RealSystem, tmp_path: Path) -> None:
     system.join_uplink()
     system.wifi_associated()
     system.ipv4_lease()
-    system.tailscale_up(tmp_path / "key", "edge-7")
     system.gpio_reprovision_held()
     system.ap_active()
     system.set_hostname("edge-7")
     system.restart_timesync()
+    system.reload_firewall()
 
 
 def test_every_adapter_uses_an_argv_list_with_a_timeout_and_no_shell(
@@ -95,36 +94,23 @@ def test_every_adapter_uses_an_argv_list_with_a_timeout_and_no_shell(
         assert kwargs["env"]["LC_ALL"] == "C"
 
 
-def test_the_tailscale_key_is_passed_by_file_only(
-    run: FakeRun, system: RealSystem, tmp_path: Path
-) -> None:
-    key_file = tmp_path / "tailscale.key"
-    key_file.write_text("tskey-auth-s3cret")
-
-    system.tailscale_up(key_file, "edge-7")
-
-    assert run.calls[0][0] == tailscale_up_args(key_file, "edge-7")
-    assert "--force-reauth" not in run.calls[0][0]
-    assert "tskey-auth-s3cret" not in " ".join(run.calls[0][0])
-
-
 @pytest.mark.parametrize(
     "error",
     [
-        subprocess.CalledProcessError(1, ["tailscale"], stderr="tskey-auth-s3cret rejected"),
-        subprocess.TimeoutExpired(["tailscale", "tskey-auth-s3cret"], 1),
-        FileNotFoundError("tailscale tskey-auth-s3cret"),
+        subprocess.CalledProcessError(1, ["nmcli"], stderr="s3cret-output rejected"),
+        subprocess.TimeoutExpired(["nmcli", "s3cret-output"], 1),
+        FileNotFoundError("nmcli s3cret-output"),
     ],
 )
 def test_failures_become_system_errors_with_no_output_or_argv(
     run: FakeRun, system: RealSystem, tmp_path: Path, error: Exception
 ) -> None:
-    run.results["tailscale"] = error
+    run.results["nmcli"] = error
 
     with pytest.raises(SystemCommandError) as raised:
-        system.tailscale_up(tmp_path / "key", "edge-7")
+        system.join_uplink()
 
-    assert "tskey" not in str(raised.value)
+    assert "s3cret-output" not in str(raised.value)
     assert raised.value.__cause__ is None
     assert raised.value.__context__ is None
 
@@ -468,6 +454,7 @@ def test_real_system_drives_the_daemon_through_recorded_output(
         nm_connections_dir=tmp_path / "etc/NetworkManager/system-connections",
         state_dir=tmp_path / "var/lib/camera-provision",
         ntp_dropin=tmp_path / "etc/systemd/timesyncd.conf.d/black-relay.conf",
+        central_hosts=tmp_path / "black-relay" / "central-hosts.nft",
     )
     now = [1000.0]
     daemon = Provisioner(
@@ -480,7 +467,7 @@ def test_real_system_drives_the_daemon_through_recorded_output(
     paths.nm_connections_dir.mkdir(parents=True)
     paths.nm_keyfile.write_text("[connection]\n")
     paths.state_dir.mkdir(parents=True)
-    paths.node_file.write_text('{"hostname": "edge-7", "vpn_requested": false}')
+    paths.node_file.write_text('{"hostname": "edge-7"}')
 
     def tick(seconds: float) -> None:
         now[0] += seconds
@@ -541,3 +528,28 @@ def test_the_unit_lets_the_daemon_write_the_ntp_dropin_with_a_readable_directory
     assert "systemd/timesyncd.conf.d" in directories
     assert "ConfigurationDirectoryMode=0755" in unit
     assert Paths().ntp_dropin == Path("/etc/systemd/timesyncd.conf.d/black-relay.conf")
+
+
+def test_reloading_the_firewall_waits_for_nftables(run: FakeRun, system: RealSystem) -> None:
+    system.reload_firewall()
+
+    # No --no-block: the daemon retries only a failure it can see.
+    assert run.calls[0][0] == ["systemctl", "reload", "nftables.service"]
+
+
+def test_a_failed_firewall_reload_raises(run: FakeRun, system: RealSystem) -> None:
+    run.results["systemctl"] = subprocess.CalledProcessError(1, ["systemctl"])
+
+    with pytest.raises(SystemCommandError):
+        system.reload_firewall()
+
+
+def test_the_unit_lets_the_daemon_write_the_firewall_set() -> None:
+    unit = (Path(__file__).parents[1] / "ops" / "camera-provision.service").read_text()
+    lines = unit.splitlines()
+    directories = next(line for line in lines if line.startswith("ConfigurationDirectory="))
+    writable = next(line for line in lines if line.startswith("ReadWritePaths="))
+
+    assert "black-relay" in directories.split("=")[1].split()
+    assert "/etc/black-relay" in writable.split("=")[1].split()
+    assert Paths().central_hosts == Path("/etc/black-relay/central-hosts.nft")

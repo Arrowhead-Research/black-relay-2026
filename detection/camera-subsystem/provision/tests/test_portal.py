@@ -51,9 +51,8 @@ from cameraprovision.portal import (
 
 WIFI_PSK = "w1fi-s3cret-Psk"
 BROKER_PASSWORD = "br0ker-s3cret-Pw"
-TAILSCALE_KEY = "tskey-auth-s3cret"
-SECRETS = (WIFI_PSK, BROKER_PASSWORD, TAILSCALE_KEY)
-SECRET_FIELDS = ("wifi_psk", "broker_password", "tailscale_auth_key")
+SECRETS = (WIFI_PSK, BROKER_PASSWORD)
+SECRET_FIELDS = ("wifi_psk", "broker_password")
 PORTAL_HOST = "10.42.0.1"
 BROWSER_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 FORM_CONTENT_TYPE = "application/x-www-form-urlencoded"
@@ -94,8 +93,6 @@ def valid_form(**overrides: str) -> dict[str, str]:
         "mediamtx_address": "10.0.0.2:8554",
         "frigate_base_url": "http://cam-01.local:5000",
         "covered_zones": "perimeter-north, driveway",
-        "vpn_requested": "on",
-        "tailscale_auth_key": TAILSCALE_KEY,
     }
     form.update(overrides)
     return form
@@ -162,7 +159,7 @@ def test_form_collects_exactly_the_portal_fields() -> None:
     assert set(Page(render_form([])).controls()) == {
         *REDISPLAYED_FIELDS,
         *SECRET_FIELDS,
-        "vpn_requested",
+        "camera_upside_down",
         "broker_tls",
         "broker_anonymous",
     }
@@ -195,7 +192,7 @@ def test_form_is_mobile_friendly() -> None:
 def test_first_render_defaults() -> None:
     controls = Page(render_form([])).controls()
     assert controls["broker_port"]["value"] == str(BrokerConfig.port)
-    assert "checked" in controls["vpn_requested"]
+    assert "checked" not in controls["camera_upside_down"]
     assert "checked" not in controls["broker_tls"]
     assert "checked" not in controls["broker_anonymous"]
 
@@ -232,16 +229,11 @@ def test_errors_are_shown() -> None:
 
 def test_redisplay_keeps_non_secret_values_and_checkbox_state() -> None:
     values = valid_form(ntp_server="time.site.local")
-    del values["vpn_requested"]
     controls = Page(render_form([], values=values)).controls()
 
     for field in REDISPLAYED_FIELDS:
         assert controls[field]["value"] == values[field]
-    assert "checked" not in controls["vpn_requested"]
-
-
-def test_redisplay_keeps_a_ticked_vpn_box() -> None:
-    assert "checked" in Page(render_form([], values=valid_form())).controls()["vpn_requested"]
+    assert "checked" not in controls["camera_upside_down"]
 
 
 def test_secrets_are_never_rendered() -> None:
@@ -327,8 +319,6 @@ def test_valid_form_applies_the_parsed_config_once() -> None:
             hostname="edge-7",
             wifi_ssid="Site-WiFi",
             wifi_psk=WIFI_PSK,
-            tailscale_auth_key=TAILSCALE_KEY,
-            vpn_requested=True,
             mediamtx_address="10.0.0.2:8554",
             ntp_server="10.0.0.2",
             covered_zones=["perimeter-north", "driveway"],
@@ -383,31 +373,12 @@ def test_blank_broker_credentials_need_the_anonymous_box() -> None:
     apply.assert_not_called()
 
 
-def test_unticked_vpn_needs_no_key() -> None:
-    apply = Mock()
-    form = form_without("vpn_requested")
-    form["tailscale_auth_key"] = ""
-
-    assert handle_submit(form, apply=apply).ok
-
-    cfg = apply.call_args.args[0]
-    assert cfg.vpn_requested is False
-    assert cfg.tailscale_auth_key == ""
-
-
-def test_unticked_vpn_discards_a_typed_key() -> None:
-    """The key would otherwise be saved to disk for a VPN nobody asked for."""
-    apply = Mock()
-    assert handle_submit(form_without("vpn_requested"), apply=apply).ok
-    assert apply.call_args.args[0].tailscale_auth_key == ""
-
-
 @pytest.mark.parametrize(
     ("typed", "zones"),
     [
         ("driveway", ["driveway"]),
-        (" a , b ", ["a", "b"]),
-        ("a,,b,", ["a", "b"]),
+        (" aa , bb ", ["aa", "bb"]),
+        ("aa,,bb,", ["aa", "bb"]),
     ],
 )
 def test_covered_zones_are_split_on_commas(typed: str, zones: list[str]) -> None:
@@ -424,7 +395,6 @@ def test_phone_keyboard_spaces_are_trimmed_from_endpoints() -> None:
         broker_username="camera-cam-01 ",
         mediamtx_address="10.0.0.2:8554 ",
         frigate_base_url="http://cam-01.local:5000 ",
-        tailscale_auth_key=TAILSCALE_KEY + " ",
     )
 
     assert handle_submit(form, apply=apply).ok
@@ -434,19 +404,17 @@ def test_phone_keyboard_spaces_are_trimmed_from_endpoints() -> None:
     assert cfg.broker.username == "camera-cam-01"
     assert cfg.mediamtx_address == "10.0.0.2:8554"
     assert cfg.frigate.base_url == "http://cam-01.local:5000"
-    assert cfg.tailscale_auth_key == TAILSCALE_KEY
 
 
 def test_passwords_and_ssids_keep_their_spaces() -> None:
-    """Spaces are legal in all three, so trimming would silently change the value."""
+    """Spaces are legal in both, so trimming would silently change the value."""
     apply = Mock()
-    form = valid_form(wifi_psk=" pass word ", broker_password=" pw ", wifi_ssid=" Cafe WiFi ")
+    form = valid_form(wifi_psk=" pass word ", wifi_ssid=" Cafe WiFi ")
 
     assert handle_submit(form, apply=apply).ok
 
     cfg = apply.call_args.args[0]
     assert cfg.wifi_psk == " pass word "
-    assert cfg.broker.password == " pw "
     assert cfg.wifi_ssid == " Cafe WiFi "
 
 
@@ -458,7 +426,7 @@ def test_portal_only_fields_stay_out_of_the_bridge_yaml(tmp_path: Path) -> None:
 
     assert result.ok
     text = path.read_text(encoding="utf-8")
-    for leaked in ("Site-WiFi-XYZ", WIFI_PSK, TAILSCALE_KEY, "edge-host-7"):
+    for leaked in ("Site-WiFi-XYZ", WIFI_PSK, "edge-host-7"):
         assert leaked not in text
     assert bridge_cli.load_config(str(path))["broker"]["password"] == BROKER_PASSWORD
 
@@ -504,9 +472,15 @@ def test_portal_only_fields_stay_out_of_the_bridge_yaml(tmp_path: Path) -> None:
         ("covered_zones", form_without("covered_zones")),
         ("covered_zones", valid_form(covered_zones="")),
         ("covered_zones", valid_form(covered_zones=" , ,")),
-        ("tailscale_auth_key", form_without("tailscale_auth_key")),
-        ("tailscale_auth_key", valid_form(tailscale_auth_key="")),
-        ("tailscale_auth_key", valid_form(tailscale_auth_key="   ")),
+        ("broker.host", valid_form(broker_host="broker.site.local")),
+        ("broker.host", valid_form(broker_host="fd00::2")),
+        ("broker.host", valid_form(broker_host="100.64.0.1")),
+        ("covered_zones", valid_form(covered_zones="front door")),
+        ("covered_zones", valid_form(covered_zones="x")),
+        ("covered_zones", valid_form(covered_zones="driveway, cam-01")),
+        ("broker.username", valid_form(broker_username="user:name")),
+        ("broker.password", valid_form(broker_password="pa$$word")),
+        ("broker.password", valid_form(broker_password="has space")),
     ],
 )
 def test_bad_form_names_the_field_and_applies_nothing(named: str, form: dict[str, str]) -> None:
@@ -530,7 +504,7 @@ def test_empty_form_reports_every_problem_without_raising() -> None:
 
 def test_rejection_carries_no_secret(caplog: pytest.LogCaptureFixture) -> None:
     form = valid_form(node_id="BAD", wifi_psk="short-psk")
-    secrets = ("short-psk", BROKER_PASSWORD, TAILSCALE_KEY)
+    secrets = ("short-psk", BROKER_PASSWORD)
 
     with caplog.at_level(logging.DEBUG):
         result = handle_submit(form, apply=Mock())
@@ -546,7 +520,7 @@ def test_rejection_carries_no_secret(caplog: pytest.LogCaptureFixture) -> None:
 
 
 def exploding_apply(cfg: NodeConfig) -> None:
-    raise OSError(f"could not write {cfg.wifi_psk} {cfg.broker.password} {cfg.tailscale_auth_key}")
+    raise OSError(f"could not write {cfg.wifi_psk} {cfg.broker.password}")
 
 
 def test_apply_failure_is_generic_and_carries_no_secret(
@@ -645,7 +619,6 @@ def test_wifi_change_merges_into_a_saved_config_by_field_name() -> None:
         hostname="edge-7",
         wifi_ssid="Old-WiFi",
         wifi_psk="old-password",
-        tailscale_auth_key=TAILSCALE_KEY,
         mediamtx_address="10.0.0.2:8554",
         covered_zones=["driveway"],
         broker=BrokerConfig(host="10.0.0.2", username="cam", password=BROKER_PASSWORD),
@@ -1018,7 +991,6 @@ def test_fallback_post_applies_the_wifi_change_only(fallback: Harness) -> None:
         node_id="evil",
         hostname="evil",
         broker_host="evil.example",
-        vpn_requested="on",
     )
 
     response = fallback.post(form)
@@ -1043,7 +1015,7 @@ def test_fallback_rejection_redisplays_wifi_only(fallback: Harness) -> None:
     assert "wifi_psk must be" in response.text
     assert set(Page(response.text).controls()) == {"wifi_ssid", "wifi_psk"}
     assert "posted-node-id" not in response.text
-    for secret in ("tiny-pw", BROKER_PASSWORD, TAILSCALE_KEY):
+    for secret in ("tiny-pw", BROKER_PASSWORD):
         assert secret not in response.text
 
 
@@ -1537,8 +1509,6 @@ def saved_config(**overrides: Any) -> NodeConfig:
         "hostname": "edge-7",
         "wifi_ssid": "Site-WiFi",
         "wifi_psk": WIFI_PSK,
-        "tailscale_auth_key": TAILSCALE_KEY,
-        "vpn_requested": True,
         "mediamtx_address": "10.0.0.2:8554",
         "covered_zones": ["perimeter-north", "driveway"],
         "broker": BrokerConfig(
@@ -1562,7 +1532,7 @@ def test_i1_identity_values_keep_the_first_render_defaults() -> None:
     controls = Page(render_form([], values=identity_values("10000000ABCDEF12"))).controls()
 
     assert controls["broker_port"]["value"] == str(BrokerConfig.port)
-    assert "checked" in controls["vpn_requested"]
+    assert "checked" not in controls["camera_upside_down"]
     assert "checked" not in controls["broker_tls"]
     assert "checked" not in controls["broker_anonymous"]
 
@@ -1605,23 +1575,21 @@ def test_m5_saved_values_fill_every_non_secret_field() -> None:
 def test_m5_saved_values_hold_no_secret() -> None:
     values = saved_values(saved_config())
 
-    assert not {"wifi_psk", "broker_password", "tailscale_auth_key"} & set(values)
-    assert not {WIFI_PSK, BROKER_PASSWORD, TAILSCALE_KEY} & set(values.values())
+    assert not {"wifi_psk", "broker_password"} & set(values)
+    assert not {WIFI_PSK, BROKER_PASSWORD} & set(values.values())
 
 
 def test_m5_saved_values_reflect_each_box() -> None:
     anonymous = saved_config(
         broker=BrokerConfig(host="10.0.0.2", username="", password=""),
         broker_anonymous=True,
-        vpn_requested=False,
-        tailscale_auth_key="",
     )
 
     controls = Page(render_form([], values=saved_values(anonymous))).controls()
 
     assert "checked" in controls["broker_anonymous"]
     assert "checked" not in controls["broker_tls"]
-    assert "checked" not in controls["vpn_requested"]
+    assert "checked" not in controls["camera_upside_down"]
 
 
 def test_m5_a_saved_value_is_escaped() -> None:
@@ -1638,10 +1606,6 @@ def test_m5_the_form_says_passwords_must_be_typed_again() -> None:
 
     assert "Never filled in. Type it again each time you save." in text
     assert "Never filled in. Type it again each time you save, unless" in text
-
-
-def test_m6_the_form_says_unticking_keeps_a_tailscale_login() -> None:
-    assert "does not log this node out" in re.sub(r"\s+", " ", render_form([]))
 
 
 def test_a_form_get_shows_the_prefill() -> None:
@@ -1783,3 +1747,66 @@ def test_a_wifi_repairs_saved_page_names_no_time_server() -> None:
     response = request(app, "POST", body=urlencode(valid_form()).encode())
 
     assert response.status.startswith("200") and "Time server" not in response.text
+
+
+# --- no node Tailscale, the picture flip ------------------------------------------
+
+
+def test_form_has_no_tailscale_fields() -> None:
+    page = render_form([])
+
+    assert not {"vpn_requested", "tailscale_auth_key"} & set(Page(page).controls())
+    assert "tailscale" not in page.lower()
+    assert "vpn" not in page.lower()
+
+
+def test_a_submitted_tailscale_field_is_ignored() -> None:
+    apply = Mock()
+
+    assert handle_submit(valid_form(tailscale_auth_key="k", vpn_requested="on"), apply=apply).ok
+
+    assert not hasattr(apply.call_args.args[0], "tailscale_auth_key")
+
+
+def test_identity_values_ask_for_no_vpn() -> None:
+    assert "vpn_requested" not in identity_values("10000000ABCDEF12")
+
+
+def test_the_upside_down_box_reaches_the_config() -> None:
+    apply = Mock()
+
+    assert handle_submit(valid_form(camera_upside_down="on"), apply=apply).ok
+
+    assert apply.call_args.args[0].camera_upside_down is True
+
+
+def test_an_unticked_upside_down_box_means_right_way_up() -> None:
+    apply = Mock()
+
+    assert handle_submit(valid_form(), apply=apply).ok
+
+    assert apply.call_args.args[0].camera_upside_down is False
+
+
+def test_saved_values_tick_the_upside_down_box() -> None:
+    controls = Page(
+        render_form([], values=saved_values(saved_config(camera_upside_down=True)))
+    ).controls()
+
+    assert "checked" in controls["camera_upside_down"]
+
+
+def test_a_rejected_form_keeps_the_upside_down_box() -> None:
+    values = valid_form(camera_upside_down="on", node_id="NOT VALID")
+
+    assert "checked" in Page(render_form([], values=values)).controls()["camera_upside_down"]
+
+
+def test_hostname_as_broker_address_is_rejected() -> None:
+    apply = Mock()
+
+    result = handle_submit(valid_form(broker_host="broker.site.local"), apply=apply)
+
+    assert not result.ok
+    assert any("broker.host" in error and "IPv4" in error for error in result.errors)
+    apply.assert_not_called()

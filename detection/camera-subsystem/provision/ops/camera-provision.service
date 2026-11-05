@@ -4,8 +4,6 @@ Description=Black Relay camera node provisioning (setup AP, portal, uplink watch
 Documentation=file:/opt/black-relay/ops/README.md
 # NetworkManager runs the AP and the joins. The daemon retries if it is not ready.
 # No network-online.target: this unit must run when there is no network at all.
-# No tailscaled ordering: the daemon only calls tailscale once provisioned, retries with
-# backoff, and must not wait on it, because the setup button is read once at startup.
 After=NetworkManager.service nftables.service
 Wants=NetworkManager.service nftables.service
 StartLimitIntervalSec=0
@@ -21,11 +19,11 @@ RestartSec=5
 TimeoutStopSec=45
 UMask=0077
 
-# Runs as root: nmcli and tailscale authorize root over D-Bus and their sockets.
+# Runs as root: nmcli authorizes root over D-Bus.
 # CHOWN: gives bridge.yaml to the service user. DAC_OVERRIDE and FOWNER: read, replace and
 # hard-link it afterwards, when root no longer owns it. NET_BIND_SERVICE: port 80.
 # NET_RAW: SO_BINDTODEVICE on wlan0. NET_ADMIN: the nft check above. Restarting timesyncd
-# and avahi needs no capability: root asks systemd over its AF_UNIX socket.
+# and avahi and reloading nftables need no capability: root asks systemd over its AF_UNIX socket.
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 NoNewPrivileges=yes
 
@@ -34,9 +32,9 @@ StateDirectory=camera-provision
 StateDirectoryMode=0700
 # 0755 so the bridge user can reach its own 0600 file, go2rtc can read mediamtx.env, and
 # timesyncd, which does not run as root, can read its drop-in despite UMask=0077 above.
-ConfigurationDirectory=camerabridge systemd/timesyncd.conf.d
+ConfigurationDirectory=camerabridge systemd/timesyncd.conf.d black-relay
 ConfigurationDirectoryMode=0755
-ReadWritePaths=/etc/camerabridge /etc/systemd/timesyncd.conf.d /etc/NetworkManager/system-connections
+ReadWritePaths=/etc/camerabridge /etc/systemd/timesyncd.conf.d /etc/black-relay /etc/NetworkManager/system-connections
 ProtectHome=yes
 PrivateTmp=yes
 

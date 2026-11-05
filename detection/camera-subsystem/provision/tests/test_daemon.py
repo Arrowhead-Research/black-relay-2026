@@ -1,6 +1,6 @@
 """Tests for ``cameraprovision.daemon``: the wiring of the pure cores to the system.
 
-Only the operating system is faked: nmcli, tailscale, GPIO and the listening socket.
+Only the operating system is faked: nmcli, systemctl, GPIO and the listening socket.
 The state machine, the watchdog decision, the portal's WSGI app and the on-disk store
 are all real, so each test drives what a node would do. Time comes from a fake clock.
 """
@@ -37,8 +37,7 @@ from cameraprovision.system import SystemCommandError
 WIFI_PSK = "w1fi-s3cret-Psk"
 NEW_WIFI_PSK = "n3w-w1fi-s3cret"
 BROKER_PASSWORD = "br0ker-s3cret-Pw"
-TAILSCALE_KEY = "tskey-auth-s3cret"
-SECRETS = (WIFI_PSK, NEW_WIFI_PSK, BROKER_PASSWORD, TAILSCALE_KEY)
+SECRETS = (WIFI_PSK, NEW_WIFI_PSK, BROKER_PASSWORD)
 AP_IP = "10.42.0.1"
 BROWSER_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 FORM_TYPE = "application/x-www-form-urlencoded"
@@ -62,8 +61,6 @@ def valid_form(**overrides: str) -> dict[str, str]:
         "mediamtx_address": "10.0.0.2:8554",
         "frigate_base_url": "http://cam-01.local:5000",
         "covered_zones": "perimeter-north, driveway",
-        "vpn_requested": "on",
-        "tailscale_auth_key": TAILSCALE_KEY,
     }
     form.update(overrides)
     return form
@@ -75,8 +72,6 @@ def node_config(**overrides: Any) -> NodeConfig:
         "hostname": "edge-7",
         "wifi_ssid": "Site-WiFi",
         "wifi_psk": WIFI_PSK,
-        "tailscale_auth_key": "",
-        "vpn_requested": False,
         "mediamtx_address": "10.0.0.2:8554",
         "covered_zones": ["perimeter-north"],
         "broker": BrokerConfig(host="10.0.0.2", username="camera-cam-01", password=BROKER_PASSWORD),
@@ -110,7 +105,6 @@ class FakeSystem:
         self.scan_failures = 0
         self.serial = "10000000ABCDEF12"
         self.failing: dict[str, Exception] = {}
-        self.tailscale_args: list[tuple[Path, str]] = []
         self.chowned: list[Path] = []
         self.hostnames: list[str] = []
         self.ap_alive = False
@@ -174,9 +168,8 @@ class FakeSystem:
         self._do("ipv4_lease")
         return self.lease
 
-    def tailscale_up(self, key_file: Path, hostname: str) -> None:
-        self.tailscale_args.append((key_file, hostname))
-        self._do("tailscale_up")
+    def reload_firewall(self) -> None:
+        self._do("reload_firewall")
 
     def chown_to_service_user(self, path: Path) -> None:
         self.chowned.append(path)
@@ -240,6 +233,7 @@ class Node:
             nm_connections_dir=root / "etc/NetworkManager/system-connections",
             state_dir=root / "var/lib/camera-provision",
             ntp_dropin=root / "etc/systemd/timesyncd.conf.d/black-relay.conf",
+            central_hosts=root / "black-relay" / "central-hosts.nft",
         )
         self.listeners: list[FakeListener] = []
         self.daemon: Provisioner | None = None
@@ -349,7 +343,7 @@ class Node:
             self.paths.mediamtx_env,
             self.paths.nm_keyfile,
             self.paths.node_file,
-            self.paths.tailscale_key,
+            self.paths.central_hosts,
             self.paths.ntp_dropin,
         ]
         return {str(path): path.read_bytes() for path in files if path.exists()}
@@ -897,50 +891,6 @@ def test_fallback_repair_changes_only_the_wifi(node: Node) -> None:
     keyfile = node.paths.nm_keyfile.read_text()
     assert f"psk={NEW_WIFI_PSK}" in keyfile and "ssid=Fixed-WiFi" in keyfile
     assert "dhcp-hostname=kept-name" in keyfile
-    assert not node.paths.tailscale_key.exists()
-
-
-def test_fallback_repair_succeeds_after_the_tailscale_key_is_gone(node: Node) -> None:
-    """The node logged in, so its key is deleted. A repair must still reach JOINING."""
-    node.boot()
-    node.submit()
-    node.tick()
-    node.system.link_up()
-    node.tick(1)
-    assert node.state is S.PROVISIONED and not node.paths.tailscale_key.exists()
-    node.daemon.shutdown()
-    node.system.boot = "boot-2"
-    node.system.link_down()
-    node.boot()
-    node.tick(JOIN_TIMEOUT)
-    assert node.state is S.FALLBACK_AP
-    bridge = node.paths.bridge_config.read_bytes()
-
-    response = node.request("POST", {"wifi_ssid": "Fixed-WiFi", "wifi_psk": NEW_WIFI_PSK})
-    assert response.code == 200
-    response.finish()
-    node.tick()
-
-    assert node.state is S.JOINING
-    assert f"psk={NEW_WIFI_PSK}" in node.paths.nm_keyfile.read_text()
-    assert node.paths.bridge_config.read_bytes() == bridge
-    assert not node.paths.tailscale_key.exists()
-    node.system.link_up()
-    node.tick(1)
-    assert node.state is S.PROVISIONED
-    assert node.system.count("tailscale_up") == 1  # no second login is owed
-
-
-def test_fallback_repair_keeps_a_pending_tailscale_key(node: Node) -> None:
-    node.boot()
-    node.submit()
-    node.tick()
-    node.tick(JOIN_TIMEOUT)
-    assert node.state is S.FALLBACK_AP
-
-    node.submit({"wifi_ssid": "Fixed-WiFi", "wifi_psk": NEW_WIFI_PSK})
-
-    assert node.paths.tailscale_key.read_text() == TAILSCALE_KEY
 
 
 def test_fallback_with_no_config_gets_a_new_full_server(node: Node) -> None:
@@ -1101,139 +1051,6 @@ def test_a_late_form_request_on_a_closed_portal_does_not_move_the_new_window(nod
     node.tick(1)
 
     assert node.state is S.JOINING
-
-
-# --- Tailscale --------------------------------------------------------------------------
-
-
-def provisioned_with_vpn(node: Node) -> None:
-    node.boot()
-    node.submit()
-    node.tick()
-    assert node.state is S.JOINING
-    node.system.link_up()
-
-
-def test_tailscale_is_not_run_before_provisioned(node: Node) -> None:
-    provisioned_with_vpn(node)
-    assert node.paths.tailscale_key.read_text() == TAILSCALE_KEY
-    assert node.system.count("tailscale_up") == 0
-
-
-def test_tailscale_runs_after_provisioned_and_the_key_is_deleted(node: Node) -> None:
-    provisioned_with_vpn(node)
-    key_file = node.paths.tailscale_key
-    assert key_file.stat().st_mode & 0o777 == 0o600
-
-    node.tick(1)
-
-    assert node.state is S.PROVISIONED
-    assert node.system.tailscale_args == [(key_file, "edge-7")]
-    assert not key_file.exists()
-
-    node.tick(100000)
-    assert node.system.count("tailscale_up") == 1
-
-
-def test_tailscale_failure_does_not_fall_back_and_retries_with_backoff(
-    node: Node, caplog: pytest.LogCaptureFixture
-) -> None:
-    caplog.set_level(logging.DEBUG)
-    provisioned_with_vpn(node)
-    node.system.failing["tailscale_up"] = SystemCommandError(
-        f"tailscale up failed {TAILSCALE_KEY}"
-    )
-
-    node.tick(1)  # attempt 1
-    assert node.system.count("tailscale_up") == 1
-    node.tick(1)
-    assert node.system.count("tailscale_up") == 1  # backing off
-    node.tick(29)
-    assert node.system.count("tailscale_up") == 2  # 30 s
-    node.tick(59)
-    assert node.system.count("tailscale_up") == 2
-    node.tick(1)
-    assert node.system.count("tailscale_up") == 3  # 60 s
-
-    assert node.state is S.PROVISIONED
-    assert node.system.count("start_ap") == 1  # only the first install's
-    assert node.open_listeners() == []
-    assert node.paths.tailscale_key.exists()
-    assert "tailscale" in caplog.text
-    assert TAILSCALE_KEY not in caplog.text
-
-    del node.system.failing["tailscale_up"]
-    node.tick(10000)
-    assert node.system.count("tailscale_up") == 4
-    assert not node.paths.tailscale_key.exists()
-
-
-def test_tailscale_backoff_is_capped(node: Node) -> None:
-    provisioned_with_vpn(node)
-    node.system.failing["tailscale_up"] = SystemCommandError("no route")
-    node.tick(1)
-    node.tick(100000)  # a long way in, attempts keep going
-    attempts = node.system.count("tailscale_up")
-
-    for _ in range(12):
-        node.tick(3600)
-
-    assert node.system.count("tailscale_up") == attempts + 12
-
-
-def test_a_failed_login_never_counts_as_a_daemon_failure(node: Node) -> None:
-    provisioned_with_vpn(node)
-    node.system.failing["tailscale_up"] = SystemCommandError("no route")
-    for _ in range(500):
-        node.tick(30)
-    assert node.state is S.PROVISIONED
-
-
-def test_tailscale_retries_after_a_restart_while_the_key_remains(node: Node) -> None:
-    provisioned_with_vpn(node)
-    node.system.failing["tailscale_up"] = SystemCommandError("no route")
-    node.tick(1)
-    node.daemon.shutdown()
-    del node.system.failing["tailscale_up"]
-
-    node.boot()
-    node.tick()
-
-    assert not node.paths.tailscale_key.exists()
-
-
-def test_failing_to_delete_the_key_does_not_repeat_the_login(
-    node: Node, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    provisioned_with_vpn(node)
-    real_delete = NodeStore.delete_tailscale_key
-    monkeypatch.setattr(
-        NodeStore, "delete_tailscale_key", lambda self: (_ for _ in ()).throw(OSError("busy"))
-    )
-
-    node.tick(1)
-    node.tick(30)
-    assert node.system.count("tailscale_up") == 1
-    assert node.paths.tailscale_key.exists()
-
-    monkeypatch.setattr(NodeStore, "delete_tailscale_key", real_delete)
-    node.tick(60)
-
-    assert node.system.count("tailscale_up") == 1
-    assert not node.paths.tailscale_key.exists()
-
-
-def test_no_vpn_means_no_tailscale(node: Node) -> None:
-    node.boot()
-    form = valid_form()
-    del form["vpn_requested"]
-    node.submit(form)
-    node.tick()
-    node.system.link_up()
-    node.tick(1)
-
-    assert node.state is S.PROVISIONED
-    assert node.system.count("tailscale_up") == 0
 
 
 # --- crash safety -----------------------------------------------------------------------
@@ -1453,7 +1270,7 @@ def test_secrets_stay_out_of_logs_and_of_files_that_do_not_need_them(
 # --- end to end -------------------------------------------------------------------------
 
 
-def test_end_to_end_blank_boot_to_provisioned_and_vpn(node: Node) -> None:
+def test_end_to_end_blank_boot_to_provisioned(node: Node) -> None:
     """A whole first install, with real WSGI calls and only the OS faked."""
     # First boot, no config: the AP comes up and a phone finds the form.
     node.boot()
@@ -1484,16 +1301,13 @@ def test_end_to_end_blank_boot_to_provisioned_and_vpn(node: Node) -> None:
     assert fixed.code == 200
     fixed.finish()
 
-    # This time it joins, and the VPN comes up once the node has real connectivity.
+    # This time it joins.
     node.tick()
     assert node.state is S.JOINING
-    assert node.system.count("tailscale_up") == 0
     node.system.link_up()
     node.tick(1)
     assert node.state is S.PROVISIONED
     assert node.open_listeners() == []
-    assert not node.paths.tailscale_key.exists()
-    assert node.system.tailscale_args[0][1] == "edge-7"
 
     # Everything is where the rest of the node expects it.
     assert f"psk={NEW_WIFI_PSK}" in node.paths.nm_keyfile.read_text()
@@ -1604,20 +1418,6 @@ def test_c1_a_valid_config_reports_as_valid(node: Node) -> None:
     node.boot()
 
     assert json.loads(node.paths.state_file.read_text())["bridge_config_valid"] is True
-
-
-def test_c1_a_damaged_bridge_config_does_not_stop_the_tailscale_login(node: Node) -> None:
-    """Remote access is how someone would come and fix that file."""
-    node.seed_config(node_config(vpn_requested=True, tailscale_auth_key=TAILSCALE_KEY))
-    node.paths.bridge_config.write_text("status_interval_s: -1\n")
-    node.boot()
-    node.system.link_up()
-
-    node.tick(1)
-
-    assert node.state is S.PROVISIONED
-    assert node.system.tailscale_args == [(node.paths.tailscale_key, "edge-7")]
-    assert not node.paths.tailscale_key.exists()
 
 
 @pytest.mark.parametrize("journal", ["", "{not json", "[]", '{"a": 1}', "[1]"])
@@ -2040,30 +1840,6 @@ def test_m1_a_link_already_up_is_not_reactivated(node: Node) -> None:
     assert node.system.count("join") == 0
 
 
-def test_m8_a_failing_key_delete_backs_off(
-    node: Node, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    attempts: list[float] = []
-
-    def failing(self: NodeStore) -> None:
-        attempts.append(node.clock.now)
-        raise OSError("busy")
-
-    provisioned_with_vpn(node)
-    monkeypatch.setattr(NodeStore, "delete_tailscale_key", failing)
-
-    node.tick(1)
-    assert len(attempts) == 1
-    node.tick(1)
-    assert len(attempts) == 1
-    node.tick(29)
-    assert len(attempts) == 2
-    node.tick(59)
-    assert len(attempts) == 2
-    node.tick(1)
-    assert len(attempts) == 3
-
-
 def test_m6_a_button_read_failure_logs_at_error(
     node: Node, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -2332,8 +2108,6 @@ def test_m5_the_button_form_shows_the_saved_settings_and_no_secret(node: Node) -
         node_config(
             node_id="cam-07",
             hostname="edge-7",
-            vpn_requested=True,
-            tailscale_auth_key=TAILSCALE_KEY,
         )
     )
     node.system.button = True
@@ -2359,26 +2133,12 @@ def test_m5_the_saved_form_cannot_be_resubmitted_without_its_secrets(node: Node)
     node.boot()
 
     response = node.submit(
-        valid_form(wifi_psk="", broker_password="", vpn_requested="", tailscale_auth_key="")
+        valid_form(wifi_psk="", broker_password="")
     )
 
     assert response.code == 400
     assert "wifi_psk" in response.body and "broker.password" in response.body
     assert node.disk() == before
-
-
-def test_m5_the_vpn_box_is_ticked_only_while_a_login_is_owed(node: Node) -> None:
-    node.seed_config(node_config(vpn_requested=True, tailscale_auth_key=TAILSCALE_KEY))
-    node.system.button = True
-    node.boot()
-    assert re.search(r'name="vpn_requested"[^>]* checked', node.request().body)
-    node.daemon.shutdown()
-
-    node.paths.tailscale_key.unlink()
-    node.system.boot = "boot-2"
-    node.boot()
-
-    assert not re.search(r'name="vpn_requested"[^>]* checked', node.request().body)
 
 
 def test_m5_a_wifi_only_portal_prefills_nothing(node: Node) -> None:
@@ -2537,3 +2297,135 @@ def test_a_button_move_to_another_broker_keeps_an_explicit_ntp_server(node: Node
     node.submit(valid_form(broker_host="10.0.0.9", ntp_server="time.site.local"))
 
     assert node.paths.ntp_dropin.read_text() == "[Time]\nNTP=time.site.local\n"
+
+
+# --- central-only access and no node Tailscale --------------------------------------
+
+
+def test_daemon_never_calls_tailscale(node: Node) -> None:
+    node.boot()
+    node.submit(valid_form(vpn_requested="on", tailscale_auth_key="tskey-auth-s3cret"))
+    node.tick()
+    node.system.link_up()
+    node.tick(1)
+    node.tick(60)
+
+    assert node.state is S.PROVISIONED
+    assert not any("tailscale" in call for call in node.system.calls)
+    assert not (node.paths.state_dir / "tailscale.key").exists()
+    assert "tskey-auth-s3cret" not in "".join(
+        data.decode(errors="replace") for data in node.disk().values()
+    )
+
+
+def test_a_start_with_an_old_tailscale_key_deletes_it(node: Node) -> None:
+    node.seed_config()
+    key = node.paths.state_dir / "tailscale.key"
+    key.write_text("tskey-auth-s3cret")
+
+    node.boot()
+
+    assert not key.exists()
+
+
+def test_save_reloads_nftables_and_a_failure_is_logged_and_retried(
+    node: Node, caplog: pytest.LogCaptureFixture
+) -> None:
+    node.boot()
+    start_reloads = node.system.count("reload_firewall")
+    node.system.failing["reload_firewall"] = SystemCommandError("systemctl exited with status 1")
+
+    node.submit()
+    with caplog.at_level(logging.ERROR):
+        node.tick()
+
+    assert node.state is S.JOINING
+    assert node.system.count("reload_firewall") == start_reloads + 1
+    assert "reloading the firewall failed" in caplog.text
+
+    node.tick(1)
+    assert node.system.count("reload_firewall") == start_reloads + 1  # waiting
+    node.tick(30)
+    assert node.system.count("reload_firewall") == start_reloads + 2
+
+    del node.system.failing["reload_firewall"]
+    node.tick(30)
+    assert node.system.count("reload_firewall") == start_reloads + 3
+    node.tick(60)
+    assert node.system.count("reload_firewall") == start_reloads + 3  # done
+
+
+def test_a_failing_firewall_reload_never_blocks_the_join(node: Node) -> None:
+    node.boot()
+    node.system.failing["reload_firewall"] = SystemCommandError("systemctl exited with status 1")
+
+    node.submit()
+    node.tick()
+
+    assert node.state is S.JOINING
+    assert node.system.count("join") == 1
+    node.system.link_up()
+    node.tick(1)
+    assert node.state is S.PROVISIONED
+
+
+def test_a_failing_firewall_reload_never_counts_as_a_daemon_failure(node: Node) -> None:
+    node.seed_config()
+    node.boot()
+    node.system.link_up()
+    node.system.failing["reload_firewall"] = SystemCommandError("systemctl exited with status 1")
+
+    for _ in range(JOIN_TICKS_PAST_EXIT_LIMIT + 5):
+        node.tick(1)
+
+    assert node.state is S.PROVISIONED
+
+
+def test_a_firewall_reload_is_retried_while_the_ap_is_up(node: Node) -> None:
+    node.boot()
+    node.submit()
+    node.system.failing["reload_firewall"] = SystemCommandError("systemctl exited with status 1")
+    node.tick()
+    node.tick(JOIN_TIMEOUT)
+    assert node.state is S.FALLBACK_AP
+    del node.system.failing["reload_firewall"]
+    before = node.system.count("reload_firewall")
+
+    node.tick(30)
+
+    assert node.system.count("reload_firewall") == before + 1
+
+
+def test_every_start_loads_the_saved_set_once(node: Node) -> None:
+    """Settling an interrupted save can change the set after nftables loaded it at boot."""
+    node.seed_config()
+
+    node.boot()
+
+    assert node.system.count("reload_firewall") == 1
+
+
+def test_a_config_that_no_longer_passes_a_save_is_not_reported_damaged(node: Node) -> None:
+    node.seed_config()
+    bridge = node.bridge_yaml()
+    bridge["broker"]["host"] = "broker.lan"
+    node.paths.bridge_config.write_text(yaml.safe_dump(bridge))
+
+    node.boot()
+
+    assert json.loads(node.paths.state_file.read_text())["bridge_config_valid"] is True
+
+
+def test_upside_down_checkbox_is_saved_and_shown_on_reprovision(node: Node) -> None:
+    node.boot()
+    node.submit(valid_form(camera_upside_down="on"))
+    assert json.loads(node.paths.node_file.read_text())["camera_upside_down"] is True
+    node.tick()
+    node.daemon.shutdown()
+
+    node.system.button = True
+    node.system.boot = "boot-2"
+    node.boot()
+
+    assert node.state is S.AP_UP
+    assert re.search(r'name="camera_upside_down"[^>]* checked', node.request().body)

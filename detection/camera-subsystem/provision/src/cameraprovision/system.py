@@ -1,4 +1,4 @@
-"""The real side effects: thin adapters over nmcli, hostnamectl, tailscale and libgpiod.
+"""The real side effects: thin adapters over nmcli, hostnamectl, systemctl and libgpiod.
 
 Every command is an argv list with a timeout, and never a shell. Secrets reach commands
 by file only. A failure raises ``SystemCommandError``, built only from the program name
@@ -14,7 +14,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from cameraprovision.netprofile import UPLINK_PROFILE_ID, tailscale_up_args
+from cameraprovision.netprofile import UPLINK_PROFILE_ID
 
 __all__ = ["AP_PROFILE_ID", "RealSystem", "SystemCommandError", "parse_ssids"]
 
@@ -27,7 +27,6 @@ _NMCLI_NOT_FOUND = 10
 _AP_WAIT_S = 30
 _QUICK_TIMEOUT_S = 15.0
 _SCAN_TIMEOUT_S = 30.0
-_TAILSCALE_TIMEOUT_S = 60.0
 # The same rule seed-kit.sh applies, since this is the same value.
 _SERIAL_RE = re.compile(r"[0-9a-fA-F]{8,16}")
 
@@ -180,6 +179,13 @@ class RealSystem:
         """Make timesyncd read the saved time server. ``--no-block`` keeps the join moving."""
         _run(["systemctl", "--no-block", "restart", "systemd-timesyncd.service"])
 
+    def reload_firewall(self) -> None:
+        """Load the saved ``central_hosts`` set. Waits, so that a failure can be retried.
+
+        nft replaces the table in one transaction, so a failure leaves the old rules in force.
+        """
+        _run(["systemctl", "reload", "nftables.service"])
+
     def reload_connections(self) -> None:
         _run(["nmcli", "connection", "reload"])
 
@@ -203,11 +209,6 @@ class RealSystem:
 
     def ipv4_lease(self) -> bool:
         return self._uplink()[1]
-
-    def tailscale_up(self, key_file: Path, hostname: str) -> None:
-        # No --force-reauth: a retry after a killed login would re-authenticate with
-        # a possibly spent one-off key and could lose a working login.
-        _run(tailscale_up_args(key_file, hostname), timeout=_TAILSCALE_TIMEOUT_S)
 
     def gpio_reprovision_held(self) -> bool:
         """Read the active-low button by line name, with libgpiod 1.x or 2.x.

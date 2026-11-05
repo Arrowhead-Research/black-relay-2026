@@ -2,13 +2,18 @@
 
 ``NodeConfig`` nests the same sections as ``bridge/config/bridge.example.yaml``, and
 its defaults are that file's values (a test holds them equal). It also carries the
-fields only provisioning uses: WiFi credentials, hostname, Tailscale key, and the
+fields only provisioning uses: WiFi credentials, hostname, the picture flip, and the
 anonymous-broker choice. Those never reach the bridge YAML; ``_bridge_mapping`` is the
 one place that decides what does. ``mediamtx_address`` is in that file for go2rtc,
 and the bridge ignores it.
 
 Secrets stay out of every rendering: their fields are excluded from ``repr``, and
 ``validate`` names the offending field without quoting any value.
+
+Two levels of validation. :func:`validate` is what a save must pass. :func:`validate_saved`
+is what a config on disk must pass to be used, and is looser: a node provisioned before a
+rule existed keeps working and shows its values on the form, and only a new save has to
+meet the new rule.
 """
 
 from __future__ import annotations
@@ -30,7 +35,10 @@ __all__ = [
     "NodeConfig",
     "OutboxConfig",
     "effective_ntp_server",
+    "frigate_problems",
+    "render_central_hosts",
     "validate",
+    "validate_saved",
     "validate_wifi",
     "write_bridge_config",
 ]
@@ -47,6 +55,14 @@ _SSID_MAX_BYTES = 32
 _PORT_DIGITS_RE = re.compile(r"[0-9]{1,5}")
 # Where Tailscale numbers its nodes. Fusion traffic must stay on the site LAN (DESIGN 7.3).
 _TAILSCALE_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+_BROKER_HOST_RULE = "broker.host must be a plain hostname or IP address"
+
+# Copies of the rules in cameralink.frigate_config, which this package cannot import at run
+# time. A value they refuse makes camera-link's render raise, and that stops Frigate, so the
+# portal refuses it first. cameralink/tests/test_portal_rules.py holds the two sets equal.
+_ZONE_NAME_RE = re.compile(r"[a-zA-Z0-9_-]{2,}")
+_RELAY_USER_RE = re.compile(r"[a-zA-Z0-9._~@+-]+")
+_RELAY_PASSWORD_RE = re.compile(r"[!#%&(-\[\]-_a-~]*")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -101,8 +117,8 @@ class NodeConfig:
     hostname: str
     wifi_ssid: str
     wifi_psk: str = field(repr=False)
-    tailscale_auth_key: str = field(repr=False)
-    vpn_requested: bool = True
+    # Applied to the camera by camera-link, which reads it from node.json.
+    camera_upside_down: bool = False
     # Credentials are required unless this says the broker takes none.
     broker_anonymous: bool = False
     # Empty means the broker host. See effective_ntp_server.
@@ -134,6 +150,17 @@ def _is_host(value: Any) -> bool:
             # An all-numeric ending is a mistyped IP address, not a name.
             and not labels[-1].isdigit()
         )
+    return True
+
+
+def _is_ipv4_literal(value: Any) -> bool:
+    """An IPv4 address, the only kind the node's ``central_hosts`` firewall set can hold."""
+    if not isinstance(value, str):
+        return False
+    try:
+        ipaddress.IPv4Address(value)
+    except ValueError:
+        return False
     return True
 
 
@@ -220,20 +247,63 @@ def validate_wifi(ssid: str, psk: str) -> list[str]:
     return [message for ok, message in _wifi_checks(ssid, psk) if not ok]
 
 
+def frigate_problems(
+    node_id: str, covered_zones: Any, relay_user: Any, relay_password: Any
+) -> list[str]:
+    """Return why camera-link could not render Frigate's config and env file from these.
+
+    ``relay_user`` and ``relay_password`` are the broker username and password, which
+    go2rtc also uses. Messages never quote a value.
+    """
+    zones = covered_zones if isinstance(covered_zones, (list, tuple)) else []
+    checks = [
+        (
+            all(_matches(_ZONE_NAME_RE, zone) for zone in zones),
+            "covered_zones: each zone needs at least two characters, "
+            "using only letters, digits, hyphens and underscores",
+        ),
+        (node_id not in zones, "covered_zones: a zone cannot have the same name as node_id"),
+        (
+            relay_user == "" or _matches(_RELAY_USER_RE, relay_user),
+            "broker.username must use only letters, digits and . _ ~ @ + -",
+        ),
+        (
+            _matches(_RELAY_PASSWORD_RE, relay_password),
+            "broker.password must be printable ASCII, with no space, quote, backslash or $",
+        ),
+    ]
+    return [message for ok, message in checks if not ok]
+
+
 def validate(cfg: NodeConfig) -> list[str]:
-    """Return every problem with ``cfg`` as readable text; empty means valid.
+    """Return every problem that stops ``cfg`` being saved, as readable text; empty means valid.
 
     Messages name fields and rules, and never quote a value, so they are safe to log
-    or show on the portal whichever field is wrong. The WiFi SSID and PSK and the broker
-    password are not held to the clean-text rule, because spaces are legal in them.
+    or show on the portal whichever field is wrong. The WiFi SSID and PSK are not held to
+    the clean-text rule, because spaces are legal in them.
     """
+    broker = cfg.broker
+    problems = validate_saved(cfg)
+    if not _is_ipv4_literal(broker.host):
+        # This says more about the same field.
+        problems = [problem for problem in problems if problem != _BROKER_HOST_RULE]
+        problems.append(
+            "broker.host must be an IPv4 address and not a name: "
+            "the node's firewall admits only this address for SSH and Frigate"
+        )
+    problems += frigate_problems(cfg.node_id, cfg.covered_zones, broker.username, broker.password)
+    return problems
+
+
+def validate_saved(cfg: NodeConfig) -> list[str]:
+    """Return every problem that stops a saved ``cfg`` being used, under ``validate``'s terms."""
     broker, outbox, frigate = cfg.broker, cfg.outbox, cfg.frigate
     checks = [
         (
             _matches(_NODE_ID_RE, cfg.node_id),
             "node_id must be lowercase letters, digits and hyphens, with no leading hyphen",
         ),
-        (_is_host(broker.host), "broker.host must be a plain hostname or IP address"),
+        (_is_host(broker.host), _BROKER_HOST_RULE),
         (
             not _is_tailscale_address(broker.host),
             "broker.host must not be in Tailscale's 100.64.0.0/10: "
@@ -271,10 +341,7 @@ def validate(cfg: NodeConfig) -> list[str]:
         ),
         *_wifi_checks(cfg.wifi_ssid, cfg.wifi_psk),
         (_is_host_port(cfg.mediamtx_address), "mediamtx_address must be host:port"),
-        (
-            not cfg.vpn_requested or _is_clean_text(cfg.tailscale_auth_key),
-            "tailscale_auth_key is required when the VPN is requested, with no stray spaces",
-        ),
+        (isinstance(cfg.camera_upside_down, bool), "camera_upside_down must be true or false"),
     ]
     return [message for ok, message in checks if not ok]
 
@@ -282,6 +349,20 @@ def validate(cfg: NodeConfig) -> list[str]:
 def effective_ntp_server(cfg: NodeConfig) -> str:
     """The time server this node uses: the one given, or else the broker host."""
     return cfg.ntp_server or cfg.broker.host
+
+
+def render_central_hosts(broker_host: str) -> str:
+    """The nftables file behind ``ip saddr @central_hosts``, admitting the central node.
+
+    Included inside the ``black_relay`` table, and only ever given a validated address.
+    """
+    return (
+        "# Written by camera-provision on each save. Included by /etc/nftables.conf.\n"
+        "set central_hosts {\n"
+        "    type ipv4_addr\n"
+        f"    elements = {{ {broker_host} }}\n"
+        "}\n"
+    )
 
 
 def _bridge_mapping(cfg: NodeConfig) -> dict[str, Any]:

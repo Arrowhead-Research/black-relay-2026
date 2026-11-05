@@ -6,10 +6,12 @@ import json
 import logging
 import os
 import stat
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from cameraprovision import store as store_module
 from cameraprovision.config import BrokerConfig, FrigateConfig, NodeConfig, effective_ntp_server
@@ -17,7 +19,6 @@ from cameraprovision.store import NodeStore, Paths
 
 WIFI_PSK = "w1fi-s3cret-Psk"
 BROKER_PASSWORD = "br0ker-s3cret-Pw"
-TAILSCALE_KEY = "tskey-auth-s3cret"
 
 
 def config(**overrides: Any) -> NodeConfig:
@@ -26,8 +27,6 @@ def config(**overrides: Any) -> NodeConfig:
         "hostname": "edge-7",
         "wifi_ssid": "Site WiFi; 2.4",
         "wifi_psk": WIFI_PSK,
-        "tailscale_auth_key": TAILSCALE_KEY,
-        "vpn_requested": True,
         "mediamtx_address": "10.0.0.2:8554",
         "covered_zones": ["perimeter-north", "driveway"],
         "broker": BrokerConfig(
@@ -51,6 +50,7 @@ def paths(tmp_path: Path) -> Paths:
         nm_connections_dir=tmp_path / "etc/NetworkManager/system-connections",
         state_dir=tmp_path / "var/lib/camera-provision",
         ntp_dropin=tmp_path / "etc/systemd/timesyncd.conf.d/black-relay.conf",
+        central_hosts=tmp_path / "black-relay" / "central-hosts.nft",
     )
 
 
@@ -65,6 +65,7 @@ def snapshot(paths: Paths) -> dict[str, bytes]:
         paths.nm_connections_dir,
         paths.state_dir,
         paths.ntp_dropin.parent,
+        paths.central_hosts.parent,
     }
     found: dict[str, bytes] = {}
     for root in roots:
@@ -96,10 +97,10 @@ def test_save_writes_every_file_with_the_right_mode(store: NodeStore, paths: Pat
     store.save(config())
 
     assert paths.nm_keyfile == paths.nm_connections_dir / "black-relay-uplink.nmconnection"
-    for path in (paths.bridge_config, paths.nm_keyfile, paths.node_file, paths.tailscale_key):
+    for path in (paths.bridge_config, paths.nm_keyfile, paths.node_file):
         assert stat.S_IMODE(path.stat().st_mode) == 0o600, path
     assert stat.S_IMODE(paths.mediamtx_env.stat().st_mode) == 0o644
-    assert paths.tailscale_key.read_text() == TAILSCALE_KEY
+    assert stat.S_IMODE(paths.central_hosts.stat().st_mode) == 0o644
     assert paths.mediamtx_env.read_text() == "MEDIAMTX_ADDRESS=10.0.0.2:8554\n"
 
 
@@ -113,7 +114,7 @@ def test_save_leaves_no_working_files(store: NodeStore, paths: Paths) -> None:
         "mediamtx.env",
         "black-relay-uplink.nmconnection",
         "node.json",
-        "tailscale.key",
+        "central-hosts.nft",
         "black-relay.conf",
     }
 
@@ -133,8 +134,7 @@ def test_load_round_trips_everything_but_the_psk(store: NodeStore) -> None:
     assert saved.mediamtx_address == "10.0.0.2:8554"
     assert saved.frigate.base_url == "http://cam-01.local:5000"
     assert saved.frigate.camera == "cam-01"
-    assert saved.vpn_requested is True
-    assert saved.tailscale_auth_key == TAILSCALE_KEY
+    assert saved.camera_upside_down is False
 
 
 def test_load_round_trips_an_anonymous_broker(store: NodeStore) -> None:
@@ -157,35 +157,6 @@ def test_the_wifi_psk_is_only_in_the_keyfile(store: NodeStore, paths: Paths) -> 
     holders = [name for name, data in snapshot(paths).items() if WIFI_PSK.encode() in data]
 
     assert holders == [str(paths.nm_keyfile)]
-
-
-def test_the_tailscale_key_is_only_in_its_file(store: NodeStore, paths: Paths) -> None:
-    store.save(config())
-
-    holders = [name for name, data in snapshot(paths).items() if TAILSCALE_KEY.encode() in data]
-
-    assert holders == [str(paths.tailscale_key)]
-
-
-def test_after_the_key_is_deleted_the_config_stays_valid_and_owes_no_login(
-    store: NodeStore, paths: Paths
-) -> None:
-    store.save(config())
-
-    store.delete_tailscale_key()
-
-    saved = store.load()
-    assert saved is not None
-    assert saved.vpn_requested is False
-    assert not paths.tailscale_key.exists()
-
-
-def test_a_config_without_vpn_removes_a_pending_key(store: NodeStore, paths: Paths) -> None:
-    store.save(config())
-
-    store.save(config(vpn_requested=False, tailscale_auth_key=""))
-
-    assert not paths.tailscale_key.exists()
 
 
 @pytest.mark.parametrize(
@@ -265,10 +236,10 @@ def test_validation_runs_before_the_keyfile_is_rendered(
 
 def test_validation_error_does_not_quote_secrets(store: NodeStore) -> None:
     with pytest.raises(ValueError) as raised:
-        store.save(config(wifi_psk="short", node_id="BAD", tailscale_auth_key=" " + TAILSCALE_KEY))
+        store.save(config(wifi_psk="short", node_id="BAD"))
 
     assert "short" not in str(raised.value)
-    assert TAILSCALE_KEY not in str(raised.value)
+    assert "short" not in str(raised.value)
 
 
 def test_keyfile_is_rendered_with_escaping(store: NodeStore, paths: Paths) -> None:
@@ -328,9 +299,9 @@ def test_failed_save_restores_a_key_it_was_removing(
     fail_nth_replace(monkeypatch, 3, OSError("I/O error"))
 
     with pytest.raises(OSError):
-        store.save(config(vpn_requested=False, tailscale_auth_key=""))
+        store.save(config(broker=replace(config().broker, host="10.0.0.3")))
 
-    assert paths.tailscale_key.read_text() == TAILSCALE_KEY
+    assert "10.0.0.2" in paths.central_hosts.read_text()
 
 
 @pytest.mark.parametrize("step", COMMIT_STEPS)
@@ -409,7 +380,7 @@ def test_recover_removes_stale_temp_files(store: NodeStore, paths: Paths) -> Non
         paths.bridge_config.with_name(".bridge.yaml.abc.tmp"),
         paths.bridge_config.with_name("..bridge.yaml.staged.tmp.abc.tmp"),
         paths.nm_keyfile.with_name(f".{paths.nm_keyfile.name}.abc.tmp"),
-        paths.tailscale_key.with_name(".tailscale.key.abc.tmp"),
+        paths.central_hosts.with_name(".central-hosts.nft.abc.tmp"),
         paths.state_file.with_name(".state.json.abc.tmp"),
     ]
     for path in stale:
@@ -509,9 +480,9 @@ def test_save_wifi_changes_only_the_keyfile_and_the_saved_ssid(
     store: NodeStore, paths: Paths
 ) -> None:
     store.save(config(hostname="kept-name"))
-    bridge, key, mediamtx = (
+    bridge, central, mediamtx = (
         paths.bridge_config.read_bytes(),
-        paths.tailscale_key.read_bytes(),
+        paths.central_hosts.read_bytes(),
         paths.mediamtx_env.read_bytes(),
     )
 
@@ -523,21 +494,11 @@ def test_save_wifi_changes_only_the_keyfile_and_the_saved_ssid(
     assert stat.S_IMODE(paths.nm_keyfile.stat().st_mode) == 0o600
     assert stat.S_IMODE(paths.node_file.stat().st_mode) == 0o600
     assert paths.bridge_config.read_bytes() == bridge
-    assert paths.tailscale_key.read_bytes() == key
+    assert paths.central_hosts.read_bytes() == central
     assert paths.mediamtx_env.read_bytes() == mediamtx
     saved = store.load()
     assert saved is not None and saved.wifi_ssid == "Fixed-WiFi"
     assert "new-wifi-psk" not in paths.node_file.read_text()
-
-
-def test_save_wifi_works_once_the_tailscale_key_is_gone(store: NodeStore, paths: Paths) -> None:
-    store.save(config())
-    store.delete_tailscale_key()
-
-    store.save_wifi("Fixed-WiFi", "new-wifi-psk")
-
-    assert "psk=new-wifi-psk" in paths.nm_keyfile.read_text()
-    assert not paths.tailscale_key.exists()
 
 
 def test_i4_save_wifi_works_with_the_bridge_config_missing(store: NodeStore, paths: Paths) -> None:
@@ -650,17 +611,6 @@ def test_c1_has_config_needs_only_the_keyfile_and_a_hostname(
 
     paths.node_file.write_text('{"wifi_ssid": "only"}')
     assert store.has_config() is False
-
-
-def test_c1_pending_login_ignores_a_damaged_bridge_config(store: NodeStore, paths: Paths) -> None:
-    store.save(config())
-    paths.bridge_config.unlink()
-
-    assert store.pending_login_hostname() == "edge-7"
-
-    store.delete_tailscale_key()
-
-    assert store.pending_login_hostname() is None
 
 
 @pytest.mark.parametrize(
@@ -1036,3 +986,181 @@ def test_a_config_saved_before_the_ntp_field_loads_as_following_the_broker(
     saved = store.load()
 
     assert saved is not None and effective_ntp_server(saved) == "10.0.0.2"
+
+
+# --- central-only access -----------------------------------------------------------
+
+
+def test_save_writes_central_hosts_nft_atomically_with_the_config(
+    store: NodeStore, paths: Paths
+) -> None:
+    store.save(config())
+
+    assert paths.central_hosts in paths.targets()
+    assert "elements = { 10.0.0.2 }" in paths.central_hosts.read_text()
+
+    store.save(config(broker=replace(config().broker, host="10.0.0.9")))
+
+    assert "elements = { 10.0.0.9 }" in paths.central_hosts.read_text()
+    assert yaml.safe_load(paths.bridge_config.read_text())["broker"]["host"] == "10.0.0.9"
+
+
+def test_a_failed_commit_keeps_the_old_firewall_set_with_the_old_config(
+    store: NodeStore, paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.save(config())
+    before = snapshot(paths)
+    fail_nth_replace(monkeypatch, 4, OSError("I/O error"))
+
+    with pytest.raises(OSError):
+        store.save(config(broker=replace(config().broker, host="10.0.0.9")))
+
+    assert snapshot(paths) == before
+
+
+def test_a_power_cut_mid_commit_finishes_the_firewall_set_too(
+    store: NodeStore, paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.save(config())
+    fail_nth_replace(monkeypatch, 4, SimulatedPowerCut())
+    with pytest.raises(SimulatedPowerCut):
+        store.save(config(broker=replace(config().broker, host="10.0.0.9")))
+    monkeypatch.undo()
+
+    store.recover()
+
+    assert "elements = { 10.0.0.9 }" in paths.central_hosts.read_text()
+    assert yaml.safe_load(paths.bridge_config.read_text())["broker"]["host"] == "10.0.0.9"
+
+
+def test_save_wifi_leaves_the_firewall_set_alone(store: NodeStore, paths: Paths) -> None:
+    store.save(config())
+    before = paths.central_hosts.read_bytes()
+
+    store.save_wifi("Fixed-WiFi", "new-wifi-psk")
+
+    assert paths.central_hosts.read_bytes() == before
+
+
+# --- the picture flip --------------------------------------------------------------
+
+
+def test_the_upside_down_box_is_saved_where_camera_link_reads_it(
+    store: NodeStore, paths: Paths
+) -> None:
+    store.save(config(camera_upside_down=True))
+
+    assert json.loads(paths.node_file.read_text())["camera_upside_down"] is True
+    saved = store.load()
+    assert saved is not None and saved.camera_upside_down is True
+
+
+def test_a_wifi_repair_keeps_the_upside_down_box(store: NodeStore, paths: Paths) -> None:
+    store.save(config(camera_upside_down=True))
+
+    store.save_wifi("Fixed-WiFi", "new-wifi-psk")
+
+    assert json.loads(paths.node_file.read_text())["camera_upside_down"] is True
+
+
+# --- configs saved by an older image ----------------------------------------------
+
+
+def old_image_files(store: NodeStore, paths: Paths) -> None:
+    """A node as the Tailscale-era store left it."""
+    store.save(config())
+    node = json.loads(paths.node_file.read_text())
+    del node["camera_upside_down"]
+    node["vpn_requested"] = True
+    paths.node_file.write_text(json.dumps(node))
+
+
+def test_an_old_config_with_tailscale_keys_still_loads(store: NodeStore, paths: Paths) -> None:
+    old_image_files(store, paths)
+
+    saved = store.load()
+
+    assert saved is not None
+    assert saved.node_id == "cam-01"
+    assert saved.camera_upside_down is False
+    assert not hasattr(saved, "vpn_requested")
+
+
+def test_an_old_config_that_no_longer_passes_a_save_still_loads(
+    store: NodeStore, paths: Paths
+) -> None:
+    """The form must show it, and the node must not count as damaged, until someone saves."""
+    store.save(config())
+    bridge = yaml.safe_load(paths.bridge_config.read_text())
+    bridge["broker"]["host"] = "broker.lan"
+    bridge["broker"]["password"] = "pa$$ word"
+    bridge["covered_zones"] = ["front door"]
+    paths.bridge_config.write_text(yaml.safe_dump(bridge))
+
+    saved = store.load()
+
+    assert saved is not None and saved.broker.host == "broker.lan"
+    with pytest.raises(ValueError, match="broker.host"):
+        store.save(replace(saved, wifi_psk="a-real-psk-1"))
+
+
+def test_an_old_tailscale_key_is_deleted_on_load(store: NodeStore, paths: Paths) -> None:
+    old_image_files(store, paths)
+    key = paths.state_dir / "tailscale.key"
+    key.write_text("tskey-auth-s3cret")
+    copy = paths.state_dir / ".tailscale.key.prev.tmp"
+    copy.write_text("tskey-auth-s3cret")
+
+    assert store.load() is not None
+
+    assert not key.exists()
+    assert not copy.exists()
+
+
+def test_an_old_tailscale_key_is_deleted_even_with_no_usable_config(
+    store: NodeStore, paths: Paths
+) -> None:
+    paths.state_dir.mkdir(parents=True, exist_ok=True)
+    key = paths.state_dir / "tailscale.key"
+    key.write_text("tskey-auth-s3cret")
+
+    assert store.load() is None
+
+    assert not key.exists()
+
+
+def test_a_key_that_cannot_be_deleted_does_not_stop_the_load(
+    store: NodeStore, paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_image_files(store, paths)
+    key = paths.state_dir / "tailscale.key"
+    key.write_text("tskey-auth-s3cret")
+    real_unlink = Path.unlink
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self == key:
+            raise PermissionError("nope")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+    assert store.load() is not None
+
+
+def test_a_wifi_repair_drops_the_old_vpn_key_from_the_node_file(
+    store: NodeStore, paths: Paths
+) -> None:
+    old_image_files(store, paths)
+
+    store.save_wifi("Fixed-WiFi", "new-wifi-psk")
+
+    assert "vpn_requested" not in json.loads(paths.node_file.read_text())
+
+
+def test_a_save_writes_no_tailscale_key_at_all(store: NodeStore, paths: Paths) -> None:
+    old_image_files(store, paths)
+
+    store.save(config())
+
+    assert "vpn_requested" not in json.loads(paths.node_file.read_text())
+    assert not (paths.state_dir / "tailscale.key").exists()

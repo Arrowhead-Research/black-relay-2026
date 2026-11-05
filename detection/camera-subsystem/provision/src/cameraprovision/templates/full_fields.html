@@ -8,16 +8,17 @@
 </label>
 <label>Covered zones
 <input type="text" name="covered_zones" value="$covered_zones" required placeholder="perimeter-north, driveway" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
-<small>Separate zones with commas.</small>
+<small>Separate zones with commas. Each needs at least two letters, digits, hyphens or underscores.</small>
 </label>
 <label>Frigate address
 <input type="text" name="frigate_base_url" value="$frigate_base_url" required placeholder="https://cam-01.local:8971" inputmode="url" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
 </label>
+<label><input type="checkbox" name="camera_upside_down" value="on" $upside_down_checked> Camera is mounted upside down</label>
 </fieldset>
 <fieldset>
 <legend>Central node</legend>
 <label>Broker address
-<input type="text" name="broker_host" value="$broker_host" required placeholder="10.0.0.2" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+<input type="text" name="broker_host" value="$broker_host" required placeholder="10.0.0.2" inputmode="decimal" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
 </label>
 <label>Broker port
 <input type="text" name="broker_port" value="$broker_port" required inputmode="numeric" autocomplete="off">
@@ -27,7 +28,7 @@
 </label>
 <label>Broker password
 <input type="password" name="broker_password" autocomplete="off">
-<small>Never filled in. Type it again each time you save, unless the broker takes none.</small>
+<small>Never filled in. Type it again each time you save, unless the broker takes none. No spaces, quotes, backslashes or $$.</small>
 </label>
 <label><input type="checkbox" name="broker_anonymous" value="on" $anonymous_checked> Broker takes no username or password</label>
 <label><input type="checkbox" name="broker_tls" value="on" $tls_checked> Use TLS <small>Usually port 8883; the certificate must chain to a system CA.</small></label>
@@ -37,13 +38,5 @@
 </label>
 <label>MediaMTX address
 <input type="text" name="mediamtx_address" value="$mediamtx_address" required placeholder="10.0.0.2:8554" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
-</label>
-</fieldset>
-<fieldset>
-<legend>Remote access</legend>
-<label><input type="checkbox" name="vpn_requested" value="on" $vpn_checked> Join Tailscale</label>
-<label>Tailscale auth key
-<input type="password" name="tailscale_auth_key" autocomplete="off">
-<small>Never filled in. Needed only when joining Tailscale. Unticking the box does not log this node out.</small>
 </label>
 </fieldset>

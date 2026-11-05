@@ -5,7 +5,7 @@ nothing; ``make_app`` adds HTTP around them, with the scanner, the ``apply`` sid
 and the AP-window hook injected. Task 6 owns what those three do.
 
 ``PortalMode`` follows the provisioning state. ``AP_UP`` serves ``FULL``. ``FALLBACK_AP``
-serves ``WIFI_ONLY``, because changing a broker, VPN or identity takes the physical button.
+serves ``WIFI_ONLY``, because changing a broker or an identity takes the physical button.
 
 Two rules run through this module. Every value reaching a page is escaped, because
 SSIDs are chosen by whoever is broadcasting nearby. And no secret is ever echoed or
@@ -87,7 +87,7 @@ _FULL_ONLY_REDISPLAYED_FIELDS = (
 )
 
 _APPLY_FAILED_ERROR = "The settings could not be saved. Check them and try again."
-_REENTER_NOTE = "Passwords and keys are never shown back, so enter them again."
+_REENTER_NOTE = "Passwords are never shown back, so enter them again."
 
 _WIFI_ONLY_INTRO = (
     "<p>Only the WiFi settings can be changed here. "
@@ -106,16 +106,11 @@ def identity_values(serial: str) -> dict[str, str]:
         "hostname": name,
         "frigate_base_url": f"https://{name}.local:8971",
         "broker_port": str(BrokerConfig.port),
-        "vpn_requested": "on",
     }
 
 
 def saved_values(cfg: NodeConfig) -> dict[str, str]:
-    """What a re-provisioning form starts with: the saved config, leaving out every secret.
-
-    The VPN box is ticked only while a login is owed. A node already logged in keeps that
-    login with the box unticked, and ticking it asks for a new key.
-    """
+    """What a re-provisioning form starts with: the saved config, leaving out every secret."""
     broker = cfg.broker
     values = {
         "wifi_ssid": cfg.wifi_ssid,
@@ -132,7 +127,7 @@ def saved_values(cfg: NodeConfig) -> dict[str, str]:
     boxes = {
         "broker_tls": broker.tls,
         "broker_anonymous": cfg.broker_anonymous,
-        "vpn_requested": cfg.vpn_requested,
+        "camera_upside_down": cfg.camera_upside_down,
     }
     return values | {name: "on" for name, ticked in boxes.items() if ticked}
 
@@ -189,17 +184,12 @@ def _errors_html(errors: Sequence[str]) -> str:
 
 def _full_fields_html(values: Mapping[str, str] | None) -> str:
     """The fields only ``PortalMode.FULL`` offers, escaped and ready to insert."""
-    if values is None:
-        shown: Mapping[str, str] = {"broker_port": str(BrokerConfig.port)}
-        vpn_ticked = True
-    else:
-        shown = values
-        vpn_ticked = "vpn_requested" in values
-    # Absent from a first render's values too, so both boxes start unticked.
+    shown = {"broker_port": str(BrokerConfig.port)} if values is None else values
+    # Absent from a first render's values too, so every box starts unticked.
     boxes = values or {}
     return _FULL_FIELDS_TEMPLATE.substitute(
         {name: _escape(shown.get(name, "")) for name in _FULL_ONLY_REDISPLAYED_FIELDS},
-        vpn_checked="checked" if vpn_ticked else "",
+        upside_down_checked="checked" if "camera_upside_down" in boxes else "",
         tls_checked="checked" if "broker_tls" in boxes else "",
         anonymous_checked="checked" if "broker_anonymous" in boxes else "",
     )
@@ -278,15 +268,12 @@ def _build_config(form: Mapping[str, str], previous_broker: str | None = None) -
     def trimmed(name: str) -> str:
         return raw(name).strip()
 
-    vpn_requested = "vpn_requested" in form
     return NodeConfig(
         node_id=raw("node_id"),
         hostname=raw("hostname"),
         wifi_ssid=raw("wifi_ssid"),
         wifi_psk=raw("wifi_psk"),
-        # A key for a VPN nobody asked for must not end up saved on disk.
-        tailscale_auth_key=trimmed("tailscale_auth_key") if vpn_requested else "",
-        vpn_requested=vpn_requested,
+        camera_upside_down="camera_upside_down" in form,
         mediamtx_address=trimmed("mediamtx_address"),
         ntp_server=_ntp_server(form, previous_broker),
         covered_zones=[z.strip() for z in raw("covered_zones").split(",") if z.strip()],
@@ -573,7 +560,7 @@ def make_server(app: WSGIApplication, ip: str, port: int, interface: str = "wlan
     """Return a threaded wsgiref server for ``app``, listening and ready for ``serve_forever``.
 
     It accepts connections only on ``ip``, and only arriving through ``interface``, so
-    the portal stays off ``eth0`` and ``tailscale0``. Raises ``ValueError`` for anything
+    the portal stays off ``eth0``. Raises ``ValueError`` for anything
     but one specific IP address or for an empty interface, and ``OSError`` if the
     interface does not exist.
     """

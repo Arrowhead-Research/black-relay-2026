@@ -26,7 +26,9 @@ from cameraprovision.config import (
     NodeConfig,
     OutboxConfig,
     effective_ntp_server,
+    render_central_hosts,
     validate,
+    validate_saved,
     validate_wifi,
     write_bridge_config,
 )
@@ -35,8 +37,7 @@ EXAMPLE_YAML = Path(__file__).parents[2] / "bridge" / "config" / "bridge.example
 
 BROKER_PASSWORD = "br0ker-s3cret-Pw"
 WIFI_PSK = "w1fi-s3cret-Psk"
-TAILSCALE_KEY = "tskey-auth-s3cret"
-SECRETS = (BROKER_PASSWORD, WIFI_PSK, TAILSCALE_KEY)
+SECRETS = (BROKER_PASSWORD, WIFI_PSK)
 
 # Distinct from every bridge value, so a raw-text search can only match a leak.
 HOSTNAME = "edge-host-7"
@@ -44,8 +45,7 @@ WIFI_SSID = "Site-WiFi-XYZ"
 MEDIAMTX_ADDRESS = "10.9.9.9:8554"
 PROVISION_ONLY_KEYS = (
     "hostname",
-    "tailscale_auth_key",
-    "vpn_requested",
+    "camera_upside_down",
     "broker_anonymous",
     "wifi_ssid",
     "wifi_psk",
@@ -58,7 +58,6 @@ def make_config(**overrides: Any) -> NodeConfig:
         "hostname": HOSTNAME,
         "wifi_ssid": WIFI_SSID,
         "wifi_psk": WIFI_PSK,
-        "tailscale_auth_key": TAILSCALE_KEY,
         "mediamtx_address": MEDIAMTX_ADDRESS,
         "covered_zones": ["perimeter-north", "driveway"],
         "broker": BrokerConfig(host="10.0.0.2", username="camera-cam-01", password=BROKER_PASSWORD),
@@ -195,9 +194,6 @@ def test_bad_node_id_is_rejected(node_id: Any) -> None:
         ("wifi_psk", {"wifi_psk": "short"}),
         ("wifi_psk", {"wifi_psk": "p" * 64}),  # 64 characters must be raw hex
         ("wifi_psk", {"wifi_psk": "line1234\nline2"}),
-        ("tailscale_auth_key", {"tailscale_auth_key": ""}),
-        ("tailscale_auth_key", {"tailscale_auth_key": "   "}),
-        ("tailscale_auth_key", {"tailscale_auth_key": TAILSCALE_KEY + "\n"}),
     ],
 )
 def test_bad_field_is_rejected_by_name(field: str, overrides: dict) -> None:
@@ -217,13 +213,9 @@ def test_bad_field_is_rejected_by_name(field: str, overrides: dict) -> None:
         {"wifi_psk": "p" * 63},
         {"wifi_psk": "a1" * 32},
         {"wifi_psk": " sp@ce #:%;\\'\""},
-        {"vpn_requested": False, "tailscale_auth_key": ""},
-        {"broker": broker(host="broker.site.local")},
-        {"broker": broker(host="broker")},
-        {"broker": broker(host="fd00::2")},
-        {"broker": broker(password=" pw with spaces ")},
+        {"camera_upside_down": True},
         {"wifi_ssid": " Cafe WiFi "},
-        {"covered_zones": ["north gate"]},
+        {"covered_zones": ["north-gate"]},
         {"frigate": frigate(camera="front-gate")},
     ],
 )
@@ -345,7 +337,7 @@ def test_provision_only_fields_never_reach_the_bridge_yaml(tmp_path: Path) -> No
 
     for key in PROVISION_ONLY_KEYS:
         assert key not in text
-    for value in (HOSTNAME, WIFI_SSID, WIFI_PSK, TAILSCALE_KEY):
+    for value in (HOSTNAME, WIFI_SSID, WIFI_PSK):
         assert value not in text
 
 
@@ -361,7 +353,7 @@ def test_yaml_lookalike_node_id_stays_a_string_for_the_bridge(
     bridge_cli.make_bridge(loaded, central_client=Mock(), local_client=Mock())
 
 
-@pytest.mark.parametrize("password", ["p@ss: #'\"{}[]", "%(x)s\\n", "pässwörd", "1234", "null"])
+@pytest.mark.parametrize("password", ["p@ss:#{}[]", "%(x)s", "-dash", "1234", "null"])
 def test_awkward_broker_password_round_trips(tmp_path: Path, password: str) -> None:
     path = written(tmp_path, make_config(broker=broker(password=password)))
     assert bridge_cli.load_config(str(path))["broker"]["password"] == password
@@ -372,7 +364,7 @@ def test_every_key_writes_its_own_value(tmp_path: Path) -> None:
     cfg = make_config(
         node_id="cam-77",
         broker=BrokerConfig(
-            host="broker.site.local", port=8883, username="u-77", password="p-77", tls=True
+            host="192.168.77.5", port=8883, username="u-77", password="p-77", tls=True
         ),
         covered_zones=["zone-a", "zone-b"],
         cue_window_s=7.5,
@@ -391,7 +383,7 @@ def test_every_key_writes_its_own_value(tmp_path: Path) -> None:
     assert yaml.safe_load(written(tmp_path, cfg).read_text(encoding="utf-8")) == {
         "node_id": "cam-77",
         "broker": {
-            "host": "broker.site.local",
+            "host": "192.168.77.5",
             "port": 8883,
             "username": "u-77",
             "password": "p-77",
@@ -470,14 +462,6 @@ def test_partial_credentials_are_always_rejected(
 def test_anonymous_broker_with_full_credentials_is_contradictory() -> None:
     errors = validate(make_config(broker_anonymous=True))
     assert any(e.startswith("broker.username") for e in errors)
-
-
-@pytest.mark.parametrize("password", ["a\x85b", "a\u2028b", "a\ufeffb", "tab\tinside", "新しい"])
-def test_unicode_breaks_and_controls_in_a_password_round_trip(
-    tmp_path: Path, password: str
-) -> None:
-    path = written(tmp_path, make_config(broker=broker(password=password)))
-    assert bridge_cli.load_config(str(path))["broker"]["password"] == password
 
 
 # --- atomic 0600 write ----------------------------------------------------------
@@ -599,7 +583,7 @@ def invalid_with_secret_like_values() -> list[NodeConfig]:
 
 @pytest.mark.parametrize("cfg", invalid_with_secret_like_values())
 def test_validation_errors_never_carry_secret_values(cfg: NodeConfig, tmp_path: Path) -> None:
-    secrets = (cfg.wifi_psk, cfg.broker.password, cfg.tailscale_auth_key)
+    secrets = (cfg.wifi_psk, cfg.broker.password)
 
     errors = validate(cfg)
     assert errors
@@ -656,7 +640,7 @@ def test_unserializable_value_error_never_carries_secret_values(tmp_path: Path) 
 
 @pytest.mark.parametrize(
     "host",
-    ["100.64.0.0", "100.64.0.1", "100.100.100.100", "100.127.255.255", "::ffff:100.64.0.1"],
+    ["100.64.0.0", "100.64.0.1", "100.100.100.100", "100.127.255.255"],
 )
 def test_m4_a_tailscale_range_broker_is_rejected_with_a_clear_error(host: str) -> None:
     errors = validate(make_config(broker=broker(host=host)))
@@ -668,7 +652,7 @@ def test_m4_a_tailscale_range_broker_is_rejected_with_a_clear_error(host: str) -
 
 
 @pytest.mark.parametrize(
-    "host", ["100.63.255.255", "100.128.0.0", "10.0.0.2", "fd00::2", "::ffff:10.0.0.2", "broker.lan"]
+    "host", ["100.63.255.255", "100.128.0.0", "10.0.0.2"]
 )
 def test_m4_addresses_outside_the_tailscale_range_are_accepted(host: str) -> None:
     assert validate(make_config(broker=broker(host=host))) == []
@@ -724,3 +708,78 @@ def test_scoped_ipv6_is_not_a_plain_host(value: str) -> None:
 
     assert not _is_host(value)
     assert not _is_host_port(f"[{value}]:8554")
+
+
+# --- central-only access: the broker address is what the firewall admits -----------
+
+
+@pytest.mark.parametrize(
+    "host", ["broker", "broker.site.local", "fd00::2", "::ffff:10.0.0.2", "10.0.0.2.", "10.0.0.2/24"]
+)
+def test_a_broker_address_the_firewall_set_cannot_hold_is_rejected(host: str) -> None:
+    errors = validate(make_config(broker=broker(host=host)))
+
+    assert any("broker.host" in error and "IPv4" in error for error in errors)
+
+
+def test_the_mapped_form_of_a_tailscale_address_stays_rejected() -> None:
+    errors = validate(make_config(broker=broker(host="::ffff:100.64.0.1")))
+
+    assert any("100.64.0.0/10" in error for error in errors)
+
+
+def test_the_central_hosts_file_names_the_broker() -> None:
+    text = render_central_hosts("10.0.0.2")
+
+    assert "set central_hosts {" in text
+    assert "type ipv4_addr" in text
+    assert "elements = { 10.0.0.2 }" in text
+
+
+# --- values camera-link's render would refuse --------------------------------------
+
+
+@pytest.mark.parametrize(
+    "zones",
+    [["x"], ["front door"], ["a.b"], ["drive/way"], ["caf\u00e9"], ["ok-zone", "$bad"]],
+)
+def test_a_zone_name_render_would_refuse_is_rejected(zones: list[str]) -> None:
+    errors = validate(make_config(covered_zones=zones))
+
+    assert len(errors) == 1
+    assert "covered_zones" in errors[0]
+
+
+def test_a_zone_named_like_the_camera_is_rejected() -> None:
+    errors = validate(make_config(node_id="cam-01", covered_zones=["driveway", "cam-01"]))
+
+    assert len(errors) == 1
+    assert "covered_zones" in errors[0] and "node_id" in errors[0]
+
+
+@pytest.mark.parametrize("username", ["user:name", "user name", "us/er", "us$er", "caf\u00e9"])
+def test_a_relay_user_render_would_refuse_is_rejected(username: str) -> None:
+    errors = validate(make_config(broker=broker(username=username)))
+
+    assert any("broker.username" in error for error in errors)
+    assert not any(username in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "password", ["with space", "pa$$", "back\\slash", 'qu"ote', "qu'ote", "caf\u00e9", "tab\tbed"]
+)
+def test_a_relay_password_write_env_would_refuse_is_rejected(password: str) -> None:
+    errors = validate(make_config(broker=broker(password=password)))
+
+    assert any("broker.password" in error for error in errors)
+    assert not any(password in error for error in errors)
+
+
+def test_validate_saved_keeps_the_rules_of_older_configs_only() -> None:
+    old = make_config(
+        broker=broker(host="broker.lan", password="pa$$ word", username="us:er"),
+        covered_zones=["front door"],
+    )
+
+    assert validate_saved(old) == []
+    assert validate(old) != []

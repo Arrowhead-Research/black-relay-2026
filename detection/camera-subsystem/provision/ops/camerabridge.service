@@ -5,8 +5,8 @@ Description=Black Relay camera bridge (Frigate events to the central broker)
 Documentation=file:/opt/black-relay/ops/README.md
 # Ordering only, and no network-online.target: detect and record continue with WiFi down,
 # so the bridge must too, queueing durable events in its outbox. It retries both brokers.
-# No tailscaled or camera-provision dependency: fusion traffic uses the site LAN, and
-# Tailscale and provisioning outages are separate from it.
+# No camera-provision dependency: fusion traffic uses the site LAN, and provisioning
+# outages are separate from it.
 After=NetworkManager.service mosquitto.service
 Wants=mosquitto.service
 # Skipped on a blank node. camerabridge-config.path starts it once the portal saves.

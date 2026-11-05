@@ -1,13 +1,11 @@
-"""Builders for the WiFi client profile, the Tailscale command, and the AP passphrase.
+"""Builders for the WiFi client profile and the AP passphrase.
 
-Pure: nothing here touches the system. The adapters that write the keyfile and run
-the command are Task 6's, and they must treat the returned profile and keyfile text
-as secret because they hold the WiFi PSK.
+Pure: nothing here touches the system. The adapter that writes the keyfile must treat
+the returned profile and keyfile text as secret because they hold the WiFi PSK.
 """
 
 from __future__ import annotations
 
-import os
 import secrets
 import string
 import uuid
@@ -17,7 +15,6 @@ __all__ = [
     "generate_ap_passphrase",
     "nm_wifi_profile",
     "render_nm_keyfile",
-    "tailscale_up_args",
 ]
 
 # Fixed, so re-provisioning replaces the profile instead of adding one per site.
@@ -89,25 +86,6 @@ def render_nm_keyfile(profile: dict[str, dict[str, str]]) -> str:
             lines.append(f"{key}={encoded}")
         blocks.append("\n".join(lines) + "\n")
     return "\n".join(blocks)
-
-
-def tailscale_up_args(
-    auth_key_file: str | os.PathLike[str], hostname: str, *, force_reauth: bool = False
-) -> list[str]:
-    """Return the ``tailscale up`` argv, naming the key by file so it stays out of argv.
-
-    ``--accept-dns=false`` keeps the tailnet's DNS away from the node's resolver, because
-    fusion must not depend on Tailscale. ``force_reauth`` makes a node that is already
-    logged in take a new key.
-    """
-    return [
-        "tailscale",
-        "up",
-        f"--auth-key=file:{os.fspath(auth_key_file)}",
-        f"--hostname={hostname}",
-        "--accept-dns=false",
-        *(["--force-reauth"] if force_reauth else []),
-    ]
 
 
 def generate_ap_passphrase() -> str:

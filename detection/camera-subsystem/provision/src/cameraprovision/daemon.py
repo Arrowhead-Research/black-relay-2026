@@ -71,7 +71,7 @@ class System(Protocol):
     def join_uplink(self) -> None: ...
     def wifi_associated(self) -> bool: ...
     def ipv4_lease(self) -> bool: ...
-    def tailscale_up(self, key_file: Path, hostname: str) -> None: ...
+    def reload_firewall(self) -> None: ...
     def chown_to_service_user(self, path: Path) -> None: ...
 
 
@@ -91,8 +91,7 @@ class Settings:
     rejoin_s: float = 180.0
     hostname_retry_s: float = 30.0
     timesync_retry_s: float = 30.0
-    tailscale_backoff_s: float = 30.0
-    tailscale_backoff_max_s: float = 3600.0
+    firewall_retry_s: float = 30.0
 
 
 @dataclass(eq=False)
@@ -162,6 +161,10 @@ class Provisioner:
         self._hostname_next = 0.0
         self._timesync_owed = False
         self._timesync_next = 0.0
+        # Owed at every start too: nftables loads first at boot, and settling an interrupted
+        # save can change the set after that.
+        self._firewall_owed = True
+        self._firewall_next = 0.0
         self._ap_check_next = 0.0
         self._rejoin_next = 0.0
         self._failures = 0
@@ -173,11 +176,6 @@ class Provisioner:
         # The AP may be left over from a daemon that crashed.
         self._ap_stop_owed = True
         self._join_issued = False
-
-        self._tailscale_settled = False
-        self._tailscale_logged_in = False
-        self._tailscale_next = 0.0
-        self._tailscale_delay = self.settings.tailscale_backoff_s
 
     @property
     def state(self) -> S:
@@ -287,11 +285,10 @@ class Provisioner:
         if new is S.JOINING:
             self._hostname_owed = self._timesync_owed = True
             self._hostname_next = self._timesync_next = now
+            self._firewall_owed = True
+            self._firewall_next = now
         if new is S.PROVISIONED:
             self._rejoin_next = now + self.settings.rejoin_s
-            self._tailscale_settled = False
-            self._tailscale_next = now
-            self._tailscale_delay = self.settings.tailscale_backoff_s
 
     def _poll(self) -> None:
         with self._gate:
@@ -375,6 +372,7 @@ class Provisioner:
     # --- making the system match the state ------------------------------------------
 
     def _reconcile(self) -> None:
+        self._reconcile_firewall()
         if self._state in _AP_STATES:
             self._reconcile_ap()
             return
@@ -392,7 +390,27 @@ class Provisioner:
             self._join_issued = True
         elif self._state is S.PROVISIONED:
             self._reconcile_rejoin()
-            self._reconcile_tailscale()
+
+    def _reconcile_firewall(self) -> None:
+        """Load the saved firewall set, in any state. A failure must not hold up the join.
+
+        The old set stays in force until this works, so the operator is told by the log, and
+        a console and the setup AP still reach the node.
+        """
+        now = self._clock()
+        if not self._firewall_owed or now < self._firewall_next:
+            return
+        try:
+            self._system.reload_firewall()
+        except Exception as exc:
+            logger.error(
+                "reloading the firewall failed, retrying in %g s: %s",
+                self.settings.firewall_retry_s,
+                type(exc).__name__,
+            )
+            self._firewall_next = now + self.settings.firewall_retry_s
+            return
+        self._firewall_owed = False
 
     def _reconcile_hostname(self) -> None:
         """Apply the hostname on entering JOINING. A failure must not hold up the join."""
@@ -567,43 +585,6 @@ class Provisioner:
         if session.thread is not None:
             session.thread.join(_THREAD_JOIN_S)
         logger.info("portal closed")
-
-    def _reconcile_tailscale(self) -> None:
-        now = self._clock()
-        if self._tailscale_settled or now < self._tailscale_next:
-            return
-        if not self._tailscale_logged_in:
-            hostname = self._store.pending_login_hostname()
-            if hostname is None:
-                self._tailscale_settled = True
-                return
-            try:
-                self._system.tailscale_up(self.paths.tailscale_key, hostname)
-            except Exception as exc:
-                logger.warning(
-                    "tailscale login failed, retrying in %g s: %s",
-                    self._tailscale_delay,
-                    type(exc).__name__,
-                )
-                self._tailscale_back_off(now)
-                return
-            self._tailscale_logged_in = True
-            self._tailscale_delay = self.settings.tailscale_backoff_s
-            logger.info("tailscale login succeeded")
-        try:
-            self._store.delete_tailscale_key()
-        except OSError as exc:
-            logger.error("deleting the used tailscale key failed: %s", type(exc).__name__)
-            self._tailscale_back_off(now)
-            return
-        self._tailscale_logged_in = False
-        self._tailscale_settled = True
-
-    def _tailscale_back_off(self, now: float) -> None:
-        self._tailscale_next = now + self._tailscale_delay
-        self._tailscale_delay = min(
-            self._tailscale_delay * 2, self.settings.tailscale_backoff_max_s
-        )
 
     # --- called from portal request threads -----------------------------------------
 

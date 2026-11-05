@@ -15,7 +15,6 @@ from cameraprovision.netprofile import (
     generate_ap_passphrase,
     nm_wifi_profile,
     render_nm_keyfile,
-    tailscale_up_args,
 )
 
 needs_nmcli = pytest.mark.skipif(
@@ -232,33 +231,6 @@ def test_every_setting_survives_networkmanagers_parser() -> None:
     assert parsed["ipv4"]["dhcp-hostname"] == "edge-7"
 
 
-# --- tailscale_up_args ----------------------------------------------------------
-
-
-def test_tailscale_args_are_exact() -> None:
-    assert tailscale_up_args("/run/camera/ts.key", "edge-7") == [
-        "tailscale",
-        "up",
-        "--auth-key=file:/run/camera/ts.key",
-        "--hostname=edge-7",
-        "--accept-dns=false",
-    ]
-
-
-def test_tailscale_args_accept_a_path_and_keep_spaces_in_one_argument() -> None:
-    args = tailscale_up_args(Path("/run/my camera/ts.key"), "edge-7")
-    assert "--auth-key=file:/run/my camera/ts.key" in args
-
-
-def test_key_contents_never_reach_argv(tmp_path: Path) -> None:
-    key_file = tmp_path / "ts.key"
-    key_file.write_text("tskey-auth-s3cret\n", encoding="utf-8")
-
-    args = tailscale_up_args(key_file, "edge-7")
-
-    assert "tskey-auth-s3cret" not in " ".join(args)
-
-
 # --- generate_ap_passphrase -----------------------------------------------------
 
 
@@ -309,8 +281,4 @@ def test_m5_profile_is_bound_to_the_interface() -> None:
         == "wlan7"
     )
 
-
-def test_m7_force_reauth_only_when_asked() -> None:
-    assert "--force-reauth" not in tailscale_up_args("/k", "h")
-    assert "--force-reauth" in tailscale_up_args("/k", "h", force_reauth=True)
 

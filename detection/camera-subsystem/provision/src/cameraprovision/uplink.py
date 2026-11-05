@@ -1,7 +1,7 @@
 """The L3 uplink check and the AP-fallback watchdog decision (DESIGN.md 7.4).
 
 Pure logic over an injected probe. Uplink deliberately excludes the broker,
-Tailscale, and the central node: an outage there must never reopen the AP.
+and the central node: an outage there must never reopen the AP.
 """
 
 from __future__ import annotations
