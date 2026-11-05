@@ -1,0 +1,61 @@
+# Black Relay camera-subsystem edge bridge — example configuration.
+#
+# Copy to a real path (e.g. /etc/camerabridge/bridge.yaml), fill in the broker
+# credentials, and run:   camerabridge run --config /etc/camerabridge/bridge.yaml
+# (equivalently: python -m camerabridge run --config <path>)
+#
+# This file contains NO real secrets — the placeholders below must be replaced at
+# onboarding (DESIGN.md 7.2). Keep the deployed copy readable only by the service
+# user.
+
+# This node's identity. Must match ^[a-z0-9][a-z0-9-]*$. In v0 camera_id == node_id
+# (one RLC-520A per node), so this is also the camera id on every detection.
+node_id: cam-01
+
+# Central fusion MQTT broker. Camera.* events, cue-acks and status are published
+# here; the Frigate events and RF cues are also consumed from here (v0 assumes
+# Frigate publishes to this same broker — DESIGN.md 4.2; a separate Frigate broker
+# is a documented follow-up).
+broker:
+  host: 10.0.0.2          # central node address on the site LAN (not the WAN)
+  port: 1883
+  username: camera-cam-01  # per-node broker credential set at onboarding
+  password: CHANGE-ME      # placeholder — replace with the real secret
+  tls: false               # set true (and provision CA/certs) for a TLS broker
+
+# Site zones THIS node's camera covers, drawn from the shared cross-subsystem zone
+# vocabulary (DESIGN.md 6). An inbound RF cue only correlates to a track when the
+# cue's zone is one of these.
+covered_zones:
+  - perimeter-north
+  - driveway
+
+# RF-cue correlation window (seconds, ±). A cue matches an open track in the same
+# covered zone whose last sighting is within this window (DESIGN.md 5.4).
+cue_window_s: 5.0
+
+# Durable on-disk outbox. Significant events (object_start/object_end, cue-acks,
+# status) are written here before publishing at QoS 1 and replayed across an
+# outage or restart; object_update is QoS 0 and never persisted (DESIGN.md 5.5).
+outbox:
+  path: /var/lib/camerabridge/outbox.jsonl
+  max_bytes: 67108864      # 64 MiB on-disk cap; oldest durable entries shed first
+  max_age_s: 604800        # 7 days; entries older than this are shed on overflow
+
+# Node status heartbeat cadence (seconds).
+status_interval_s: 30
+
+# Edge Frigate. `topic` is the Frigate events topic subscribed on the broker;
+# `base_url` is the node-local Frigate address used to MINT snapshot_url on each
+# detection (service-side — the parser leaves it null; DESIGN.md 5.6). base_url is
+# reached by clients over the site LAN / by remote ops over Tailscale, never the WAN.
+frigate:
+  topic: frigate/events
+  base_url: http://cam-01.local:5000
+  # Frigate's MQTT endpoint. v0 uses a single MQTT connection (the broker above),
+  # so configure Frigate to publish to that broker and keep these equal to it. A
+  # dedicated node-local Frigate broker (a second connection) is a follow-up, not
+  # v0 — these keys document the intended endpoint and are not yet dialed
+  # separately by the bridge.
+  mqtt_host: 10.0.0.2
+  mqtt_port: 1883
