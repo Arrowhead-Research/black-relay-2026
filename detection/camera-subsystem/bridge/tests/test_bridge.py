@@ -291,6 +291,74 @@ def test_clock_not_ready_drops_cue(tmp_path):
     assert client.published == []
 
 
+# --- bounded state over uptime (expire) -------------------------------------
+
+
+def test_expire_tracks_retires_stale_matcher_track(tmp_path):
+    client = FakeMqttClient()
+    matcher = CueMatcher(covered_zones={"perimeter-north"}, window_s=5.0)
+    bridge = make_bridge(client, tmp_path=tmp_path, matcher=matcher, time_fn=lambda: FIXED_EPOCH)
+
+    # A detection records an open track.
+    bridge.dispatch(
+        "frigate/events", json.dumps(frigate_payload("new", "trk-1", ("perimeter-north",))).encode()
+    )
+    assert len(matcher._tracks) == 1
+
+    # Much later: expire retires the stale track so the table does not grow forever.
+    bridge.expire_tracks(now=FIXED_EPOCH + 10_000)
+    assert matcher._tracks == {}
+
+    # A cue that would have matched the now-retired track acks matched:false.
+    cue = {"rf_cue_id": "rf-cue-1", "zone": "perimeter-north", "ts_epoch": FIXED_EPOCH + 10_000}
+    bridge.dispatch(formats.TOPIC_RF_CUES_IN, json.dumps(cue).encode())
+    acks = [m for t, m, _q in decode_published(client) if t == formats.TOPIC_CUE_ACKS]
+    assert acks[-1]["matched"] is False
+
+
+def test_pending_cue_cleared_on_object_end(tmp_path):
+    client = FakeMqttClient()
+    matcher = CueMatcher(covered_zones={"perimeter-north"}, window_s=5.0)
+    bridge = make_bridge(client, tmp_path=tmp_path, matcher=matcher, time_fn=lambda: FIXED_EPOCH)
+
+    bridge.dispatch(
+        "frigate/events", json.dumps(frigate_payload("new", "trk-1", ("perimeter-north",))).encode()
+    )
+    cue = {"rf_cue_id": "rf-cue-7", "zone": "perimeter-north", "ts_epoch": FIXED_EPOCH}
+    bridge.dispatch(formats.TOPIC_RF_CUES_IN, json.dumps(cue).encode())
+    assert bridge._pending_cue  # a match is pending attachment
+
+    # The track ends: the object_end carries the cue, and the pending state clears.
+    bridge.dispatch(
+        "frigate/events", json.dumps(frigate_payload("end", "trk-1", ("perimeter-north",))).encode()
+    )
+    assert bridge._pending_cue == {}
+    # Any later detection for that id does NOT re-attach the (now consumed) cue.
+    bridge.dispatch(
+        "frigate/events",
+        json.dumps(frigate_payload("update", "trk-1", ("perimeter-north",))).encode(),
+    )
+    dets = [m for t, m, _q in decode_published(client) if t == formats.TOPIC_DETECTIONS]
+    assert "rf_cue_id" not in dets[-1]["attributes"]
+
+
+def test_pending_cue_aged_out_when_track_never_reappears(tmp_path):
+    client = FakeMqttClient()
+    matcher = CueMatcher(covered_zones={"perimeter-north"}, window_s=5.0)
+    bridge = make_bridge(client, tmp_path=tmp_path, matcher=matcher, time_fn=lambda: FIXED_EPOCH)
+
+    bridge.dispatch(
+        "frigate/events", json.dumps(frigate_payload("new", "trk-1", ("perimeter-north",))).encode()
+    )
+    cue = {"rf_cue_id": "rf-cue-7", "zone": "perimeter-north", "ts_epoch": FIXED_EPOCH}
+    bridge.dispatch(formats.TOPIC_RF_CUES_IN, json.dumps(cue).encode())
+    assert bridge._pending_cue  # pending, but the track never produces a next detection
+
+    # Heartbeat-driven expiry ages out the orphaned pending cue (no unbounded leak).
+    bridge.expire_tracks(now=FIXED_EPOCH + 10_000)
+    assert bridge._pending_cue == {}
+
+
 # --- connect / replay + status ----------------------------------------------
 
 

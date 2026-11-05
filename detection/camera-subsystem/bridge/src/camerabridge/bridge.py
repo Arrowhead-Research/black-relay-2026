@@ -65,6 +65,12 @@ _SEP = (",", ":")
 # keyed by a concrete string instead of ``None``.
 _NO_ZONE = "__no_zone__"
 
+# Default lifetime for a matched-but-not-yet-attached ``rf_cue_id`` (seconds).
+# A pending cue is attached to its track's NEXT detection; if that detection never
+# arrives, the pending entry is aged out on this horizon so it cannot leak over the
+# node's uptime. Mirrors the matcher's default window so the two age together.
+_DEFAULT_PENDING_TTL_S = 5.0
+
 
 class Bridge:
     """Wire a Frigate subscription, an RF-cue subscription, and a status heartbeat.
@@ -88,6 +94,7 @@ class Bridge:
         frigate_topic: str = "frigate/events",
         frigate_base_url: str = "",
         time_fn: Callable[[], float] = time.time,
+        pending_ttl_s: float = _DEFAULT_PENDING_TTL_S,
     ) -> None:
         self._client = client
         self._outbox = outbox
@@ -97,8 +104,11 @@ class Bridge:
         self._frigate_topic = frigate_topic
         self._frigate_base_url = frigate_base_url.rstrip("/")
         self._time_fn = time_fn
-        # object_id -> rf_cue_id awaiting attachment to that track's next detection.
-        self._pending_cue: dict[str, str] = {}
+        self._pending_ttl_s = pending_ttl_s
+        # object_id -> (rf_cue_id, observed_epoch) awaiting attachment to that
+        # track's next detection. The epoch bounds the entry's lifetime so a match
+        # whose track never produces a further detection cannot leak (expire_tracks).
+        self._pending_cue: dict[str, tuple[str, float]] = {}
 
     # --- MQTT wiring --------------------------------------------------------
 
@@ -137,6 +147,26 @@ class Bridge:
     def on_publish_ack(self, mid: Any) -> None:
         """Broker PUBACK for a QoS-1 publish: drop the acked entry from the outbox."""
         self._outbox.ack(mid)
+
+    def expire_tracks(self, now: Optional[float] = None) -> None:
+        """Retire stale matcher tracks and aged pending cues to bound memory.
+
+        Called on the status-heartbeat tick for a 24/7 node. Without it the
+        matcher's track table grows one entry per distinct Frigate track id
+        forever, and a matched cue whose track never produces a further detection
+        never clears. ``now`` defaults to the bridge's own time source (epoch
+        seconds), the same clock the matcher is fed, so tracks and pending cues age
+        on one timeline.
+        """
+        if now is None:
+            now = float(self._time_fn())
+        self._matcher.expire(now)
+        horizon = now - self._pending_ttl_s
+        self._pending_cue = {
+            object_id: entry
+            for object_id, entry in self._pending_cue.items()
+            if entry[1] >= horizon
+        }
 
     # --- inbound dispatch ---------------------------------------------------
 
@@ -199,7 +229,7 @@ class Bridge:
         }
         pending = self._pending_cue.get(event.object_id)
         if pending is not None:
-            attributes["rf_cue_id"] = pending
+            attributes["rf_cue_id"] = pending[0]
 
         try:
             message = formats.detection_event(
@@ -213,11 +243,16 @@ class Bridge:
                 clock=self._clock,
             )
         except formats.ClockNotReady:
+            # A non-end detection keeps its pending cue for the next (trusted)
+            # detection; an object_end means the track is gone, so its pending cue
+            # is dropped here rather than left to leak until it ages out.
+            if event.event == "object_end":
+                self._pending_cue.pop(event.object_id, None)
             logger.debug("clock not NTP-synced; dropping detection for %s", event.object_id)
             return
 
-        # Consume the pending cue only now that a detection is actually emitted,
-        # so a boot-window drop keeps it for the next (trusted) detection.
+        # Consume the pending cue now that a detection is actually emitted (this is
+        # the "next detection" the match was held for); an object_end also clears it.
         self._pending_cue.pop(event.object_id, None)
 
         durable = event.event != "object_update"
@@ -259,7 +294,7 @@ class Bridge:
             return
 
         if ack.get("matched") and ack.get("object_id") is not None:
-            self._pending_cue[ack["object_id"]] = ack["rf_cue_id"]
+            self._pending_cue[ack["object_id"]] = (ack["rf_cue_id"], float(self._time_fn()))
 
         self._outbox.enqueue(formats.TOPIC_CUE_ACKS, ack, durable=True)
         self._outbox.flush(self._publish)

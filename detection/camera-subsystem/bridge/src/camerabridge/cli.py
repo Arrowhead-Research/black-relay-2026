@@ -94,6 +94,9 @@ def make_bridge(
         node_id=node_id,
         frigate_topic=frigate_cfg.get("topic", "frigate/events"),
         frigate_base_url=frigate_cfg.get("base_url", ""),
+        # Age pending cues on the same horizon as the matcher's track window so the
+        # two bound together over the node's uptime.
+        pending_ttl_s=window_s,
     )
 
 
@@ -203,6 +206,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             time.sleep(status_interval)
             mark_clock_if_synced(clock)
             bridge.publish_status(_default_node_state(link_online=True))
+            # Retire stale tracks / pending cues so neither grows over a 24/7 uptime.
+            bridge.expire_tracks()
     except KeyboardInterrupt:
         logger.info("shutting down")
     finally:
