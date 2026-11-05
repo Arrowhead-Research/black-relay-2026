@@ -1,0 +1,53 @@
+# Install as /etc/systemd/system/camera-link-dhcp.service.
+[Unit]
+Description=Black Relay camera link DHCP (one address on eth0, no gateway, no DNS)
+Documentation=file:/opt/black-relay/ops/README.md
+# NetworkManager's own dnsmasq serves the setup AP on wlan0. This one binds only eth0, with its
+# own pid file and lease file, so neither can get in the other's way.
+After=NetworkManager.service nftables.service
+Wants=NetworkManager.service nftables.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# With --bind-interfaces it exits while eth0 has no address, as with the cable out, so
+# Restart=always is also what brings it back when the link does.
+ExecStart=/usr/sbin/dnsmasq --conf-file=/dev/null --port=0 --bind-interfaces --interface=eth0 \
+    --except-interface=lo --dhcp-range=10.77.0.10,10.77.0.10,255.255.255.0,1h \
+    --dhcp-option=3 --dhcp-option=6 --dhcp-leasefile=/var/lib/camera-link/dnsmasq.leases \
+    --keep-in-foreground --pid-file=/run/camera-link-dhcp/dnsmasq.pid
+Restart=always
+RestartSec=5
+UMask=0077
+
+# Shared with camera-link, which reads the leases and clears them on a boot or a new link.
+StateDirectory=camera-link
+StateDirectoryMode=0700
+RuntimeDirectory=camera-link-dhcp
+RuntimeDirectoryMode=0755
+
+# Starts as root to bind port 67, then drops to its own user and keeps NET_ADMIN and NET_RAW.
+CapabilityBoundingSet=CAP_CHOWN CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SETGID CAP_SETUID
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+# AF_PACKET: DHCP replies to a camera with no address yet. AF_UNIX: syslog.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

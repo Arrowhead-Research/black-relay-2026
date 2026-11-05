@@ -20,6 +20,7 @@ Rendering is deterministic, so that a changed output means a changed config. A c
 secret changes only the env file.
 """
 
+import hashlib
 import os
 import re
 import tempfile
@@ -63,6 +64,12 @@ _RELAY_PASSWORD_RE = re.compile(r"[!#%&(-\[\]-_a-~]*")
 class FrigateConfigError(Exception):
     """The settings cannot give a config that Frigate accepts, or the env file cannot be
     written. The message never holds a secret."""
+
+
+def proxy_secret(broker_password: str) -> str:
+    """The secret Frigate shares with the central API. Both ends hold the broker password, and
+    the central API must derive this same value, so changing it changes the secret on both."""
+    return hashlib.sha256(b"black-relay-frigate-proxy:" + broker_password.encode()).hexdigest()
 
 
 def render(

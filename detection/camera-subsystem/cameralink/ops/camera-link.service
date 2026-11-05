@@ -1,0 +1,60 @@
+# Install as /etc/systemd/system/camera-link.service.
+[Unit]
+Description=Black Relay camera link (adopts the camera, renders Frigate's config, runs Frigate)
+Documentation=file:/opt/black-relay/ops/README.md
+After=NetworkManager.service nftables.service camera-link-dhcp.service
+Wants=NetworkManager.service nftables.service camera-link-dhcp.service
+# No relation to frigate.service: this daemon starts and stops it by asking systemd, and
+# Frigate stopping, for any reason, must not stop this daemon.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# "+" because ReadWritePaths= below needs the directory to exist before the sandbox is built.
+ExecStartPre=+/usr/bin/install -d -m 0750 /var/lib/frigate /var/lib/frigate/config /var/lib/frigate/media
+ExecStart=/opt/black-relay/cameralink/bin/camera-link run
+Restart=always
+RestartSec=5
+# A stop waits for the tick, whose enable_services call has a 120 s timeout and a little more
+# to cancel. A kill would be safe, but would spend the attempt of this link generation.
+TimeoutStopSec=140
+UMask=0077
+
+# Runs as root: it holds the camera password and writes the root-only frigate.env.
+# DAC_READ_SEARCH: bridge.yaml is 0600 and owned by the bridge's user. Starting and stopping
+# units needs no capability: root asks systemd over its AF_UNIX socket, /run/systemd/private,
+# which a read-only /run does not block.
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+
+ProtectSystem=strict
+# Password store, generation and leases.
+StateDirectory=camera-link
+StateDirectoryMode=0700
+# state.json, which the bridge's user reads.
+RuntimeDirectory=camera-link
+RuntimeDirectoryMode=0755
+ConfigurationDirectory=camerabridge
+ConfigurationDirectoryMode=0755
+ReadWritePaths=/etc/camerabridge /var/lib/frigate/config
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

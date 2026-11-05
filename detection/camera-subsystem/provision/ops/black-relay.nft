@@ -71,7 +71,9 @@ table inet black_relay {
         iifname $TAILSCALE_IF icmpv6 type echo-request accept
         iifname $TAILSCALE_IF counter drop
 
-        # eth0: the camera link is statically addressed, and nothing starts from this side.
+        # eth0: the camera link. The node serves the camera one DHCP address, and nothing
+        # else starts from this side.
+        iifname $CAMERA_IF udp sport 68 udp dport 67 counter accept
         iifname $CAMERA_IF counter drop
     }
 

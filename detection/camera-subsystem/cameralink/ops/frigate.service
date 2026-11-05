@@ -1,0 +1,30 @@
+# Install as /etc/systemd/system/frigate.service. Not enabled: camera-link starts it once the
+# camera is adopted and its config is rendered, and stops it when its password cannot be right.
+[Unit]
+Description=Frigate NVR for the Black Relay camera node
+Documentation=file:/opt/black-relay/ops/README.md
+# Never without the firewall: stopping nftables stops Frigate too.
+Requires=nftables.service docker.service
+After=nftables.service docker.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# A container left by a power cut would otherwise hold the name.
+ExecStartPre=-/usr/bin/docker rm -f frigate
+# The model is /var/lib/frigate/config/model_cache/yolov6n.hef on the host, because the /config
+# mount hides anything baked into the image.
+ExecStart=/usr/bin/docker run --rm --name frigate \
+    --network host \
+    --device /dev/hailo0 \
+    --shm-size=128m \
+    --tmpfs /tmp/cache:size=256m \
+    -v /var/lib/frigate/config:/config \
+    -v /var/lib/frigate/media:/media/frigate \
+    -v /etc/localtime:/etc/localtime:ro \
+    --env-file /etc/camerabridge/frigate.env \
+    ghcr.io/blakeblackshear/frigate:0.18.2-standard-arm64@sha256:4a854373c0fd4a8f550518758e34b929be0b423085bb569bb232390d128fa4ef
+ExecStop=-/usr/bin/docker stop --timeout 30 frigate
+Restart=always
+RestartSec=5
+TimeoutStopSec=45
