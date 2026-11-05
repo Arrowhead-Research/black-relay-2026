@@ -120,13 +120,15 @@ RLC-520A ──wired P2P──▶ Pi 5 + Hailo-8 (26 TOPS)
   static node address, and the node serves one DHCP address on it with no gateway and
   no DNS, so the camera cannot reach anything but the node. Any factory-fresh camera
   plugged in is configured automatically (4.4).
-- **Detect:** Frigate pulls the camera sub-stream (640×480@5fps), runs the Hailo
-  detector, tracks objects, applies zones.
+- **Detect:** Frigate pulls the camera sub-stream (640×480 at 15 fps, the camera's
+  maximum on that stream), runs the Hailo detector, tracks objects, applies zones.
 - **Record:** Frigate records the main stream locally. **Local storage is the
   system of record.** The central node's view is convenience, not durable storage.
-- **Restream:** go2rtc restreams to the central MediaMTX RTSP server for live
-  clients. If Wi-Fi drops, restreaming stops but local detection and recording
-  continue.
+- **Live view (owner decision):** the camera's main stream at 2304×1296, 25 fps, H.264,
+  6 Mbps, the camera's frame rate limit. Central MediaMTX pulls it from the node's go2rtc
+  **only while someone is watching**, so an idle node sends no video over Wi-Fi. The
+  node's RTSP port requires a login and admits only the central node's IP. Detection,
+  recording and events never depend on a viewer, and continue if Wi-Fi drops.
 - **Publish:** a thin bridge translates Frigate's MQTT events into the normalized
   `camera.*` contract and publishes to the fusion broker through a durable outbox
   (section 5.5).
@@ -141,8 +143,9 @@ RLC-520A ──wired P2P──▶ Pi 5 + Hailo-8 (26 TOPS)
 
 The camera subsystem owns the central receiving side:
 
-- **MediaMTX** RTSP server aggregates every node's restream; local clients watch
-  all cameras from one endpoint.
+- **MediaMTX** RTSP server gives clients one endpoint for all cameras, and pulls each
+  node's stream on demand. The central API tells it each node's address, learned from
+  heartbeats.
 - Camera nodes publish `detection/camera/*` to the central MQTT broker (the broker
   itself is the shared compute node's; the camera subsystem is a publisher and
   provides the relay config, not the broker software). Until that broker exists, the
@@ -164,7 +167,7 @@ The camera subsystem owns the central receiving side:
   delivery never depends on this path (7.3).
 - **Fixed address:** the central node needs a stable site LAN IP, such as a DHCP
   reservation. Nodes accept SSH and Frigate connections only from that IP.
-- Deliverable: the relay bundle, the node→relay restream convention (paths, auth), and
+- Deliverable: the relay bundle, the central→node pull convention (paths, auth), and
   how fusion/clients address streams. This is new work pulled in by the ownership
   decision.
 
@@ -564,9 +567,10 @@ contracts, not exhaustive coverage.
   against the shared zone names from section 6.
 - Retention policy and record storage medium (microSD vs USB SSD).
 - Which Hailo model / `.hef` (Frigate's bundled Hailo YOLO is the default start).
-- RLC-520A bring-up is automatic (4.4). Target settings: sub-stream 640×480 at 7 fps,
-  the closest this camera offers (15, 10, 7, 4), with Frigate processing 5 fps; main at
-  most 5 MP at 15 fps; RTSP enabled. Measured on firmware `v3.2.0.5180_2507241369`
+- RLC-520A bring-up is automatic (4.4). Target settings: sub-stream 640×480 at 15 fps and
+  512 kbps, with Frigate detecting at 15 fps; main 2304×1296 at 25 fps and 6144 kbps,
+  H.264; RTSP enabled. The camera offers no 1080p mode, and its limits are 25 fps on main
+  and 15 fps on sub. Measured on firmware `v3.2.0.5180_2507241369`
   after a factory reset: only port 9000 open, HTTP, RTSP and ONVIF off, P2P on, blank
   `admin` password. `reolink_aio` 0.22.0 turned HTTP and RTSP on over Baichuan.
 ```
