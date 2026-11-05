@@ -3,25 +3,31 @@
 # See README, "Firewall policy".
 #
 # Replaces only its own table, with no "flush ruleset", because a reload must not remove
-# the tables that NetworkManager and tailscaled own. A drop here is final, even if another
+# the table that NetworkManager owns. A drop here is final, even if another
 # table's chain on the same hook accepts the packet.
-# Output is not filtered: the node reaches the camera, site LAN and tailnet by itself.
-# Interfaces are matched by name, because tailscale0 and wlan0 may not exist at load time.
+# Output is not filtered: the node reaches the camera and site LAN by itself.
+# Interfaces are matched by name, because wlan0 may not exist at load time.
+#
+# Only the central node reaches this node's services: its address is the one element of
+# central_hosts, in a file the portal replaces on each save. That file is empty in the image,
+# so a blank node admits nobody over the network. The setup AP and a console stay as they are.
 
 define WIFI_IF = "wlan0"
 define CAMERA_IF = "eth0"
-define TAILSCALE_IF = "tailscale0"
 define AP_NET = 10.42.0.0/24
 define AP_IP = 10.42.0.1
 define SSH_PORT = 22
-# Frigate's authenticated port only. Its unauthenticated port 5000 stays node-local.
+# Frigate's proxy port, which holds the shared secret.
 define FRIGATE_UI_PORTS = { 8971 }
-define TAILSCALE_UDP_PORT = 41641
+# go2rtc's RTSP, which the central node pulls live view from.
+define RTSP_PORT = 8554
 
 table inet black_relay
 delete table inet black_relay
 
 table inet black_relay {
+    include "/etc/black-relay/central-hosts.nft"
+
     chain input {
         type filter hook input priority filter; policy drop;
 
@@ -40,9 +46,9 @@ table inet black_relay {
         # Replies to what the node started, including RTSP it pulls from the camera.
         ct state established,related accept
 
-        # The Frigate and SSH rules below must not be reachable over link-local IPv6, or
+        # The central-only rules below must not be reachable over link-local IPv6, or
         # through an address this node holds on another interface.
-        iifname $WIFI_IF ip6 daddr fe80::/10 tcp dport { 22, 8971 } drop
+        iifname $WIFI_IF ip6 daddr fe80::/10 tcp dport { 22, 8554, 8971 } drop
         iifname $WIFI_IF fib daddr . iif type != { local, broadcast, multicast } drop
 
         # wlan0 as the setup AP: the portal, DNS and DHCP, and nothing else.
@@ -55,21 +61,14 @@ table inet black_relay {
         # wlan0 on the site LAN. AP traffic never gets here: the two rules above end it.
         iifname $WIFI_IF udp sport 67 udp dport 68 counter accept
         iifname $WIFI_IF ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept
-        iifname $WIFI_IF udp dport $TAILSCALE_UDP_PORT accept
         iifname $WIFI_IF ip daddr 224.0.0.251 udp dport 5353 accept
         iifname $WIFI_IF ip6 daddr ff02::fb udp dport 5353 accept
         iifname $WIFI_IF icmp type echo-request accept
         iifname $WIFI_IF icmpv6 type echo-request accept
-        iifname $WIFI_IF tcp dport $SSH_PORT counter accept
-        iifname $WIFI_IF tcp dport $FRIGATE_UI_PORTS counter accept
+        iifname $WIFI_IF ip saddr @central_hosts tcp dport $SSH_PORT counter accept
+        iifname $WIFI_IF ip saddr @central_hosts tcp dport $FRIGATE_UI_PORTS counter accept
+        iifname $WIFI_IF ip saddr @central_hosts tcp dport $RTSP_PORT counter accept
         iifname $WIFI_IF counter drop
-
-        # tailscale0: remote ops only. Never the portal, DNS or DHCP.
-        iifname $TAILSCALE_IF tcp dport $SSH_PORT counter accept
-        iifname $TAILSCALE_IF tcp dport $FRIGATE_UI_PORTS counter accept
-        iifname $TAILSCALE_IF icmp type echo-request accept
-        iifname $TAILSCALE_IF icmpv6 type echo-request accept
-        iifname $TAILSCALE_IF counter drop
 
         # eth0: the camera link. The node serves the camera one DHCP address, and nothing
         # else starts from this side.
@@ -78,7 +77,7 @@ table inet black_relay {
     }
 
     # ipv4.method=shared turns on IP forwarding. This node routes nothing, so an AP client
-    # cannot reach the camera, the site LAN or the tailnet. The named rules count camera
+    # cannot reach the camera or the site LAN. The named rules count camera
     # attempts for the field checks; the policy drops all the rest.
     chain forward {
         type filter hook forward priority filter; policy drop;
