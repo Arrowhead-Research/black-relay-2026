@@ -150,7 +150,7 @@ The camera subsystem owns the central receiving side:
 
 | Failure | Edge node | Result |
 |---|---|---|
-| Central node down | detect + record locally, outbox queues durable events | no central live view / fusion; footage safe; events replay on recovery; **node stays on network (does not open AP)** |
+| Central node down | detect + record locally, outbox queues durable events | no central live view / fusion; footage safe; events replay on recovery; **node stays on network (does not open AP)**. A node that boots during the outage cannot sync its default time server, so events stay in RAM (7.5). |
 | Wi-Fi link down | detect + record locally, outbox queues durable events | no restream; footage safe; events replay |
 | Camera down | Frigate stats show no frames; `camera_online` reports false (5.3) | one camera lost; node reports it; others unaffected |
 | Node-local broker down | no new Frigate events reach the bridge; camera, detector and recording health report false; the central link and heartbeat stay up | events emitted during the outage are lost; Frigate still detects and records locally |

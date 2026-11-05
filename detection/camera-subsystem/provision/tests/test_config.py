@@ -713,3 +713,14 @@ def test_ntp_server_never_reaches_the_bridge_config(tmp_path: Path) -> None:
 
     assert "ntp" not in path.read_text().lower().replace("mediamtx", "")
     assert "time.site.local" not in path.read_text()
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["fe80::1%x\nFallbackNTP=evil.example", "fe80::1%x", "fe80::1%eth0"],
+)
+def test_scoped_ipv6_is_not_a_plain_host(value: str) -> None:
+    from cameraprovision.config import _is_host, _is_host_port
+
+    assert not _is_host(value)
+    assert not _is_host_port(f"[{value}]:8554")

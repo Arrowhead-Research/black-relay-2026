@@ -120,7 +120,9 @@ def _is_clean_text(value: Any) -> bool:
 
 def _is_host(value: Any) -> bool:
     """A plain hostname or IP address, with no scheme, port or spaces."""
-    if not isinstance(value, str):
+    # ipaddress accepts anything after "%", including newlines, which would then
+    # inject lines into the files these values are written to.
+    if not isinstance(value, str) or "%" in value:
         return False
     try:
         ipaddress.ip_address(value)
