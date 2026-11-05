@@ -285,10 +285,10 @@ Edge heartbeat, parallel to `rf.node-status.v0`.
   "recording_ok": true,
   "detector_ok": true,
   "attributes": {
-    "frigate_version": null,
-    "detection_fps": null,
-    "storage_free_pct": null,
-    "uplink_rssi_dbm": null
+    "camera_link_state": "adopted",
+    "retry_after": null,
+    "reason": null,
+    "node_address": "192.168.1.206"
   }
 }
 ```
@@ -297,12 +297,21 @@ The bridge derives health from Frigate's topics on the node-local broker
 (`frigate/available`, `frigate/stats`, `frigate/<camera>/recordings/state`):
 
 - `camera_online`: `camera_fps > 0` for this camera in fresh stats.
-- `detector_ok`: at least one detector is present in fresh stats, and every one has a
-  process id and a positive inference speed.
-- `recording_ok`: the recordings state is `ON` and `camera_online` is true, so a dead
-  camera never reads as recording. The state is Frigate's recording **setting**, so
-  this is still not proof that segments are being written.
+- `detector_ok`: **a field is true only on evidence.** Detection is enabled, inference
+  has really run since this Frigate started (the speed has left its starting value of
+  10.0 ms and is below the ceiling a Hailo timeout produces), no inference is stuck, and
+  a fresh camera-link report confirms a recent log read with no Hailo failure. After a
+  start with no motion it reads false until the first inference, meaning "not yet
+  confirmed". Clients should show it that way, not as a fault. Idle after real inference
+  stays true. A failure that persists 120 s restarts Frigate, at most once per 10 minutes.
+- `recording_ok`: the recordings state is `ON`, `camera_online` is true, and a camera-link
+  report under 90 s old says a segment was written within 60 s with at least 5% free on
+  the media volume. This proves writing to the cache, not the later move to disk.
 - `link_online`: the central MQTT connection is currently up.
+
+The attributes come from camera-link's report and are left out when it is missing or
+over 300 s old. A replayed heartbeat carries an old `node_address`, so the central API
+uses only the newest timestamp per node.
 
 **Fail safe:** no data, stats older than 3 status intervals, Frigate not `online`, or
 a lost local-broker connection all report `camera_online`, `detector_ok`, and
