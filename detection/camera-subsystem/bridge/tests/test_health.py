@@ -734,6 +734,31 @@ def test_record_writing_must_be_exactly_true(tmp_path, claim):
     assert health.evaluate(link_online=True).recording_ok is False
 
 
+def frozen_report(tmp_path, age):
+    """camera-link hung ``age`` seconds ago, with everything it last said still in the file."""
+    health = link_health(
+        tmp_path,
+        {"state": "adopted", "record_writing": True, "log_read_at": int(WALL - age)},
+        age=age,
+    )
+    online(health, stats())
+    return health.evaluate(link_online=True)
+
+
+@pytest.mark.parametrize("age", [89, 90, -90])
+def test_a_recent_record_writing_counts(tmp_path, age):
+    assert frozen_report(tmp_path, age).recording_ok is True
+
+
+@pytest.mark.parametrize("age", [91, 131, 299, 300, -91])
+def test_a_frozen_record_writing_cannot_stay_true(tmp_path, age):
+    # The main stream may have died since, and nothing would have said so.
+    state = frozen_report(tmp_path, age)
+    assert state.recording_ok is False
+    assert state.camera_link_state == "adopted"  # still believed for the attributes
+    assert state.camera_online is True
+
+
 def test_recording_ok_is_false_with_no_report(tmp_path):
     health = link_health(tmp_path, None)
     online(health, stats())

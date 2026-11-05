@@ -2432,6 +2432,39 @@ def test_a_bad_restart_time_counts_as_damaged(live, value):
     assert json.loads(live.paths.link_state.read_text())["generation"] >= NOW
 
 
+@pytest.mark.parametrize(
+    "raw",
+    ["1" + "0" * 400, "1e999", "-1e999", "NaN", "Infinity", "1e300", "-1", "99999999999"],
+)
+def test_an_impossible_restart_time_is_damage_and_not_a_crash(live, frigate_log, raw):
+    healthy_frigate(live)
+    link = json.loads(live.paths.link_state.read_text())
+    text = json.dumps({**link, "detector_restart_at": None}).replace(
+        '"detector_restart_at": null', f'"detector_restart_at": {raw}'
+    )
+    live.paths.link_state.write_text(text)
+    frigate_log.text = HAILO_LINE
+
+    live.restart_daemon()
+    live.daemon.tick()
+    run_for(live, DETECTOR_ERROR_RESTART_SECONDS + TICK_SECONDS)
+
+    saved = json.loads(live.paths.link_state.read_text())
+    assert saved["generation"] >= NOW
+    assert saved["detector_restart_at"] is None or 0 <= saved["detector_restart_at"] <= live.clock_epoch
+
+
+def test_a_real_restart_time_is_not_damage(live):
+    live.daemon.tick()
+    link = json.loads(live.paths.link_state.read_text())
+    live.paths.link_state.write_text(json.dumps({**link, "detector_restart_at": NOW - 5.5}))
+
+    live.restart_daemon()
+    live.daemon.tick()
+
+    assert json.loads(live.paths.link_state.read_text())["generation"] == link["generation"]
+
+
 def test_no_restart_for_a_frigate_that_is_not_running(live, frigate_log):
     healthy_frigate(live)
     frigate_log.text = HAILO_LINE

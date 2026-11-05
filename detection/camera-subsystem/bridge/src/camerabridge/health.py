@@ -71,6 +71,9 @@ _LINK_STATE_MAX_AGE_S = 300.0
 # camera-link reads Frigate's log every 30 s. Older than this, it has missed three reads, and
 # a clean result is only the value it started with.
 _LOG_READ_MAX_AGE_S = 90.0
+# camera-link rewrites its report every few seconds. Older than this, a stream may have died with
+# nobody to say so, as with the log read above.
+_RECORD_REPORT_MAX_AGE_S = 90.0
 # NetworkManager's address for the setup AP, which is no way to reach this node.
 _SETUP_AP_IP = "10.42.0.1"
 _SIOCGIFADDR = 0x8915
@@ -165,7 +168,10 @@ def _parse_link_report(content: bytes, now: float) -> Optional[_LinkReport]:
             and _positive(read_at)
             and abs(now - read_at) <= _LOG_READ_MAX_AGE_S
         ),
-        record_writing=report.get("record_writing") is True,
+        record_writing=(
+            report.get("record_writing") is True
+            and abs(now - updated) <= _RECORD_REPORT_MAX_AGE_S
+        ),
     )
 
 

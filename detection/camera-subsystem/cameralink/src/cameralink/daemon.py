@@ -114,6 +114,7 @@ _DOCKER_TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-
 
 DETECTOR_ERROR_RESTART_SECONDS = 120
 DETECTOR_RESTART_LIMIT_SECONDS = 600
+_LATEST_TIME = 2**33  # the year 2242
 _DETECTOR_FAILING = (
     "Frigate's log shows a detector failure, and Frigate is restarted for it at most every 10 minutes"
 )
@@ -819,7 +820,12 @@ def _decode_link(content: bytes) -> _Link | None:
 
 
 def _is_time(value) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool)
+    """A possible Unix time. NaN fails the range too, and a huge int compares without overflow."""
+    return (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and 0 <= value < _LATEST_TIME
+    )
 
 
 def _password_in_doubt(record: CameraRecord | None) -> bool:

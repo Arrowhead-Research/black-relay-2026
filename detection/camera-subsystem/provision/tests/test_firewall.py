@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -74,7 +75,7 @@ def test_the_setup_ap_rules_stay() -> None:
 
 def test_every_accept_rule_is_exactly_these() -> None:
     # Any new way in has to be added here, on purpose.
-    assert [line for line in rules() if line.split()[-1] == "accept"] == [
+    assert [line for line in rules() if re.search(r"\baccept\b", line)] == [
         'iifname "lo" accept',
         "iifname $WIFI_IF icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, "
         "nd-router-advert, mld-listener-query } accept",
@@ -95,6 +96,29 @@ def test_every_accept_rule_is_exactly_these() -> None:
         "iifname $WIFI_IF ip saddr @central_hosts tcp dport $RTSP_PORT counter accept",
         "iifname $CAMERA_IF udp sport 68 udp dport 67 counter accept",
     ]
+
+
+def test_no_rule_ends_any_other_way_that_could_let_a_packet_through() -> None:
+    # A jump to another chain, or a second chain or table, would sit outside the list above.
+    lines = rules()
+    assert not [line for line in lines if re.search(r"\b(jump|goto|return|continue|queue)\b", line)]
+    assert [line for line in lines if line.startswith("chain ")] == [
+        "chain input {",
+        "chain forward {",
+    ]
+
+
+def test_the_rules_guarding_the_central_services_stay_ahead_of_them() -> None:
+    lines = rules()
+    site = lines.index(
+        "iifname $WIFI_IF ip saddr @central_hosts tcp dport $SSH_PORT counter accept"
+    )
+    for guard in (
+        "iifname $WIFI_IF ip6 daddr fe80::/10 tcp dport { 22, 8554, 8971 } drop",
+        # Without this, another interface's address on this node answers through wlan0.
+        "iifname $WIFI_IF fib daddr . iif type != { local, broadcast, multicast } drop",
+    ):
+        assert lines.index(guard) < site, guard
 
 
 def test_both_chains_default_to_drop() -> None:
