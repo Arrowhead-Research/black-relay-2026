@@ -11,7 +11,8 @@ contract).
 
 The four health signals are first-class, required booleans on every heartbeat.
 Everything else a node might report (Frigate build, detection frame rate, free
-storage, uplink signal strength, ...) is optional telemetry that rides in the
+storage, uplink signal strength, the camera link's state, its own address, ...) is
+optional telemetry that rides in the
 open ``attributes`` sub-object. Mirroring ``formats.cue_ack``'s handling of
 ``snapshot_url``, an optional field is folded into ``attributes`` only when it is
 set, so a bare :class:`NodeState` yields an empty ``attributes`` rather than a
@@ -46,6 +47,10 @@ class NodeState:
     detection_fps: float | None = None
     storage_free_pct: float | None = None
     uplink_rssi_dbm: int | None = None
+    camera_link_state: str | None = None
+    retry_after: float | None = None
+    reason: str | None = None
+    node_address: str | None = None
 
     # The health booleans that become required top-level fields; everything else
     # on the dataclass is optional telemetry destined for ``attributes``.

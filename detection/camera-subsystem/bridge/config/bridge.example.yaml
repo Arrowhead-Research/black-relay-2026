@@ -47,7 +47,8 @@ outbox:
   max_age_s: 604800        # 7 days; entries older than this are shed on overflow
 
 # Node status heartbeat cadence (seconds). Frigate stats older than 3 of these count
-# as stale, and camera_online / detector_ok / recording_ok then report false. Keep
+# as stale, whether by receipt or by their own timestamp, and camera_online /
+# detector_ok / recording_ok then report false. Keep
 # Frigate's mqtt.stats_interval (default 60) below 3 x this value, or a healthy node
 # will report false between stats messages.
 status_interval_s: 30
@@ -55,8 +56,8 @@ status_interval_s: 30
 # Edge Frigate. `topic` is the Frigate events topic subscribed on the local broker
 # (its prefix must match Frigate's mqtt.topic_prefix);
 # `base_url` is the node-local Frigate address used to MINT snapshot_url on each
-# detection (service-side — the parser leaves it null; DESIGN.md 5.6). base_url is
-# reached by clients over the site LAN / by remote ops over Tailscale, never the WAN.
+# detection (service-side — the parser leaves it null; DESIGN.md 5.6). Only the central
+# node reaches base_url, and clients fetch through the central API, never the WAN.
 frigate:
   topic: frigate/events
   base_url: https://cam-01.local:8971

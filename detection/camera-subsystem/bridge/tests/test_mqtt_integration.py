@@ -392,8 +392,10 @@ def test_frigate_health_tracked_and_central_stays_up_when_local_dies(rig):
         "frigate/stats",
         json.dumps(
             {
-                "cameras": {"cam-01": {"camera_fps": 5.0}},
+                "cameras": {"cam-01": {"camera_fps": 5.0, "detection_enabled": True}},
                 "detectors": {"hailo": {"inference_speed": 9.0, "pid": 42}},
+                "processes": {"recording": {"pid": 77}},
+                "service": {"uptime": 3600, "last_updated": time.time()},
             }
         ),
     )

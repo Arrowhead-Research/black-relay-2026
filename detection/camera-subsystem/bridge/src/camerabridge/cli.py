@@ -29,6 +29,7 @@ import re
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
 import yaml
@@ -36,7 +37,7 @@ import yaml
 from . import formats
 from .bridge import Bridge
 from .cues import CueMatcher
-from .health import FrigateHealth
+from .health import FrigateHealth, interface_ipv4
 from .outbox import Outbox
 
 logger = logging.getLogger("camerabridge")
@@ -56,6 +57,11 @@ _DEFAULT_CUE_WINDOW_S = 5.0
 
 # Frigate stats older than this many status intervals count as stale (fail safe).
 _STATS_STALE_INTERVALS = 3
+
+# Written by camera-link, and readable by this service's user.
+_CAMERA_LINK_STATE = Path("/run/camera-link/state.json")
+# The node's link to the site LAN, and so the address the central node reaches it on.
+_SITE_INTERFACE = "wlan0"
 
 # Every camera.* message carries node_id, and the contract pins it to this pattern
 # (schemas/*.schema.json). A bad field-provisioned value (uppercase, underscore,
@@ -128,6 +134,8 @@ def make_bridge(
         # Frigate's health topics share the events topic's prefix (mqtt.topic_prefix).
         topic_prefix=frigate_topic.rsplit("/", 1)[0],
         monotonic_fn=monotonic_fn,
+        link_state_path=_CAMERA_LINK_STATE,
+        address_fn=lambda: interface_ipv4(_SITE_INTERFACE),
     )
 
     return Bridge(

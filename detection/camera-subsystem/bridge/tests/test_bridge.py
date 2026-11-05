@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -907,12 +908,21 @@ class _Mono:
         return self.now
 
 
-HEALTHY_STATS = json.dumps(
-    {
-        "cameras": {"cam-01": {"camera_fps": 5.0}},
-        "detectors": {"hailo": {"inference_speed": 9.5, "pid": 42}},
-    }
-).encode()
+WALL = 1_800_000_000.0
+
+
+def frigate_stats(camera: str = "cam-01", *, last_updated: float = WALL) -> bytes:
+    return json.dumps(
+        {
+            "cameras": {camera: {"camera_fps": 5.0, "detection_enabled": True}},
+            "detectors": {"hailo": {"inference_speed": 9.5, "pid": 42}},
+            "processes": {"recording": {"pid": 77}},
+            "service": {"uptime": 3600, "last_updated": last_updated},
+        }
+    ).encode()
+
+
+HEALTHY_STATS = frigate_stats()
 
 
 def health_bridge(tmp_path, mono, central=None, local=None, connected=True):
@@ -923,7 +933,9 @@ def health_bridge(tmp_path, mono, central=None, local=None, connected=True):
         tmp_path=tmp_path,
         local_client=local,
         connected=connected,
-        health=FrigateHealth(camera="cam-01", stale_after_s=90.0, monotonic_fn=mono),
+        health=FrigateHealth(
+            camera="cam-01", stale_after_s=90.0, monotonic_fn=mono, wall_fn=lambda: WALL
+        ),
     )
 
 
@@ -1041,12 +1053,7 @@ def test_stale_limit_is_three_status_intervals(tmp_path):
     bridge.dispatch("site1/front/recordings/state", b"ON")
     bridge.dispatch(
         "site1/stats",
-        json.dumps(
-            {
-                "cameras": {"front": {"camera_fps": 5.0}},
-                "detectors": {"hailo": {"inference_speed": 9.5, "pid": 1}},
-            }
-        ).encode(),
+        frigate_stats("front", last_updated=time.time()),
     )
     mono.now += 30.0
     assert bridge.node_state().camera_online is True
