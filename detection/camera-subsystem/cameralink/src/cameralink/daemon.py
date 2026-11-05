@@ -23,9 +23,18 @@ other exception is a bug and is left to crash into ``Restart=always``. The state
 service's runtime directory, so it goes too, and nothing can read a stale state as current.
 
 A Hailo detector can crash and leave Frigate's stats looking normal, so the daemon also reads
-Frigate's log. A failure found there stays reported until the container starts again, because no
-line in the log proves the detector recovered. A daemon restart reads the whole log of the running
-container, so the report survives it.
+Frigate's log, and publishes when it last managed to, so that a blind scan cannot pass for a clean
+one. A failure found there stays reported until the container starts again, because no line in the
+log proves the detector recovered. So a failure that outlasts DETECTOR_ERROR_RESTART_SECONDS gets a
+restart, at most once per DETECTOR_RESTART_LIMIT_SECONDS across daemon restarts, and a permanent
+fault stays reported at that pace. A daemon restart reads the whole log of the running container,
+so the report survives it.
+
+Frigate's recordings state is only a setting, so the daemon also reports whether segments are being
+written. ffmpeg writes every segment to the cache as ``<camera>@<time>.mp4`` whatever the retention
+mode, and retention is decided later. Frigate v0.18.2: frigate/config/camera/camera.py:282,293 and
+frigate/const.py:16 for the path, and frigate/record/maintainer.py:63 for the later discard. The
+cache is a host tmpfs so that this daemon can see it.
 """
 
 import ipaddress
@@ -90,7 +99,28 @@ _LOG_OVERLAP_SECONDS = 5
 _DOCKER = "/usr/bin/docker"
 _FRIGATE_CONTAINER = "frigate"
 _DOCKER_TIMEOUT = 20
-_HAILO_FAILURE_RE = re.compile(r"\[HailoRT\] \[error\]|HailoRTException")
+# Frigate v0.18.2: frigate/detectors/plugins/hailo8l.py:132, 264, 345, 351, frigate/watchdog.py:126.
+# The HailoRT lines come from its native library.
+_HAILO_FAILURE_RE = re.compile(
+    r"\[HailoRT\] \[error\]"
+    r"|HailoRTException"
+    r"|Inference error:"
+    r"|\[INIT\] Failed to initialize HailoAsyncInference"
+    r"|Timeout waiting for inference results"
+    r"|HailoRT inference thread has stopped"
+    r"|Detection appears to be stuck"
+)
+_DOCKER_TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})")
+
+DETECTOR_ERROR_RESTART_SECONDS = 120
+DETECTOR_RESTART_LIMIT_SECONDS = 600
+_DETECTOR_FAILING = (
+    "Frigate's log shows a detector failure, and Frigate is restarted for it at most every 10 minutes"
+)
+_LOG_UNREADABLE = "Frigate's log cannot be read, so its detector cannot be vouched for"
+
+SEGMENT_MAX_AGE_SECONDS = 60
+MEDIA_MIN_FREE_FRACTION = 0.05
 
 
 class SystemdError(Exception):
@@ -119,6 +149,8 @@ class Paths:
     frigate_env: Path = Path("/etc/camerabridge/frigate.env")
     state_file: Path = Path("/run/camera-link/state.json")
     local_proxy_secret: Path = Path("/var/lib/camera-link/proxy.secret")
+    frigate_cache: Path = Path("/run/frigate-cache")
+    frigate_media: Path = Path("/var/lib/frigate/media")
 
 
 class Systemctl:
@@ -179,19 +211,24 @@ class FrigateLog:
         self._run = run
 
     def started_at(self) -> str | None:
-        output = self._docker("inspect", "--format", "{{.State.StartedAt}}", _FRIGATE_CONTAINER)
-        return (output.strip() or None) if output is not None else None
+        # stderr stays out: a CLI warning must not reach --since, or look like a restart.
+        output = self._docker(
+            "inspect", "--format", "{{.State.StartedAt}}", _FRIGATE_CONTAINER,
+            stderr=subprocess.DEVNULL,
+        )
+        started = output.strip() if output is not None else ""
+        return started if _DOCKER_TIME_RE.fullmatch(started) else None
 
     def since_time(self, since: str) -> str | None:
-        return self._docker("logs", "--since", since, _FRIGATE_CONTAINER)
+        # HailoRT writes its own lines from native code, past Frigate's logger.
+        return self._docker("logs", "--since", since, _FRIGATE_CONTAINER, stderr=subprocess.STDOUT)
 
-    def _docker(self, *args: str) -> str | None:
+    def _docker(self, *args: str, stderr: int) -> str | None:
         try:
             result = self._run(
                 [_DOCKER, *args],
                 stdout=subprocess.PIPE,
-                # HailoRT writes its own lines from native code, past Frigate's logger.
-                stderr=subprocess.STDOUT,
+                stderr=stderr,
                 text=True,
                 errors="replace",
                 timeout=_DOCKER_TIMEOUT,
@@ -215,9 +252,12 @@ class _Link:
     frigate_mac: str | None = None  # the camera whose password is in Frigate's env file
     restart_owed: bool = False  # the files are ahead of the running Frigate
     dhcp_reset_owed: bool = False  # the lease file may describe a camera that has gone
+    detector_restart_at: float | None = None  # keeps the restart limit across daemon restarts
 
 
 _LINK_FIELDS = {item.name for item in fields(_Link)}
+# Added after link files already existed on a kit. A missing generation is damage; this is not.
+_LINK_FIELDS_OPTIONAL = {"detector_restart_at"}
 
 
 @dataclass(frozen=True)
@@ -303,8 +343,11 @@ class Daemon:
         self._frigate_log = frigate_log or FrigateLog()
         self._frigate_started = None
         self._detector_error = False
+        self._detector_error_since = None
+        self._log_blind = False
         self._log_checked_at = None
         self._log_read_at = None
+        self._camera = None  # the Frigate camera whose segments count
 
     def run(self, stop) -> None:
         while not stop.is_set():
@@ -323,6 +366,7 @@ class Daemon:
         provisioning = None
         try:
             provisioning = _read_provisioning(self._paths)
+            self._camera = provisioning.node_id if provisioning else None
         except ProvisioningError as err:
             problems.append(str(err))
         mac = lease.mac if lease else None
@@ -350,10 +394,16 @@ class Daemon:
 
         try:
             problem = self._drive_frigate(state, mac, record, provisioning)
+            if state in _RUNNABLE and provisioning is not None:
+                self._restart_for_detector()
         except (SystemdError, LinkStateError) as err:
             problem = str(err)
         if problem:
             problems.append(problem)
+        if self._detector_error:
+            problems.append(_DETECTOR_FAILING)
+        elif self._log_blind and state in _RUNNABLE:
+            problems.append(_LOG_UNREADABLE)
         if state is LinkState.NEEDS_RESET:
             problems.append(_NEEDS_RESET if _password_in_doubt(record) else _LIMIT_REACHED)
         if provisioning is not None and not provisioning.relay_password:
@@ -567,24 +617,61 @@ class Daemon:
         if checked is not None and 0 <= now - checked < LOG_SCAN_SECONDS:
             return
         self._log_checked_at = now
+        self._log_blind = True
         started = self._frigate_log.started_at()
         if started is None:
             return  # no container or no docker: no evidence either way, so nothing changes
         if started != self._frigate_started:
             self._frigate_started = started
             self._detector_error = False
+            self._detector_error_since = None
             self._log_read_at = None
         text = self._frigate_log.since_time(self._log_since(started, now))
         if text is None:
             return
+        self._log_blind = False
         self._log_read_at = now
         if _HAILO_FAILURE_RE.search(text):
             self._detector_error = True
+            if self._detector_error_since is None:
+                self._detector_error_since = now
+
+    def _restart_for_detector(self) -> None:
+        """Nothing else would ever clear a failure. It clears when the new container is seen."""
+        since = self._detector_error_since
+        if since is None:
+            return
+        now = self._clock().timestamp()
+        if now < since:  # a clock stepped back must not hold this off until it catches up
+            since = self._detector_error_since = now
+        if now - since < DETECTOR_ERROR_RESTART_SECONDS:
+            return
+        last = self._link.detector_restart_at
+        if last is not None and 0 <= now - last < DETECTOR_RESTART_LIMIT_SECONDS:
+            return
+        if self._systemd.state(FRIGATE_UNIT) != "active":
+            return
+        # Saved first: a crash here must not let the limit be spent twice.
+        self._save_link(detector_restart_at=now)
+        self._systemd.restart(FRIGATE_UNIT)
 
     def _log_since(self, started: str, now: float) -> str:
         """Where to read from. A clock stepped back would hide lines, so that reads it all."""
         read = self._log_read_at
         return started if read is None or now < read else str(int(read) - _LOG_OVERLAP_SECONDS)
+
+    # Segments
+
+    def _record_writing(self, now: float) -> bool:
+        """True only for a segment of this camera under a minute old, with room on the disk."""
+        if self._camera is None:
+            return False
+        newest = _newest_segment_time(self._paths.frigate_cache, self._camera)
+        return (
+            newest is not None
+            and abs(now - newest) < SEGMENT_MAX_AGE_SECONDS
+            and _media_has_room(self._paths.frigate_media)
+        )
 
     # Reporting
 
@@ -597,6 +684,8 @@ class Daemon:
             "retry_after": _retry_after(state, record, now),
             "reason": reason,
             "detector_error": self._detector_error,
+            "log_read_at": self._log_read_at,
+            "record_writing": self._record_writing(now),
         }
         if (state, mac, reason) != self._published:
             _log.info("link: %s, camera %s, reason: %s", state.value, mac, reason)
@@ -605,6 +694,33 @@ class Daemon:
             _write_file(self._paths.state_file, json.dumps(content).encode(), 0o644)
         except OSError as err:
             _log.warning("state file cannot be written: %s", type(err).__name__)
+
+
+def _newest_segment_time(cache: Path, camera: str) -> float | None:
+    """The newest modification time among the camera's segments, including the one in use."""
+    newest = None
+    try:
+        entries = list(os.scandir(cache))
+    except OSError:
+        return None
+    for entry in entries:
+        if not (entry.name.startswith(f"{camera}@") and entry.name.endswith(".mp4")):
+            continue
+        try:
+            modified = entry.stat().st_mtime
+        except OSError:  # Frigate moves finished segments away at any time
+            continue
+        if newest is None or modified > newest:
+            newest = modified
+    return newest
+
+
+def _media_has_room(media: Path) -> bool:
+    try:
+        disk = os.statvfs(media)
+    except OSError:
+        return False
+    return disk.f_blocks > 0 and disk.f_bavail / disk.f_blocks >= MEDIA_MIN_FREE_FRACTION
 
 
 def _read_provisioning(paths: Paths) -> _Provisioning | None:
@@ -680,7 +796,8 @@ def _decode_link(content: bytes) -> _Link | None:
     try:
         values = json.loads(content)
         # Every field, because a missing generation must not read as a generation of zero.
-        link = _Link(**values) if set(values) == _LINK_FIELDS else None
+        known = _LINK_FIELDS - _LINK_FIELDS_OPTIONAL <= set(values) <= _LINK_FIELDS
+        link = _Link(**values) if known else None
     except (ValueError, TypeError):
         return None
     if link is None:
@@ -696,8 +813,13 @@ def _decode_link(content: bytes) -> _Link | None:
         and isinstance(link.frigate_mac, str | None)
         and isinstance(link.restart_owed, bool)
         and isinstance(link.dhcp_reset_owed, bool)
+        and (link.detector_restart_at is None or _is_time(link.detector_restart_at))
     )
     return link if valid else None
+
+
+def _is_time(value) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
 
 
 def _password_in_doubt(record: CameraRecord | None) -> bool:

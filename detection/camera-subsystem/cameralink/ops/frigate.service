@@ -6,6 +6,8 @@ Documentation=file:/opt/black-relay/ops/README.md
 # Never without the firewall: stopping nftables stops Frigate too.
 Requires=nftables.service docker.service
 After=nftables.service docker.service
+# run-frigate\x2dcache.mount: segments live on a host tmpfs so that camera-link can see them.
+RequiresMountsFor=/run/frigate-cache
 StartLimitIntervalSec=0
 
 [Service]
@@ -20,7 +22,7 @@ ExecStart=/usr/bin/docker run --rm --name frigate \
     --network host \
     --device /dev/hailo0 \
     --shm-size=128m \
-    --tmpfs /tmp/cache:size=256m \
+    -v /run/frigate-cache:/tmp/cache \
     -v /var/lib/frigate/config:/config \
     -v /var/lib/frigate/media:/media/frigate \
     -v /etc/localtime:/etc/localtime:ro \

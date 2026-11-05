@@ -29,7 +29,10 @@ from cameralink.adopt import (
 )
 from cameralink import daemon as daemon_module
 from cameralink.daemon import (
+    DETECTOR_ERROR_RESTART_SECONDS,
+    DETECTOR_RESTART_LIMIT_SECONDS,
     FRIGATE_DOWN_TICKS,
+    FRIGATE_UNIT,
     LOG_SCAN_SECONDS,
     RUNNING_STATES,
     TICK_SECONDS,
@@ -182,9 +185,13 @@ class Node:
             frigate_config=root / "frigate" / "config.yml",
             frigate_env=root / "etc" / "frigate.env",
             state_file=root / "run" / "state.json",
+            frigate_cache=root / "frigate-cache",
+            frigate_media=root / "frigate",
             local_proxy_secret=root / "camera-link" / "proxy.secret",
         )
-        for directory in ("camera-link", "sys", "proc", "etc", "provision", "frigate", "run"):
+        for directory in (
+            "camera-link", "sys", "proc", "etc", "provision", "frigate", "run", "frigate-cache",
+        ):
             (root / directory).mkdir()
         self.clock_epoch = NOW
         self.systemd = FakeSystemd(self.paths)
@@ -1377,6 +1384,8 @@ def test_state_file_holds_no_secret(live):
         "retry_after": None,
         "reason": None,
         "detector_error": False,
+        "log_read_at": NOW,
+        "record_writing": False,
     }
 
 
@@ -1924,8 +1933,8 @@ def test_frigate_unit_is_exactly_what_it_needs():
         "--device",
         "/dev/hailo0",
         "--shm-size=128m",
-        "--tmpfs",
-        "/tmp/cache:size=256m",
+        "-v",
+        "/run/frigate-cache:/tmp/cache",
         "-v",
         "/var/lib/frigate/config:/config",
         "-v",
@@ -1955,6 +1964,7 @@ def test_frigate_unit_is_exactly_what_it_needs():
         "Documentation": DOCS,
         "Requires": ["nftables.service docker.service"],
         "After": ["nftables.service docker.service"],
+        "RequiresMountsFor": ["/run/frigate-cache"],
         "StartLimitIntervalSec": ["0"],
     }
     assert set(frigate) == {"Unit", "Service"}  # no [Install]: only the daemon starts it
@@ -2039,6 +2049,7 @@ def test_link_unit_has_exact_hardening_and_no_tie_to_frigate():
         "Documentation": DOCS,
         "After": ["NetworkManager.service nftables.service camera-link-dhcp.service"],
         "Wants": ["NetworkManager.service nftables.service camera-link-dhcp.service"],
+        "RequiresMountsFor": ["/run/frigate-cache"],
         "StartLimitIntervalSec": ["0"],
     }
     assert link["Install"] == {"WantedBy": ["multi-user.target"]}
@@ -2055,11 +2066,30 @@ def test_camera_profile_is_static_with_no_route():
     assert profile["ipv6"]["method"] == "disabled"
 
 
+def test_the_segment_cache_is_a_bounded_private_tmpfs_on_the_host():
+    # The file name is the systemd escape of the mount point, or the unit does nothing.
+    mount = directives("run-frigate\\x2dcache.mount")
+    assert mount["Mount"] == {
+        "What": ["tmpfs"],
+        "Where": ["/run/frigate-cache"],
+        "Type": ["tmpfs"],
+        "Options": ["size=256m,mode=0700,nosuid,nodev,noexec"],
+    }
+
+
+def test_camera_link_sees_the_segment_cache_from_the_start():
+    # Mounted ahead of its sandbox, so nothing depends on a later mount propagating in.
+    assert directives("camera-link.service")["Unit"]["RequiresMountsFor"] == ["/run/frigate-cache"]
+
+
 def test_docker_and_hailo_settings():
     assert json.loads((UNITS / "daemon.json").read_text()) == {
         "bridge": "none",
         "iptables": False,
         "ip6tables": False,
+        # Bounds what the first log read after a daemon restart has to get through.
+        "log-driver": "json-file",
+        "log-opts": {"max-size": "10m", "max-file": "3"},
     }
     assert (UNITS / "hailo_pci.conf").read_text().strip().splitlines()[-1] == (
         "options hailo_pci force_desc_page_size=4096"
@@ -2069,11 +2099,26 @@ def test_docker_and_hailo_settings():
 # Frigate's log
 
 
-HAILO_LINE = "2026-11-05 10:00:09 [HailoRT] [error] CHECK_SUCCESS failed with status=74\n"
-HAILO_EXCEPTION = "    raise HailoRTException(msg)\nhailo_platform.HailoRTException: boom\n"
+# Built from the format strings in Frigate v0.18.2's source, because no line from kit 1 was saved.
+HAILO_LINE = "[HailoRT] [error] CHECK_SUCCESS failed with status=HAILO_TIMEOUT(4)\n"
+HAILO_EXCEPTION = "hailo_platform.pyhailort.pyhailort.HailoRTException: boom\n"
+TIMEOUT_LINE = (
+    "frigate.detectors.plugins.hailo8l ERROR : "
+    "Timeout waiting for inference results for request 42\n"  # hailo8l.py:345
+)
+INFERENCE_ERROR = "frigate.detectors.plugins.hailo8l ERROR : Inference error: boom\n"  # :132
+THREAD_STOPPED = "RuntimeError: HailoRT inference thread has stopped, restart required.\n"  # :351
+STUCK_LINE = "frigate.watchdog INFO : Detection appears to be stuck. Restarting detection process...\n"  # watchdog.py:126
+INIT_LINE = (
+    "frigate.detectors.plugins.hailo8l ERROR : "
+    "[INIT] Failed to initialize HailoAsyncInference: boom\n"  # hailo8l.py:264
+)
 
 
-@pytest.mark.parametrize("text", [HAILO_LINE, HAILO_EXCEPTION])
+@pytest.mark.parametrize(
+    "text",
+    [HAILO_LINE, HAILO_EXCEPTION, TIMEOUT_LINE, INFERENCE_ERROR, THREAD_STOPPED, STUCK_LINE, INIT_LINE],
+)
 def test_a_hailo_failure_in_frigates_log_is_reported(node, frigate_log, text):
     frigate_log.text = "frigate.app INFO : Starting Frigate\n" + text
     node.daemon.tick()
@@ -2177,8 +2222,387 @@ def test_an_unreadable_log_is_read_again_from_the_same_place(node, frigate_log):
     node.daemon.tick()
     node.clock_epoch += LOG_SCAN_SECONDS
     node.daemon.tick()
-    assert node.state()["detector_error"] is False
+    assert node.state()["log_read_at"] is None
     assert frigate_log.since == [frigate_log.started, frigate_log.started]
+
+
+def test_a_successful_read_is_published_with_its_time(node, frigate_log):
+    node.daemon.tick()
+    assert node.state()["log_read_at"] == NOW
+    node.clock_epoch += LOG_SCAN_SECONDS
+    node.daemon.tick()
+    assert node.state()["log_read_at"] == NOW + LOG_SCAN_SECONDS
+
+
+def test_a_failed_read_keeps_the_time_of_the_last_good_one(node, frigate_log):
+    node.daemon.tick()
+    frigate_log.since_time = lambda since: None
+    node.clock_epoch += LOG_SCAN_SECONDS
+    node.daemon.tick()
+    state = node.state()
+    assert state["log_read_at"] == NOW
+    assert state["updated"] == NOW + LOG_SCAN_SECONDS
+
+
+def test_docker_gone_keeps_the_time_of_the_last_good_read(node, frigate_log):
+    node.daemon.tick()
+    frigate_log.started = None
+    node.clock_epoch += LOG_SCAN_SECONDS
+    node.daemon.tick()
+    assert node.state()["log_read_at"] == NOW
+
+
+def test_a_daemon_that_has_never_read_the_log_says_so(node, frigate_log):
+    frigate_log.started = None
+    node.daemon.tick()
+    state = node.state()
+    assert state["log_read_at"] is None
+    assert state["detector_error"] is False
+
+
+def test_a_new_container_voids_the_old_read_until_its_own_succeeds(node, frigate_log):
+    node.daemon.tick()
+    frigate_log.started = "2026-11-05T11:00:00.000000000Z"
+    frigate_log.since_time = lambda since: None
+    node.clock_epoch += LOG_SCAN_SECONDS
+    node.daemon.tick()
+    assert node.state()["log_read_at"] is None
+
+
+def test_a_blind_scan_gives_a_reason_while_frigate_is_wanted(live, frigate_log):
+    live.daemon.tick()
+    frigate_log.started = None
+    live.clock_epoch += LOG_SCAN_SECONDS
+    live.daemon.tick()
+    assert "log cannot be read" in live.state()["reason"]
+
+
+# Recovering from a detector failure
+
+
+def frigate_restarts(node):
+    return [call for call in node.systemd.calls if call == ("restart", FRIGATE_UNIT)]
+
+
+def run_for(node, seconds):
+    """Tick the way the daemon does, with Frigate's container following its unit's restarts."""
+    for _ in range(seconds // TICK_SECONDS):
+        node.clock_epoch += TICK_SECONDS
+        node.daemon.tick()
+
+
+def healthy_frigate(live):
+    live.daemon.tick()
+    live.daemon.tick()
+    live.systemd.calls.clear()
+
+
+def restarts_new_container(node, frigate_log, then_text):
+    """A queued restart gives a new StartedAt, and a log holding ``then_text``."""
+    real = node.systemd.restart
+    count = [0]
+
+    def restart(unit):
+        real(unit)
+        count[0] += 1
+        frigate_log.started = f"2026-11-05T12:00:{count[0]:02d}.000000000Z"
+        frigate_log.text = then_text
+
+    node.systemd.restart = restart
+
+
+def test_a_detector_error_gives_a_reason(live, frigate_log):
+    healthy_frigate(live)
+    frigate_log.text = HAILO_LINE
+    live.clock_epoch += LOG_SCAN_SECONDS
+    live.daemon.tick()
+    assert "detector" in live.state()["reason"]
+
+
+def test_the_error_is_given_time_before_a_restart(live, frigate_log):
+    healthy_frigate(live)
+    frigate_log.text = HAILO_LINE
+    live.clock_epoch += LOG_SCAN_SECONDS
+    live.daemon.tick()
+    live.systemd.calls.clear()
+
+    run_for(live, DETECTOR_ERROR_RESTART_SECONDS - TICK_SECONDS)
+
+    assert frigate_restarts(live) == []
+
+
+def test_one_transient_line_then_a_restart_recovers(live, frigate_log):
+    healthy_frigate(live)
+    restarts_new_container(live, frigate_log, "")
+    frigate_log.text = TIMEOUT_LINE
+    live.clock_epoch += LOG_SCAN_SECONDS
+    live.daemon.tick()
+    assert live.state()["detector_error"] is True
+    frigate_log.text = ""  # the line is behind us, and only a restart clears it
+
+    run_for(live, DETECTOR_ERROR_RESTART_SECONDS)
+    assert len(frigate_restarts(live)) == 1
+    # Only the restart's own detection clears it, at the next read.
+    run_for(live, LOG_SCAN_SECONDS)
+
+    state = live.state()
+    assert state["detector_error"] is False
+    assert state["reason"] is None
+    run_for(live, 3600)
+    assert len(frigate_restarts(live)) == 1
+
+
+def test_the_restart_alone_does_not_clear_the_error(live, frigate_log):
+    healthy_frigate(live)
+    frigate_log.text = HAILO_LINE
+    live.clock_epoch += LOG_SCAN_SECONDS
+    live.daemon.tick()
+    frigate_log.text = ""  # the same container: its StartedAt never changes
+
+    run_for(live, DETECTOR_ERROR_RESTART_SECONDS + 2 * LOG_SCAN_SECONDS)
+
+    assert len(frigate_restarts(live)) == 1
+    assert live.state()["detector_error"] is True
+
+
+def test_a_permanent_fault_cannot_restart_faster_than_the_limit(live, frigate_log):
+    healthy_frigate(live)
+    restarts_new_container(live, frigate_log, HAILO_LINE)
+    frigate_log.text = HAILO_LINE
+    stamps = []
+    real = live.systemd.restart
+
+    def timed(unit):
+        stamps.append(live.clock_epoch)
+        real(unit)
+
+    live.systemd.restart = timed
+
+    run_for(live, 4 * 3600)
+
+    assert len(stamps) >= 2
+    assert all(b - a >= DETECTOR_RESTART_LIMIT_SECONDS for a, b in zip(stamps, stamps[1:]))
+    assert len(stamps) <= 4 * 3600 / DETECTOR_RESTART_LIMIT_SECONDS + 1
+
+
+def test_the_limit_outlives_a_daemon_restart(live, frigate_log):
+    healthy_frigate(live)
+    restarts_new_container(live, frigate_log, HAILO_LINE)
+    frigate_log.text = HAILO_LINE
+    stamps = []
+    real = live.systemd.restart
+
+    def timed(unit):
+        stamps.append(live.clock_epoch)
+        real(unit)
+
+    live.systemd.restart = timed
+
+    for _ in range(40):
+        run_for(live, DETECTOR_ERROR_RESTART_SECONDS + 2 * LOG_SCAN_SECONDS)
+        live.restart_daemon()
+        live.systemd.restart = timed
+
+    assert len(stamps) >= 2
+    assert all(b - a >= DETECTOR_RESTART_LIMIT_SECONDS for a, b in zip(stamps, stamps[1:]))
+
+
+def test_an_older_link_file_without_the_limit_still_loads(live):
+    live.daemon.tick()
+    link = json.loads(live.paths.link_state.read_text())
+    del link["detector_restart_at"]
+    live.paths.link_state.write_text(json.dumps(link))
+    generation = link["generation"]
+
+    live.restart_daemon()
+    live.daemon.tick()
+
+    assert json.loads(live.paths.link_state.read_text())["generation"] == generation
+
+
+@pytest.mark.parametrize("value", ["soon", True, [1]])
+def test_a_bad_restart_time_counts_as_damaged(live, value):
+    live.daemon.tick()
+    link = json.loads(live.paths.link_state.read_text())
+    live.paths.link_state.write_text(json.dumps({**link, "detector_restart_at": value}))
+
+    live.restart_daemon()
+    live.daemon.tick()
+
+    assert json.loads(live.paths.link_state.read_text())["generation"] >= NOW
+
+
+def test_no_restart_for_a_frigate_that_is_not_running(live, frigate_log):
+    healthy_frigate(live)
+    frigate_log.text = HAILO_LINE
+    live.clock_epoch += LOG_SCAN_SECONDS
+    live.daemon.tick()
+    live.systemd.running.discard(FRIGATE_UNIT)
+    live.systemd.states[FRIGATE_UNIT] = "activating"
+    live.systemd.calls.clear()
+
+    run_for(live, DETECTOR_ERROR_RESTART_SECONDS + TICK_SECONDS)
+
+    assert frigate_restarts(live) == []
+
+
+def test_no_restart_while_the_camera_link_holds_frigate_back(live, frigate_log):
+    healthy_frigate(live)
+    frigate_log.text = HAILO_LINE
+    live.clock_epoch += LOG_SCAN_SECONDS
+    live.daemon.tick()
+    live.step.state = LinkState.ADOPTING
+    live.systemd.calls.clear()
+
+    run_for(live, DETECTOR_ERROR_RESTART_SECONDS + TICK_SECONDS)
+
+    assert frigate_restarts(live) == []
+
+
+def test_a_failed_restart_does_not_stop_the_tick(live, frigate_log):
+    healthy_frigate(live)
+    frigate_log.text = HAILO_LINE
+    live.clock_epoch += LOG_SCAN_SECONDS
+    live.daemon.tick()
+
+    def broken(unit):
+        raise SystemdError("no")
+
+    live.systemd.restart = broken
+
+    run_for(live, DETECTOR_ERROR_RESTART_SECONDS + TICK_SECONDS)
+
+    assert live.state()["updated"] == live.clock_epoch
+
+
+# Whether segments are really being written
+
+
+@pytest.fixture
+def disk(monkeypatch):
+    """The media disk's free space, as a fraction of the whole."""
+    free = {"fraction": 0.5, "error": None}
+
+    def statvfs(path):
+        if free["error"]:
+            raise free["error"]
+        return SimpleNamespace(f_blocks=1000, f_bavail=int(1000 * free["fraction"]))
+
+    monkeypatch.setattr(daemon_module.os, "statvfs", statvfs)
+    return free
+
+
+def segment(node, name, age):
+    path = node.paths.frigate_cache / name
+    path.write_bytes(b"mp4")
+    stamp = node.clock_epoch - age
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def test_a_fresh_segment_with_room_on_disk_is_writing(live, disk):
+    segment(live, "cam-8da040@20261105120000+0000.mp4", 2)
+    live.daemon.tick()
+    assert live.state()["record_writing"] is True
+
+
+def test_a_dead_main_stream_leaves_only_an_old_segment(live, disk):
+    # Detection's sub stream is fine, so stats and camera_fps say nothing about this.
+    segment(live, "cam-8da040@20261105120000+0000.mp4", 60)
+    live.daemon.tick()
+    assert live.state()["record_writing"] is False
+
+
+def test_the_newest_segment_decides(live, disk):
+    segment(live, "cam-8da040@20261105110000+0000.mp4", 3000)
+    segment(live, "cam-8da040@20261105120000+0000.mp4", 59)
+    live.daemon.tick()
+    assert live.state()["record_writing"] is True
+
+
+def test_a_full_disk_is_not_writing_however_new_the_segment(live, disk):
+    segment(live, "cam-8da040@20261105120000+0000.mp4", 2)
+    disk["fraction"] = 0.049
+    live.daemon.tick()
+    assert live.state()["record_writing"] is False
+
+
+def test_five_percent_free_is_enough(live, disk):
+    segment(live, "cam-8da040@20261105120000+0000.mp4", 2)
+    disk["fraction"] = 0.05
+    live.daemon.tick()
+    assert live.state()["record_writing"] is True
+
+
+def test_a_disk_that_cannot_be_measured_is_not_writing(live, disk):
+    segment(live, "cam-8da040@20261105120000+0000.mp4", 2)
+    disk["error"] = OSError("gone")
+    live.daemon.tick()
+    assert live.state()["record_writing"] is False
+
+
+def test_an_empty_disk_report_is_not_writing(live, monkeypatch):
+    segment(live, "cam-8da040@20261105120000+0000.mp4", 2)
+    monkeypatch.setattr(
+        daemon_module.os, "statvfs", lambda path: SimpleNamespace(f_blocks=0, f_bavail=0)
+    )
+    live.daemon.tick()
+    assert live.state()["record_writing"] is False
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "other-cam@20261105120000+0000.mp4",
+        "cam-8da040-x@20261105120000+0000.mp4",
+        "preview_cam-8da040@20261105120000+0000.mp4",
+        "cam-8da040@20261105120000+0000.tmp",
+        "cam-8da040",
+    ],
+)
+def test_only_this_cameras_segments_count(live, disk, name):
+    segment(live, name, 2)
+    live.daemon.tick()
+    assert live.state()["record_writing"] is False
+
+
+def test_a_segment_dated_in_the_future_proves_nothing(live, disk):
+    segment(live, "cam-8da040@20261105120000+0000.mp4", -120)
+    live.daemon.tick()
+    assert live.state()["record_writing"] is False
+
+
+def test_a_missing_cache_is_not_writing_and_does_not_stop_the_tick(live, disk):
+    live.paths.frigate_cache.rmdir()
+    live.daemon.tick()
+    assert live.state()["record_writing"] is False
+
+
+def test_a_segment_removed_mid_scan_is_skipped(live, disk, monkeypatch):
+    segment(live, "cam-8da040@20261105120000+0000.mp4", 2)
+    real = daemon_module.os.scandir
+
+    class Vanishing:
+        name = "cam-8da040@20261105110000+0000.mp4"
+
+        def is_file(self):
+            return True
+
+        def stat(self):
+            raise FileNotFoundError(self.name)
+
+    def scandir(path):
+        return [Vanishing(), *real(path)]
+
+    monkeypatch.setattr(daemon_module.os, "scandir", scandir)
+    live.daemon.tick()
+    assert live.state()["record_writing"] is True
+
+
+def test_unprovisioned_is_not_writing(node, disk):
+    segment(node, "cam-8da040@20261105120000+0000.mp4", 2)
+    node.daemon.tick()
+    assert node.state()["record_writing"] is False
 
 
 def test_a_docker_that_does_not_answer_is_not_asked_every_tick(node, frigate_log):
@@ -2210,12 +2634,27 @@ def _fake_run(calls, *, stdout="", returncode=0, raises=None):
 
 def test_frigate_log_asks_docker_for_the_containers_start():
     calls = []
-    log = FrigateLog(run=_fake_run(calls, stdout="2026-11-05T10:00:00Z\n"))
-    assert log.started_at() == "2026-11-05T10:00:00Z"
+    log = FrigateLog(run=_fake_run(calls, stdout="2026-11-05T10:00:00.123456789Z\n"))
+    assert log.started_at() == "2026-11-05T10:00:00.123456789Z"
     assert calls[0][0] == [
         "/usr/bin/docker", "inspect", "--format", "{{.State.StartedAt}}", "frigate",
     ]
     assert calls[0][1]["timeout"] > 0
+    # A CLI warning here must not end up as the time handed to --since.
+    assert calls[0][1]["stderr"] == subprocess.DEVNULL
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "WARNING: Error loading config file\n2026-11-05T10:00:00Z\n",
+        "true\n",
+        "--since\n",
+        "2026-11-05\n",
+    ],
+)
+def test_frigate_log_refuses_a_start_that_is_not_a_time(answer):
+    assert FrigateLog(run=_fake_run([], stdout=answer)).started_at() is None
 
 
 def test_frigate_log_reads_both_output_streams():

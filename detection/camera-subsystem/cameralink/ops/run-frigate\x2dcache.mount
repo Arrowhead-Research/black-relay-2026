@@ -1,0 +1,12 @@
+# Install as /etc/systemd/system/run-frigate\x2dcache.mount. The name is systemd's escape of the
+# mount point, and systemd ignores the unit under any other.
+# Frigate's segment cache, on the host so that camera-link can see segments being written. It
+# holds video, so root only, and Frigate's container runs as root.
+[Unit]
+Description=Frigate's recording segment cache
+
+[Mount]
+What=tmpfs
+Where=/run/frigate-cache
+Type=tmpfs
+Options=size=256m,mode=0700,nosuid,nodev,noexec

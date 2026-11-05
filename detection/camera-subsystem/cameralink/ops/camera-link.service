@@ -4,6 +4,8 @@ Description=Black Relay camera link (adopts the camera, renders Frigate's config
 Documentation=file:/opt/black-relay/ops/README.md
 After=NetworkManager.service nftables.service camera-link-dhcp.service
 Wants=NetworkManager.service nftables.service camera-link-dhcp.service
+# Reads segment ages there. Mounted ahead of the sandbox, so no later mount has to propagate in.
+RequiresMountsFor=/run/frigate-cache
 # No relation to frigate.service: this daemon starts and stops it by asking systemd, and
 # Frigate stopping, for any reason, must not stop this daemon.
 StartLimitIntervalSec=0
