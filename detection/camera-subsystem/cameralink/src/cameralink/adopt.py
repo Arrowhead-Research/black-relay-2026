@@ -6,8 +6,8 @@ a crash is on disk before the act it protects:
 
 - ``attempted`` is written before any login. A daemon restart in the same link generation
   finds it, with no outcome beside it, and sends nothing.
-- A failure is stamped along with ``attempted`` and removed on success, so a crash cannot
-  dodge the rolling caps.
+- A failure is stamped along with ``attempted`` and removed on success, so a crash during
+  a first login cannot dodge the rolling caps.
 - A new password is saved as ``pending_password`` before the camera hears of it, and is
   promoted to ``password`` only once a login with it has worked.
 - Each finished setting is recorded as it finishes, so a retry repeats only the rest.
@@ -16,13 +16,18 @@ The saved password of a known camera moves to ``pending_password`` before a blan
 over Baichuan. That call can turn HTTP on and then fail or time out, leaving the camera
 blank or not, so from then on the record says what is true: either might be live, and the
 next generation tries the saved password and then blank. Read ``password`` only after
-``ADOPTED``: until then it can be blank while the camera is not.
+``ADOPTED`` or ``ADOPTED_PENDING_SETTINGS``: until then it can be blank while the camera
+is not.
+
+``step`` holds ``store.lock()`` for the whole tick, including its network calls, because
+the record it works from is in memory: another writer must not change the file under it.
 """
 
 import asyncio
 import logging
 import secrets
 import socket
+import time
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
@@ -75,6 +80,9 @@ class LinkState(StrEnum):
     NO_CAMERA = "no_camera"
     ADOPTING = "adopting"
     ADOPTED = "adopted"
+    # Secured and streaming, so Frigate may run, but a known node_id or rotation has not
+    # reached the camera yet: the cap is holding it back, or the login was refused.
+    ADOPTED_PENDING_SETTINGS = "adopted_pending_settings"
     NEEDS_RESET = "needs_reset"
     FAILED = "failed"
 
@@ -103,33 +111,42 @@ def step(
     enable=enable_services,
     probe=None,
     enable_timeout: float = 120,
+    monotonic=time.monotonic,
 ) -> LinkState:
-    """One tick. ``now`` is a clock: called with no arguments, returns an aware datetime."""
+    """One tick. ``now`` is the wall clock: called with no arguments, it returns an aware
+    datetime. ``monotonic`` times the settle, since the wall clock of a node with no RTC
+    steps forward when it first syncs, which would skip the wait."""
     if lease is None:
         return LinkState.NO_CAMERA
-    adoption = _Adoption(
-        lease,
-        link_generation,
-        store,
-        client_factory,
-        now,
-        node_id,
-        flipped,
-        enable,
-        probe or _port_open,
-        enable_timeout,
-    )
-    state = adoption.run()
-    adoption.logout()
+    with store.lock():
+        adoption = _Adoption(
+            lease,
+            link_generation,
+            store,
+            client_factory,
+            now,
+            monotonic,
+            node_id,
+            flipped,
+            enable,
+            probe or _port_open,
+            enable_timeout,
+        )
+        state = adoption.run()
+        adoption.logout()
     _log.debug("camera %s: generation %s: %s", adoption.mac, link_generation, state)
     return state
 
 
-def _port_open(host: str, port: int) -> bool:
+def _port_open(host: str, port: int) -> bool | None:
+    """True if it accepts and False if it refuses. Anything else says nothing about the
+    port, and a port wrongly called closed would look like the factory signature."""
     try:
         socket.create_connection((host, port), _PROBE_TIMEOUT).close()
-    except OSError:
+    except ConnectionRefusedError:
         return False
+    except OSError:
+        return None
     return True
 
 
@@ -143,6 +160,7 @@ class _Adoption:
         store,
         client_factory,
         now,
+        monotonic,
         node_id,
         flipped,
         enable,
@@ -155,6 +173,7 @@ class _Adoption:
         self.store = store
         self.client_factory = client_factory
         self.now = now
+        self.monotonic = monotonic
         self.node_id = node_id
         self.flipped = flipped
         self.enable = enable
@@ -168,7 +187,7 @@ class _Adoption:
         if latest is None or latest.mac != self.mac:
             # Now the latest camera, so nothing can read the previous camera's password
             # as this one's. A record of its own is what keeps that password off this wire.
-            store.save(self.rec)
+            self.rec = store.save(self.rec)
 
     def run(self) -> LinkState:
         if self.rec.attempted == self.key:
@@ -177,6 +196,8 @@ class _Adoption:
         http = self.probe(self.ip, _HTTP_PORT)
         baichuan = self.probe(self.ip, _BAICHUAN_PORT)
         if not (http or baichuan) or not self._settled():
+            return LinkState.ADOPTING
+        if http is None or baichuan is None:
             return LinkState.ADOPTING
         if baichuan and not http:
             return self._factory_signature()
@@ -205,7 +226,7 @@ class _Adoption:
     def _continue_generation(self) -> LinkState:
         phase = self.rec.phase
         if phase == _PHASE_HTTP_FOLLOW_UP:
-            return self._blank_login()
+            return self._http_follow_up()
         if phase == _PHASE_TRY_BLANK:
             return self._blank_after_pending()
         if phase == LinkState.ADOPTED:
@@ -216,8 +237,8 @@ class _Adoption:
 
     def _settled(self) -> bool:
         since = self.rec.settle_since
-        current = self.now().timestamp()
-        # An earlier "since" than now can only be a clock that stepped backward.
+        current = self.monotonic()
+        # A "since" later than now can only be from before a reboot.
         if self.rec.settle_key != self.key or since is None or current < since:
             self._update(settle_key=self.key, settle_since=current)
             return False
@@ -235,9 +256,7 @@ class _Adoption:
         if len(self._recent(self.rec.signature_failures)) >= SIGNATURE_FAILURE_CAP:
             return LinkState.NEEDS_RESET
         if self.rec.password != _BLANK:
-            self._update(
-                pending_password=self.rec.password, password=_BLANK, pending_rejected=False
-            )
+            self._update(pending_password=self.rec.password, password=_BLANK)
         self._begin_attempt(signature=True)
         failure = None
         try:
@@ -253,16 +272,29 @@ class _Adoption:
             self._update(signature_failures=self.rec.signature_failures[:-1])
         if failure is not None:
             return self._login_failed(failure)
-        # Blank worked, so this is a real reset: the camera's own failure count is gone, and
-        # any lockout with it. The settings are gone too, which _change_password records.
+        # Blank worked, so this attempt did not fail. Whether it was a real reset, which
+        # clears the caps, waits on HTTP agreeing: see _change_password.
         self._update(
-            failures=(), signature_failures=(), locked=False, phase=_PHASE_HTTP_FOLLOW_UP
+            signature_failures=self.rec.signature_failures[:-1], phase=_PHASE_HTTP_FOLLOW_UP
         )
-        return self._blank_login()
+        return self._http_follow_up()
+
+    def _http_follow_up(self) -> LinkState:
+        """Blank again, over HTTP, which spends no new guess when the firmware is consistent.
+        If it is not, the signature path has no cap of its own to stop this repeating, so
+        the day's signature attempt pays for it."""
+        state = self._try_login(_BLANK)
+        if state is None:
+            return self._guarded(self._change_password)
+        if state is not LinkState.ADOPTING:
+            stamp = self.now().timestamp()
+            self._update(signature_failures=(*self._recent(self.rec.signature_failures), stamp))
+        return state
 
     def _recover(self) -> LinkState:
-        # A password the camera refused cannot have become live since, so asking again
-        # would only spend one of its failures. It stays on disk until blank proves out.
+        # A password the camera refused is skipped, to save one of its failures, until
+        # blank is refused too. Then one verdict was wrong, or the camera is foreign, and
+        # the pending password is asked again. It stays on disk until blank proves out.
         if self.rec.pending_rejected:
             return self._blank_login()
         pending = self.rec.pending_password
@@ -296,11 +328,13 @@ class _Adoption:
             value is not None and self.rec.applied.get(name) != value
             for name, value in wanted.items()
         )
-        if not unfinished or self._capped():
+        if not unfinished:
             return LinkState.ADOPTED
+        if self._capped():
+            return LinkState.ADOPTED_PENDING_SETTINGS
         state = self._try_login(self.rec.password)
         if state is LinkState.ADOPTING:
-            return LinkState.ADOPTED  # refused; the undo restored the phase
+            return LinkState.ADOPTED_PENDING_SETTINGS  # refused; the undo restored the phase
         return state if state is not None else self._guarded(self._run_steps)
 
     def _begin_attempt(self, signature: bool = False) -> None:
@@ -348,7 +382,8 @@ class _Adoption:
                 self._update(phase=LinkState.NEEDS_RESET.value, locked=True)
                 return LinkState.NEEDS_RESET
             if rejected is None:
-                self._update(phase=LinkState.NEEDS_RESET.value)
+                # A saved password leaves the flag clear, so this is blank being refused.
+                self._update(phase=LinkState.NEEDS_RESET.value, pending_rejected=False)
             else:
                 self._update(phase=rejected, pending_rejected=True)
             return LinkState.NEEDS_RESET
@@ -375,11 +410,20 @@ class _Adoption:
         return LinkState.FAILED
 
     def _change_password(self) -> None:
-        """Blank just worked, which also means no earlier setting survives."""
+        """Blank just worked over HTTP. That is a real reset: no earlier setting survives,
+        and the camera's own failure count is gone, with any lockout."""
         password = self.rec.pending_password
         if password is None:
             password = secrets.token_urlsafe(15)[:20]
-        self._update(pending_password=password, password=_BLANK, pending_rejected=False, applied={})
+        self._update(
+            pending_password=password,
+            password=_BLANK,
+            pending_rejected=False,
+            applied={},
+            failures=(),
+            signature_failures=(),
+            locked=False,
+        )
         self.client.set_password(password)
         self.client.login(_USER, password)
         self._update(password=password, pending_password=None)
@@ -400,8 +444,7 @@ class _Adoption:
             self._update(applied={**self.rec.applied, name: value})
 
     def _update(self, **changes) -> None:
-        self.rec = replace(self.rec, **changes)
-        self.store.save(self.rec)
+        self.rec = self.store.save(replace(self.rec, **changes))
 
 
 def _wanted(node_id: str | None, flipped: bool | None) -> dict:
