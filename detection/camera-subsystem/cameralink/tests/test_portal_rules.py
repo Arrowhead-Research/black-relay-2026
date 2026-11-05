@@ -1,8 +1,9 @@
-"""The portal's copy of render's rules, held equal to the rules themselves.
+"""The portal's copy of render's rules, checked against the rules themselves on samples.
 
 ``cameraprovision`` cannot import this package at run time, so it keeps its own copy. A value it
 lets through that render refuses would stop Frigate, and one it refuses that render takes would
-turn an operator away for nothing. Both packages are real here.
+turn an operator away for nothing. Both packages are real here. Sampling catches a changed pattern
+or a new rule these values touch, not every rule someone could add.
 """
 
 from pathlib import Path
@@ -54,6 +55,47 @@ def test_the_patterns_are_the_same(name):
 @pytest.mark.parametrize("zone", [*PLACED, "", "x", "xy", NODE_ID, "1e3", "0o17", "a" * 300])
 def test_the_portal_and_render_agree_on_a_zone(zone):
     assert portal_accepts(zones=[zone]) is render_accepts(zones=[zone])
+
+
+@pytest.mark.parametrize(
+    "zones",
+    [
+        ["driveway", "gate"],
+        ["driveway", "driveway"],
+        ["driveway", NODE_ID],
+        ["driveway", "x"],
+        ["a" * 64, "b" * 64],
+        [f"zone-{number}" for number in range(40)],
+        [],
+    ],
+)
+def test_the_portal_and_render_agree_on_several_zones(zones):
+    assert portal_accepts(zones=zones) is render_accepts(zones=zones)
+
+
+@pytest.mark.parametrize(
+    "zone",
+    ["all", "none", "null", "true", "false", "zones", "camera", "birdseye", "detect", "record"],
+)
+def test_the_portal_and_render_agree_on_a_word_yaml_or_frigate_might_keep(zone):
+    assert portal_accepts(zones=[zone]) is render_accepts(zones=[zone])
+
+
+@pytest.mark.parametrize("node_id", ["a", "cam-01", "0", "a" * 33, "a" * 64, "a" * 300])
+def test_a_node_id_the_portal_saves_renders(node_id):
+    cfg = NodeConfig(
+        node_id=node_id,
+        hostname="edge-7",
+        wifi_ssid="Site-WiFi",
+        wifi_psk="wifi-password",
+        mediamtx_address="10.0.0.2:8554",
+        covered_zones=["driveway"],
+        broker=BrokerConfig(host="10.0.0.2", username="kit1", password="pw"),
+        frigate=FrigateConfig(base_url="https://cam-01.local:8971"),
+    )
+    assert portal.validate(cfg) == []
+
+    assert render(node_id, ["driveway"], "kit1", None, SECRET)
 
 
 @pytest.mark.parametrize("user", [*PLACED, "", "x", "camera-cam-01", "a" * 300])
