@@ -41,10 +41,10 @@ HOSTNAME = "edge-host-7"
 WIFI_SSID = "Site-WiFi-XYZ"
 MEDIAMTX_ADDRESS = "10.9.9.9:8554"
 PROVISION_ONLY_KEYS = (
-    "mediamtx_address",
     "hostname",
     "tailscale_auth_key",
     "vpn_requested",
+    "broker_anonymous",
     "wifi_ssid",
     "wifi_psk",
 )
@@ -112,29 +112,53 @@ def test_bad_node_id_is_rejected(node_id: Any) -> None:
         ("broker.host", {"broker": broker(host="")}),
         ("broker.host", {"broker": broker(host="   ")}),
         ("broker.host", {"broker": broker(host=None)}),
+        ("broker.host", {"broker": broker(host="mqtt://10.0.0.2")}),
+        ("broker.host", {"broker": broker(host="10.0.0.2:1883")}),
+        ("broker.host", {"broker": broker(host="10.0.0.2 ")}),
+        ("broker.host", {"broker": broker(host="broker one")}),
+        ("broker.host", {"broker": broker(host="broker\n")}),
+        ("broker.host", {"broker": broker(host="-broker.local")}),
+        ("broker.host", {"broker": broker(host="10.0.0.999")}),
         ("broker.username", {"broker": broker(username="")}),
+        ("broker.username", {"broker": broker(username=" camera")}),
+        ("broker.username", {"broker": broker(username="cam\x01era")}),
         ("broker.password", {"broker": broker(password="")}),
         ("broker.port", {"broker": broker(port=0)}),
         ("broker.port", {"broker": broker(port=65536)}),
         ("broker.port", {"broker": broker(port="1883")}),
         ("broker.port", {"broker": broker(port=True)}),
+        ("broker.port", {"broker": broker(port=10**400)}),
         ("broker.tls", {"broker": broker(tls="false")}),
         ("frigate.mqtt_port", {"frigate": frigate(mqtt_port=70000)}),
         ("frigate.mqtt_host", {"frigate": frigate(mqtt_host="")}),
+        ("frigate.mqtt_host", {"frigate": frigate(mqtt_host="tcp://localhost")}),
         ("frigate.topic", {"frigate": frigate(topic="")}),
+        ("frigate.topic", {"frigate": frigate(topic="frigate/events\n")}),
+        ("frigate.camera", {"frigate": frigate(camera="")}),
+        ("frigate.camera", {"frigate": frigate(camera="Front Gate")}),
+        ("frigate.camera", {"frigate": frigate(camera="cam\n")}),
         ("frigate.base_url", {"frigate": frigate(base_url="")}),
         ("frigate.base_url", {"frigate": frigate(base_url="cam-01.local:5000")}),
+        ("frigate.base_url", {"frigate": frigate(base_url="http://cam\x01.local")}),
         ("outbox.path", {"outbox": outbox(path="")}),
+        ("outbox.path", {"outbox": outbox(path="/var/lib/outbox.jsonl ")}),
         ("outbox.max_bytes", {"outbox": outbox(max_bytes=0)}),
         ("outbox.max_age_s", {"outbox": outbox(max_age_s=-1)}),
+        ("outbox.max_bytes", {"outbox": outbox(max_bytes=10**400)}),
+        ("status_interval_s", {"status_interval_s": 10**400}),
         ("status_interval_s", {"status_interval_s": 0}),
         ("status_interval_s", {"status_interval_s": float("nan")}),
         ("status_interval_s", {"status_interval_s": float("inf")}),
         ("cue_window_s", {"cue_window_s": "5"}),
         ("mediamtx_address", {"mediamtx_address": ""}),
+        ("mediamtx_address", {"mediamtx_address": " 10.0.0.2:8554"}),
+        ("mediamtx_address", {"mediamtx_address": "10.0.0.2:8554\n"}),
         ("covered_zones", {"covered_zones": []}),
         ("covered_zones", {"covered_zones": [""]}),
         ("covered_zones", {"covered_zones": ["driveway", "  "]}),
+        ("covered_zones", {"covered_zones": [" driveway"]}),
+        ("covered_zones", {"covered_zones": ["driveway\n"]}),
+        ("covered_zones", {"covered_zones": ["drive\x85way"]}),
         # A bare string would become a set of single letters in the bridge.
         ("covered_zones", {"covered_zones": "driveway"}),
         ("hostname", {"hostname": ""}),
@@ -148,12 +172,15 @@ def test_bad_node_id_is_rejected(node_id: Any) -> None:
         ("wifi_ssid", {"wifi_ssid": "s" * 33}),
         ("wifi_ssid", {"wifi_ssid": "é" * 17}),  # 34 bytes: the limit is in bytes
         ("wifi_ssid", {"wifi_ssid": "site\nid=evil"}),
+        ("wifi_ssid", {"wifi_ssid": "site\x85id"}),
+        ("wifi_ssid", {"wifi_ssid": "site\udc80id"}),
         ("wifi_psk", {"wifi_psk": ""}),
         ("wifi_psk", {"wifi_psk": "short"}),
         ("wifi_psk", {"wifi_psk": "p" * 64}),  # 64 characters must be raw hex
         ("wifi_psk", {"wifi_psk": "line1234\nline2"}),
         ("tailscale_auth_key", {"tailscale_auth_key": ""}),
         ("tailscale_auth_key", {"tailscale_auth_key": "   "}),
+        ("tailscale_auth_key", {"tailscale_auth_key": TAILSCALE_KEY + "\n"}),
     ],
 )
 def test_bad_field_is_rejected_by_name(field: str, overrides: dict) -> None:
@@ -174,6 +201,13 @@ def test_bad_field_is_rejected_by_name(field: str, overrides: dict) -> None:
         {"wifi_psk": "a1" * 32},
         {"wifi_psk": " sp@ce #:%;\\'\""},
         {"vpn_requested": False, "tailscale_auth_key": ""},
+        {"broker": broker(host="broker.site.local")},
+        {"broker": broker(host="broker")},
+        {"broker": broker(host="fd00::2")},
+        {"broker": broker(password=" pw with spaces ")},
+        {"wifi_ssid": " Cafe WiFi "},
+        {"covered_zones": ["north gate"]},
+        {"frigate": frigate(camera="front-gate")},
     ],
 )
 def test_boundary_values_are_accepted(overrides: dict) -> None:
@@ -261,7 +295,7 @@ def test_provision_only_fields_never_reach_the_bridge_yaml(tmp_path: Path) -> No
 
     for key in PROVISION_ONLY_KEYS:
         assert key not in text
-    for value in (HOSTNAME, WIFI_SSID, WIFI_PSK, TAILSCALE_KEY, MEDIAMTX_ADDRESS):
+    for value in (HOSTNAME, WIFI_SSID, WIFI_PSK, TAILSCALE_KEY):
         assert value not in text
 
 
@@ -279,6 +313,119 @@ def test_yaml_lookalike_node_id_stays_a_string_for_the_bridge(
 
 @pytest.mark.parametrize("password", ["p@ss: #'\"{}[]", "%(x)s\\n", "pässwörd", "1234", "null"])
 def test_awkward_broker_password_round_trips(tmp_path: Path, password: str) -> None:
+    path = written(tmp_path, make_config(broker=broker(password=password)))
+    assert bridge_cli.load_config(str(path))["broker"]["password"] == password
+
+
+def test_every_key_writes_its_own_value(tmp_path: Path) -> None:
+    """Every value differs from its default, so a hard-coded key cannot pass."""
+    cfg = make_config(
+        node_id="cam-77",
+        broker=BrokerConfig(
+            host="broker.site.local", port=8883, username="u-77", password="p-77", tls=True
+        ),
+        covered_zones=["zone-a", "zone-b"],
+        cue_window_s=7.5,
+        outbox=OutboxConfig(path="/data/outbox-77.jsonl", max_bytes=1024, max_age_s=3600),
+        status_interval_s=45,
+        frigate=FrigateConfig(
+            topic="site77/events",
+            base_url="https://cam-77.local:8971",
+            camera="front-gate",
+            mqtt_host="192.168.77.1",
+            mqtt_port=11883,
+        ),
+        mediamtx_address="relay.site.local:8554",
+    )
+
+    assert yaml.safe_load(written(tmp_path, cfg).read_text(encoding="utf-8")) == {
+        "node_id": "cam-77",
+        "broker": {
+            "host": "broker.site.local",
+            "port": 8883,
+            "username": "u-77",
+            "password": "p-77",
+            "tls": True,
+        },
+        "covered_zones": ["zone-a", "zone-b"],
+        "cue_window_s": 7.5,
+        "outbox": {"path": "/data/outbox-77.jsonl", "max_bytes": 1024, "max_age_s": 3600},
+        "status_interval_s": 45,
+        "frigate": {
+            "topic": "site77/events",
+            "base_url": "https://cam-77.local:8971",
+            "camera": "front-gate",
+            "mqtt_host": "192.168.77.1",
+            "mqtt_port": 11883,
+        },
+        "mediamtx_address": "relay.site.local:8554",
+    }
+
+
+def test_mediamtx_address_is_in_the_file_and_the_bridge_still_loads(tmp_path: Path) -> None:
+    """go2rtc reads it from this file; the bridge reads named keys and ignores it."""
+    cfg = make_config(outbox=outbox(path=str(tmp_path / "outbox.jsonl")))
+    loaded = bridge_cli.load_config(str(written(tmp_path, cfg)))
+
+    assert loaded["mediamtx_address"] == MEDIAMTX_ADDRESS
+    assert example()["mediamtx_address"]
+    assert isinstance(
+        bridge_cli.make_bridge(loaded, central_client=Mock(), local_client=Mock()), Bridge
+    )
+
+
+def test_real_central_client_gets_the_credentials_and_tls(tmp_path: Path) -> None:
+    cfg = make_config(broker=broker(tls=True))
+    client = bridge_cli._build_central_client(bridge_cli.load_config(str(written(tmp_path, cfg))))
+
+    assert client.username == "camera-cam-01"
+    assert client.password == BROKER_PASSWORD
+    assert client._ssl_context is not None
+
+
+def test_real_central_client_has_no_tls_when_it_is_off(tmp_path: Path) -> None:
+    client = bridge_cli._build_central_client(bridge_cli.load_config(str(written(tmp_path))))
+    assert client._ssl_context is None
+
+
+def test_anonymous_broker_reaches_the_real_client_without_credentials(tmp_path: Path) -> None:
+    cfg = make_config(broker_anonymous=True, broker=broker(username="", password=""))
+    assert validate(cfg) == []
+
+    path = written(tmp_path, cfg)
+
+    assert "broker_anonymous" not in path.read_text(encoding="utf-8")
+    assert bridge_cli._build_central_client(bridge_cli.load_config(str(path))).username is None
+
+
+def test_credentials_are_required_by_default() -> None:
+    errors = validate(make_config(broker=broker(username="", password="")))
+    assert any(e.startswith("broker.username") for e in errors)
+    assert any(e.startswith("broker.password") for e in errors)
+
+
+@pytest.mark.parametrize("anonymous", [False, True])
+@pytest.mark.parametrize(
+    ("username", "password"), [("camera-cam-01", ""), ("", BROKER_PASSWORD)]
+)
+def test_partial_credentials_are_always_rejected(
+    anonymous: bool, username: str, password: str
+) -> None:
+    cfg = make_config(
+        broker_anonymous=anonymous, broker=broker(username=username, password=password)
+    )
+    assert any(e.startswith("broker.") for e in validate(cfg))
+
+
+def test_anonymous_broker_with_full_credentials_is_contradictory() -> None:
+    errors = validate(make_config(broker_anonymous=True))
+    assert any(e.startswith("broker.username") for e in errors)
+
+
+@pytest.mark.parametrize("password", ["a\x85b", "a\u2028b", "a\ufeffb", "tab\tinside", "新しい"])
+def test_unicode_breaks_and_controls_in_a_password_round_trip(
+    tmp_path: Path, password: str
+) -> None:
     path = written(tmp_path, make_config(broker=broker(password=password)))
     assert bridge_cli.load_config(str(path))["broker"]["password"] == password
 
@@ -332,7 +479,16 @@ def test_contents_are_flushed_before_the_rename_and_the_rename_after(
     real_fsync, real_replace = os.fsync, os.replace
 
     def spy_fsync(fd: int) -> None:
-        calls.append("fsync-dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "fsync-file")
+        info = os.fstat(fd)
+        if stat.S_ISDIR(info.st_mode):
+            assert info.st_ino == tmp_path.stat().st_ino
+            calls.append("fsync-dir")
+        else:
+            # The secret must be private from creation, and the rename must stay on
+            # one filesystem and in a directory this code syncs.
+            assert stat.S_IMODE(info.st_mode) == 0o600
+            assert info.st_ino in {p.stat().st_ino for p in tmp_path.iterdir()}
+            calls.append("fsync-file")
         real_fsync(fd)
 
     def spy_replace(src: Any, dst: Any) -> None:
@@ -441,5 +597,5 @@ def test_unserializable_value_error_never_carries_secret_values(tmp_path: Path) 
         write_bridge_config(cfg, path)
 
     assert BROKER_PASSWORD not in str(raised.value)
-    assert raised.value.__suppress_context__
+    assert raised.value.__context__ is None
     assert not path.exists()

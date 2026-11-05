@@ -59,11 +59,13 @@ $errors
 <input type="text" name="broker_port" value="$broker_port" required inputmode="numeric" autocomplete="off">
 </label>
 <label>Broker username
-<input type="text" name="broker_username" value="$broker_username" required autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+<input type="text" name="broker_username" value="$broker_username" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
 </label>
 <label>Broker password
-<input type="password" name="broker_password" required autocomplete="off">
+<input type="password" name="broker_password" autocomplete="off">
 </label>
+<label><input type="checkbox" name="broker_anonymous" value="on" $anonymous_checked> Broker takes no username or password</label>
+<label><input type="checkbox" name="broker_tls" value="on" $tls_checked> Use TLS</label>
 <label>MediaMTX address
 <input type="text" name="mediamtx_address" value="$mediamtx_address" required placeholder="10.0.0.2:8554" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
 </label>

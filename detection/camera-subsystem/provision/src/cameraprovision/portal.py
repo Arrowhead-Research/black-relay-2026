@@ -104,6 +104,8 @@ def render_form(
     else:
         shown = values
         vpn_ticked = "vpn_requested" in values
+    # Absent from a first render's values too, so both boxes start unticked.
+    boxes = values or {}
 
     # Substitution is a single pass, so a value holding "$errors" stays literal text.
     return _FORM_TEMPLATE.substitute(
@@ -112,6 +114,8 @@ def render_form(
         # A scan reports one row per access point, so a site network repeats.
         ssid_options="".join(f'<option value="{_escape(s)}">' for s in dict.fromkeys(ssids)),
         vpn_checked="checked" if vpn_ticked else "",
+        tls_checked="checked" if "broker_tls" in boxes else "",
+        anonymous_checked="checked" if "broker_anonymous" in boxes else "",
     )
 
 
@@ -132,7 +136,7 @@ def _build_config(form: Mapping[str, str]) -> NodeConfig:
     def raw(name: str) -> str:
         return form.get(name, "")
 
-    # Phone keyboards append spaces, and validate would pass them in these fields.
+    # Phone keyboards append spaces, and validate would reject the form over them.
     # Identity fields stay raw so "cam\n" is rejected, and passwords and SSIDs stay raw
     # because a space is legal in them.
     def trimmed(name: str) -> str:
@@ -154,7 +158,9 @@ def _build_config(form: Mapping[str, str]) -> NodeConfig:
             port=_parse_port(raw("broker_port")),
             username=trimmed("broker_username"),
             password=raw("broker_password"),
+            tls="broker_tls" in form,
         ),
+        broker_anonymous="broker_anonymous" in form,
         frigate=FrigateConfig(base_url=trimmed("frigate_base_url")),
     )
 

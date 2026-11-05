@@ -68,3 +68,7 @@ frigate:
   # bridge. Defaults: 127.0.0.1:1883.
   mqtt_host: 127.0.0.1
   mqtt_port: 1883
+
+# Central MediaMTX RTSP relay. go2rtc uses this to restream live view (DESIGN.md 4.1);
+# the bridge ignores it. It lives here so one file holds the node's central endpoints.
+mediamtx_address: 10.0.0.2:8554

@@ -3,8 +3,9 @@
 ``NodeConfig`` nests the same sections as ``bridge/config/bridge.example.yaml``, and
 its defaults are that file's values (a test holds them equal). It also carries the
 fields only provisioning uses: WiFi credentials, hostname, Tailscale key, and the
-MediaMTX address. Those never reach the bridge YAML; ``_bridge_mapping`` is the one
-place that decides what does.
+anonymous-broker choice. Those never reach the bridge YAML; ``_bridge_mapping`` is the
+one place that decides what does. ``mediamtx_address`` is in that file for go2rtc,
+and the bridge ignores it.
 
 Secrets stay out of every rendering: their fields are excluded from ``repr``, and
 ``validate`` names the offending field without quoting any value.
@@ -12,6 +13,7 @@ Secrets stay out of every rendering: their fields are excluded from ``repr``, an
 
 from __future__ import annotations
 
+import ipaddress
 import math
 import os
 import re
@@ -36,7 +38,8 @@ _RFC1123_LABEL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 _HTTP_URL_RE = re.compile(r"https?://\S+")
 # WPA2: an 8-63 character printable-ASCII passphrase, or a raw 64-digit hex key.
 _WPA_PSK_RE = re.compile(r"[\x20-\x7e]{8,63}|[0-9a-fA-F]{64}")
-_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+# C0, DEL, C1 (which includes NEL), and the lone surrogates UTF-8 cannot encode.
+_SSID_FORBIDDEN_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\ud800-\udfff]")
 _SSID_MAX_BYTES = 32
 
 
@@ -78,7 +81,7 @@ class FrigateConfig:
 class NodeConfig:
     """Everything one node is provisioned with."""
 
-    # Bridge keys.
+    # Keys of the bridge config file.
     node_id: str
     broker: BrokerConfig
     covered_zones: list[str] | tuple[str, ...]
@@ -86,18 +89,42 @@ class NodeConfig:
     outbox: OutboxConfig = field(default_factory=OutboxConfig)
     cue_window_s: float = 5.0
     status_interval_s: float = 30
+    mediamtx_address: str
 
     # Provisioning only: never written to the bridge config.
     hostname: str
     wifi_ssid: str
     wifi_psk: str = field(repr=False)
-    mediamtx_address: str
     tailscale_auth_key: str = field(repr=False)
     vpn_requested: bool = True
+    # Credentials are required unless this says the broker takes none.
+    broker_anonymous: bool = False
 
 
 def _has_text(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def _is_clean_text(value: Any) -> bool:
+    """Non-empty, printable, and with no surrounding whitespace."""
+    return isinstance(value, str) and bool(value) and value == value.strip() and value.isprintable()
+
+
+def _is_host(value: Any) -> bool:
+    """A plain hostname or IP address, with no scheme, port or spaces."""
+    if not isinstance(value, str):
+        return False
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        labels = value.split(".")
+        return (
+            len(value) <= 253
+            and all(_RFC1123_LABEL_RE.fullmatch(label) for label in labels)
+            # An all-numeric ending is a mistyped IP address, not a name.
+            and not labels[-1].isdigit()
+        )
+    return True
 
 
 def _is_port(value: Any) -> bool:
@@ -105,19 +132,19 @@ def _is_port(value: Any) -> bool:
 
 
 def _is_positive_number(value: Any) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-        and value > 0
-    )
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value) and value > 0
+    except OverflowError:  # an int too large for a float
+        return False
 
 
 def _is_ssid(value: Any) -> bool:
     return (
         _has_text(value)
-        and not _CONTROL_CHAR_RE.search(value)
-        and len(value.encode("utf-8", "replace")) <= _SSID_MAX_BYTES
+        and not _SSID_FORBIDDEN_RE.search(value)
+        and len(value.encode("utf-8")) <= _SSID_MAX_BYTES
     )
 
 
@@ -125,7 +152,7 @@ def _zones_valid(zones: Any) -> bool:
     return (
         isinstance(zones, (list, tuple))
         and len(zones) > 0
-        and all(_has_text(zone) for zone in zones)
+        and all(_is_clean_text(zone) for zone in zones)
     )
 
 
@@ -133,11 +160,27 @@ def _matches(pattern: re.Pattern[str], value: Any) -> bool:
     return isinstance(value, str) and pattern.fullmatch(value) is not None
 
 
+def _credential_checks(cfg: NodeConfig) -> list[tuple[bool, str]]:
+    broker = cfg.broker
+    if cfg.broker_anonymous:
+        return [
+            (
+                broker.username == "" and broker.password == "",
+                "broker.username and broker.password must be empty for an anonymous broker",
+            )
+        ]
+    return [
+        (_is_clean_text(broker.username), "broker.username is required, with no stray spaces"),
+        (_has_text(broker.password), "broker.password is required"),
+    ]
+
+
 def validate(cfg: NodeConfig) -> list[str]:
     """Return every problem with ``cfg`` as readable text; empty means valid.
 
     Messages name fields and rules, and never quote a value, so they are safe to log
-    or show on the portal whichever field is wrong.
+    or show on the portal whichever field is wrong. The WiFi SSID and PSK and the broker
+    password are not held to the clean-text rule, because spaces are legal in them.
     """
     broker, outbox, frigate = cfg.broker, cfg.outbox, cfg.frigate
     checks = [
@@ -145,20 +188,27 @@ def validate(cfg: NodeConfig) -> list[str]:
             _matches(_NODE_ID_RE, cfg.node_id),
             "node_id must be lowercase letters, digits and hyphens, with no leading hyphen",
         ),
-        (_has_text(broker.host), "broker.host is required"),
+        (_is_host(broker.host), "broker.host must be a plain hostname or IP address"),
         (_is_port(broker.port), "broker.port must be a whole number from 1 to 65535"),
-        (_has_text(broker.username), "broker.username is required"),
-        (_has_text(broker.password), "broker.password is required"),
+        *_credential_checks(cfg),
         (isinstance(broker.tls, bool), "broker.tls must be true or false"),
         (_zones_valid(cfg.covered_zones), "covered_zones needs at least one non-empty zone"),
-        (_has_text(outbox.path), "outbox.path is required"),
+        (_is_clean_text(outbox.path), "outbox.path is required, with no stray spaces"),
         (_is_positive_number(outbox.max_bytes), "outbox.max_bytes must be a positive number"),
         (_is_positive_number(outbox.max_age_s), "outbox.max_age_s must be a positive number"),
         (_is_positive_number(cfg.cue_window_s), "cue_window_s must be a positive number"),
         (_is_positive_number(cfg.status_interval_s), "status_interval_s must be a positive number"),
-        (_has_text(frigate.topic), "frigate.topic is required"),
-        (_matches(_HTTP_URL_RE, frigate.base_url), "frigate.base_url must be an http(s) URL"),
-        (_has_text(frigate.mqtt_host), "frigate.mqtt_host is required"),
+        (_is_clean_text(frigate.topic), "frigate.topic is required, with no stray spaces"),
+        (
+            _is_clean_text(frigate.base_url) and _matches(_HTTP_URL_RE, frigate.base_url),
+            "frigate.base_url must be an http(s) URL",
+        ),
+        (
+            frigate.camera is None or _matches(_NODE_ID_RE, frigate.camera),
+            "frigate.camera must be lowercase letters, digits and hyphens, "
+            "with no leading hyphen",
+        ),
+        (_is_host(frigate.mqtt_host), "frigate.mqtt_host must be a plain hostname or IP address"),
         (_is_port(frigate.mqtt_port), "frigate.mqtt_port must be a whole number from 1 to 65535"),
         (
             _matches(_RFC1123_LABEL_RE, cfg.hostname),
@@ -170,10 +220,10 @@ def validate(cfg: NodeConfig) -> list[str]:
             _matches(_WPA_PSK_RE, cfg.wifi_psk),
             "wifi_psk must be 8-63 printable ASCII characters or 64 hex digits",
         ),
-        (_has_text(cfg.mediamtx_address), "mediamtx_address is required"),
+        (_is_clean_text(cfg.mediamtx_address), "mediamtx_address is required, with no stray spaces"),
         (
-            not cfg.vpn_requested or _has_text(cfg.tailscale_auth_key),
-            "tailscale_auth_key is required when the VPN is requested",
+            not cfg.vpn_requested or _is_clean_text(cfg.tailscale_auth_key),
+            "tailscale_auth_key is required when the VPN is requested, with no stray spaces",
         ),
     ]
     return [message for ok, message in checks if not ok]
@@ -205,6 +255,7 @@ def _bridge_mapping(cfg: NodeConfig) -> dict[str, Any]:
             "mqtt_host": cfg.frigate.mqtt_host,
             "mqtt_port": cfg.frigate.mqtt_port,
         },
+        "mediamtx_address": cfg.mediamtx_address,
     }
 
 
@@ -242,9 +293,14 @@ def write_bridge_config(cfg: NodeConfig, path: str | os.PathLike[str]) -> None:
     errors = validate(cfg)
     if errors:
         raise ValueError("invalid node config: " + "; ".join(errors))
+    # ASCII output: PyYAML's emitter writes NEL and friends raw when allowed to, and its
+    # own reader then treats them as line breaks.
     try:
-        text = yaml.safe_dump(_bridge_mapping(cfg), sort_keys=False, allow_unicode=True)
+        text = yaml.safe_dump(_bridge_mapping(cfg), sort_keys=False, allow_unicode=False)
     except yaml.YAMLError:
-        # PyYAML's message quotes the value it could not represent.
-        raise ValueError("node config holds a value that cannot be written as YAML") from None
+        text = None
+    # Raised out here so the YAML error, whose message quotes the value it could not
+    # represent, is not even attached as __context__.
+    if text is None:
+        raise ValueError("node config holds a value that cannot be written as YAML")
     _write_private_atomic(Path(path), text)

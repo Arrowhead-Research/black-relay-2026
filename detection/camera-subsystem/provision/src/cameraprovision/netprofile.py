@@ -1,8 +1,8 @@
 """Builders for the WiFi client profile, the Tailscale command, and the AP passphrase.
 
-Pure: nothing here touches the system. The adapters that write the profile and run
-the command are Task 6's, and they must treat the returned profile as secret because
-it holds the WiFi PSK.
+Pure: nothing here touches the system. The adapters that write the keyfile and run
+the command are Task 6's, and they must treat the returned profile and keyfile text
+as secret because they hold the WiFi PSK.
 """
 
 from __future__ import annotations
@@ -10,8 +10,9 @@ from __future__ import annotations
 import os
 import secrets
 import string
+import uuid
 
-__all__ = ["generate_ap_passphrase", "nm_wifi_profile", "tailscale_up_args"]
+__all__ = ["generate_ap_passphrase", "nm_wifi_profile", "render_nm_keyfile", "tailscale_up_args"]
 
 # Fixed, so re-provisioning replaces the profile instead of adding one per site.
 _PROFILE_ID = "black-relay-uplink"
@@ -25,20 +26,60 @@ _PASSPHRASE_LENGTH = 20
 def nm_wifi_profile(ssid: str, psk: str, hostname: str) -> dict[str, dict[str, str]]:
     """Return the NetworkManager keyfile sections for the site WiFi client profile.
 
-    Values are unescaped strings. ``autoconnect-retries`` is 0 (retry forever) so a
-    node that boots before the router rejoins by itself once WiFi returns.
+    Values are unescaped strings; :func:`render_nm_keyfile` turns them into a file.
+    ``autoconnect-retries`` is 0 (retry forever) so a node that boots before the router
+    rejoins by itself once WiFi returns. ``may-fail`` is false because uplink means a
+    DHCP lease, so association alone must not count as connected.
     """
     return {
         "connection": {
             "id": _PROFILE_ID,
+            "uuid": str(uuid.uuid5(uuid.NAMESPACE_DNS, _PROFILE_ID)),
             "type": "wifi",
             "autoconnect": "true",
             "autoconnect-retries": "0",
         },
         "wifi": {"ssid": ssid, "mode": "infrastructure"},
         "wifi-security": {"key-mgmt": "wpa-psk", "psk": psk},
-        "ipv4": {"method": "auto", "dhcp-hostname": hostname},
+        "ipv4": {"method": "auto", "may-fail": "false", "dhcp-hostname": hostname},
     }
+
+
+def _escape_keyfile_value(value: str) -> str:
+    """Apply GKeyFile string escaping, including each leading space."""
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+    body = escaped.lstrip(" ")
+    return "\\s" * (len(escaped) - len(body)) + body
+
+
+def _encode_keyfile_ssid(ssid: str) -> str:
+    """Encode an SSID as NetworkManager's keyfile writer does.
+
+    The reader takes a bare ``;`` to mean a list of byte values, so ``12;34;56;`` would
+    be read as three bytes. A literal one is stored as ``\\\\;``. Anything else outside
+    printable ASCII is stored as byte values.
+    """
+    if not (ssid.isascii() and ssid.isprintable()):
+        return "".join(f"{byte};" for byte in ssid.encode("utf-8"))
+    return _escape_keyfile_value(ssid).replace(";", "\\\\;")
+
+
+def render_nm_keyfile(profile: dict[str, dict[str, str]]) -> str:
+    """Return ``profile`` as NetworkManager keyfile text, escaped so values round-trip."""
+    blocks = []
+    for section, settings in profile.items():
+        lines = [f"[{section}]"]
+        for key, value in settings.items():
+            is_ssid = (section, key) == ("wifi", "ssid")
+            encoded = _encode_keyfile_ssid(value) if is_ssid else _escape_keyfile_value(value)
+            lines.append(f"{key}={encoded}")
+        blocks.append("\n".join(lines) + "\n")
+    return "\n".join(blocks)
 
 
 def tailscale_up_args(auth_key_file: str | os.PathLike[str], hostname: str) -> list[str]:

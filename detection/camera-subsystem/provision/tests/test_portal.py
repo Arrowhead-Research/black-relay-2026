@@ -137,6 +137,8 @@ def test_form_collects_exactly_the_portal_fields() -> None:
         *REDISPLAYED_FIELDS,
         *SECRET_FIELDS,
         "vpn_requested",
+        "broker_tls",
+        "broker_anonymous",
     }
 
 
@@ -168,6 +170,8 @@ def test_first_render_defaults() -> None:
     controls = Page(render_form([])).controls()
     assert controls["broker_port"]["value"] == str(BrokerConfig.port)
     assert "checked" in controls["vpn_requested"]
+    assert "checked" not in controls["broker_tls"]
+    assert "checked" not in controls["broker_anonymous"]
 
 
 @pytest.mark.parametrize("payload", XSS_PAYLOADS)
@@ -225,6 +229,19 @@ def test_secrets_are_never_rendered() -> None:
         assert "value" not in controls[field]
 
 
+@pytest.mark.parametrize("box", ["broker_tls", "broker_anonymous"])
+def test_redisplay_keeps_broker_checkbox_state(box: str) -> None:
+    assert "checked" not in Page(render_form([], values=valid_form())).controls()[box]
+    assert "checked" in Page(render_form([], values=valid_form(**{box: "on"}))).controls()[box]
+
+
+def test_broker_credentials_can_be_left_blank_in_the_browser() -> None:
+    """A required attribute would stop an anonymous submission reaching the server."""
+    controls = Page(render_form([])).controls()
+    assert "required" not in controls["broker_username"]
+    assert "required" not in controls["broker_password"]
+
+
 # --- handle_submit: success -----------------------------------------------------
 
 
@@ -253,6 +270,46 @@ def test_valid_form_applies_the_parsed_config_once() -> None:
             frigate=FrigateConfig(base_url="http://cam-01.local:5000"),
         )
     )
+
+
+def submitted_config(form: dict[str, str]) -> NodeConfig:
+    apply = Mock()
+    assert handle_submit(form, apply=apply) == SubmitResult(ok=True)
+    return apply.call_args.args[0]
+
+
+def test_tls_box_sets_broker_tls() -> None:
+    assert submitted_config(valid_form(broker_tls="on")).broker.tls is True
+    assert submitted_config(valid_form()).broker.tls is False
+
+
+def test_tls_box_reaches_the_bridge_yaml(tmp_path: Path) -> None:
+    path = tmp_path / "bridge.yaml"
+    write_bridge_config(submitted_config(valid_form(broker_tls="on")), path)
+    assert bridge_cli.load_config(str(path))["broker"]["tls"] is True
+
+
+def test_anonymous_box_allows_blank_broker_credentials() -> None:
+    cfg = submitted_config(
+        valid_form(broker_anonymous="on", broker_username="", broker_password="")
+    )
+    assert cfg.broker_anonymous is True
+    assert (cfg.broker.username, cfg.broker.password) == ("", "")
+
+
+def test_anonymous_box_with_credentials_is_rejected() -> None:
+    apply = Mock()
+    result = handle_submit(valid_form(broker_anonymous="on"), apply=apply)
+    assert not result.ok
+    assert any(e.startswith("broker.username") for e in result.errors)
+    apply.assert_not_called()
+
+
+def test_blank_broker_credentials_need_the_anonymous_box() -> None:
+    apply = Mock()
+    result = handle_submit(valid_form(broker_username="", broker_password=""), apply=apply)
+    assert not result.ok
+    apply.assert_not_called()
 
 
 def test_unticked_vpn_needs_no_key() -> None:
@@ -289,7 +346,7 @@ def test_covered_zones_are_split_on_commas(typed: str, zones: list[str]) -> None
 
 
 def test_phone_keyboard_spaces_are_trimmed_from_endpoints() -> None:
-    """A trailing space passes validate but would leave the bridge unable to connect."""
+    """Forgiven here, because validate would reject the whole form over a stray space."""
     apply = Mock()
     form = valid_form(
         broker_host=" 10.0.0.2 ",
@@ -330,7 +387,7 @@ def test_portal_only_fields_stay_out_of_the_bridge_yaml(tmp_path: Path) -> None:
 
     assert result.ok
     text = path.read_text(encoding="utf-8")
-    for leaked in ("Site-WiFi-XYZ", WIFI_PSK, TAILSCALE_KEY, "edge-host-7", "10.0.0.2:8554"):
+    for leaked in ("Site-WiFi-XYZ", WIFI_PSK, TAILSCALE_KEY, "edge-host-7"):
         assert leaked not in text
     assert bridge_cli.load_config(str(path))["broker"]["password"] == BROKER_PASSWORD
 
