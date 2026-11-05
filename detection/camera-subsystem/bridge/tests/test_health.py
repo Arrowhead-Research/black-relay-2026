@@ -85,16 +85,18 @@ def test_dead_camera_zero_fps():
     health.update(STATS, stats(camera_fps=0.0))
     state = health.evaluate(link_online=True)
     assert state.camera_online is False
-    # The detector and the recording flag are reported on their own definitions.
     assert state.detector_ok is True
-    assert state.recording_ok is True
+    # Recording requires a live camera: Frigate's setting can stay ON with no frames.
+    assert state.recording_ok is False
 
 
 def test_camera_missing_from_stats():
     health = make_health()
     feed_healthy(health)
     health.update(STATS, stats(camera="some-other-camera"))
-    assert health.evaluate(link_online=True).camera_online is False
+    state = health.evaluate(link_online=True)
+    assert state.camera_online is False
+    assert state.recording_ok is False
 
 
 def test_stale_stats_report_false():

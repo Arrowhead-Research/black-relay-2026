@@ -415,3 +415,87 @@ def test_enqueue_many_fsyncs_once(tmp_path, monkeypatch):
 def test_enqueue_many_empty_is_a_noop(tmp_path):
     Outbox(str(tmp_path / "o.jsonl"), max_bytes=10, max_age_s=1e9).enqueue_many([])
     assert not (tmp_path / "o.jsonl").exists()
+
+
+# --- send window -------------------------------------------------------------
+
+
+def _filled(tmp_path, count, *, name="w.jsonl"):
+    box = Outbox(str(tmp_path / name), max_bytes=10_000_000, max_age_s=1e9)
+    box.enqueue_many([("t", _batch_msg(i)) for i in range(count)])
+    return box
+
+
+def _ids(publish) -> list[str]:
+    return [json.loads(p)["event_id"] for p in publish.payloads]
+
+
+def test_flush_sends_at_most_a_window_of_unacked_entries(tmp_path):
+    box = _filled(tmp_path, 50)
+    p = RecordingPublish()
+    box.flush(p)
+    assert _ids(p) == [f"e{i}" for i in range(20)]
+    box.flush(p)
+    assert len(p.calls) == 20  # the window is full: nothing more until acks
+
+
+def test_acks_open_the_window_in_fifo_order(tmp_path):
+    box = _filled(tmp_path, 50)
+    p = RecordingPublish()
+    mids = box.flush(p)
+    box.ack_many(mids[:3])
+    box.flush(p)
+    assert _ids(p) == [f"e{i}" for i in range(23)]
+
+
+def test_replay_sends_a_window_from_the_oldest_unacked(tmp_path):
+    box = _filled(tmp_path, 50)
+    p1 = RecordingPublish()
+    mids = box.flush(p1)
+    box.ack(mids[0])
+
+    p2 = RecordingPublish(start_mid=5000)
+    box.replay(p2)
+    assert _ids(p2) == [f"e{i}" for i in range(1, 21)]
+
+
+def test_rejected_publish_is_not_marked_sent_and_stops_the_flush(tmp_path):
+    box = _filled(tmp_path, 3)
+    calls = []
+
+    def rejecting(topic, payload, qos):
+        calls.append(payload)
+        return None
+
+    assert box.flush(rejecting) == []
+    assert len(calls) == 1  # stopped at the head, so nothing overtakes it
+
+    p = RecordingPublish()
+    box.flush(p)
+    assert _ids(p) == ["e0", "e1", "e2"]  # the head was not marked sent
+
+
+# --- ack_many: one rewrite per batch -----------------------------------------
+
+
+def test_ack_many_removes_all_with_one_rewrite(tmp_path, monkeypatch):
+    box = _filled(tmp_path, 10)
+    mids = box.flush(RecordingPublish())
+    calls = []
+    real = box._rewrite
+    monkeypatch.setattr(box, "_rewrite", lambda: (calls.append(1), real())[1])
+    box.ack_many(mids[:7])
+    assert len(calls) == 1
+    p = RecordingPublish()
+    Outbox(str(tmp_path / "w.jsonl"), max_bytes=10_000_000, max_age_s=1e9).replay(p)
+    assert _ids(p) == ["e7", "e8", "e9"]
+
+
+def test_ack_many_with_only_unknown_mids_does_not_rewrite(tmp_path, monkeypatch):
+    box = _filled(tmp_path, 2)
+    box.flush(RecordingPublish())
+    calls = []
+    monkeypatch.setattr(box, "_rewrite", lambda: calls.append(1))
+    box.ack_many([999_999, 888_888])
+    box.ack_many([])
+    assert calls == []

@@ -26,6 +26,7 @@ can never drift from the contract.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -55,10 +56,11 @@ class FakeClock:
 
 
 class _FakeInfo:
-    """Mirrors paho's ``MQTTMessageInfo`` — carries the broker-assigned ``mid``."""
+    """Mirrors paho's ``MQTTMessageInfo``: the broker-assigned ``mid`` and result code."""
 
-    def __init__(self, mid: int) -> None:
+    def __init__(self, mid: int, rc: int = 0) -> None:
         self.mid = mid
+        self.rc = rc
 
 
 class FakeMqttClient:
@@ -73,6 +75,10 @@ class FakeMqttClient:
         self.published: list[tuple[str, bytes, int]] = []
         self.subscriptions: list[tuple[str, int]] = []
         self._next_mid = 1
+        # paho's retained-message state, which the bridge discards on connect.
+        self._out_message_mutex = threading.RLock()
+        self._out_messages: dict[int, object] = {}
+        self._inflight_messages = 0
         self.on_connect = None
         self.on_message = None
         self.on_publish = None
@@ -154,6 +160,16 @@ def make_bridge(
     if connected:
         bridge.handle_central_connect()
     return bridge
+
+
+def ack_all(bridge, client) -> None:
+    """Play the broker: PUBACK every QoS-1 publish until the send window stops moving."""
+    acked = 0
+    while acked < len(client.published):
+        mid = acked + 1  # FakeMqttClient hands out mids 1, 2, 3, ... in publish order
+        if client.published[acked][2] == 1:
+            bridge._paho_on_publish(client, None, mid, None, None)
+        acked += 1
 
 
 def decode_published(client) -> list[tuple[str, dict, int]]:
@@ -431,8 +447,9 @@ def test_on_publish_acks_outbox_entry(tmp_path):
     # The broker ack for that publish removes the entry from the outbox file.
     published_mid = client.published[0]  # the publish happened
     assert published_mid is not None
-    # Simulate the PUBACK for mid=1 (the first/only durable publish).
-    bridge.on_publish_ack(1)
+    # The PUBACK for mid=1 (the first/only durable publish), via the real callback.
+    bridge.wire()
+    client.on_publish(client, None, 1, None, None)
     path = tmp_path / "outbox.jsonl"
     remaining = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
     assert remaining == []
@@ -522,7 +539,7 @@ def test_concurrent_dispatch_and_heartbeat_no_race(tmp_path):
             for i in range(rounds):
                 bridge.publish_status(NodeState(True, True, True, True))
                 bridge.expire_tracks(now=FIXED_EPOCH + i)
-                bridge.on_publish_ack(i + 1)
+                bridge._paho_on_publish(client, None, i + 1, None, None)
         except BaseException as exc:  # noqa: BLE001
             errors.append(exc)
 
@@ -796,6 +813,16 @@ class _NetClient:
         self.connect_async_calls: list[tuple[str, int]] = []
         self.loop_started = False
         self.loop_stopped = False
+        self.thread_dies = False
+        self._out_message_mutex = threading.RLock()
+        self._out_messages: dict[int, object] = {}
+        self._inflight_messages = 0
+
+    @property
+    def _thread(self):
+        """Stands in for the thread paho's loop_start() creates."""
+        alive = self.loop_started and not self.thread_dies
+        return type("T", (), {"is_alive": lambda _self: alive})()
 
     def reconnect_delay_set(self, *, min_delay, max_delay):
         self.delay = (min_delay, max_delay)
@@ -1041,7 +1068,11 @@ def test_cli_heartbeat_reports_measured_health_not_optimistic_defaults(monkeypat
 
     def make_and_connect(*a, **k):
         bridge = real_make(*a, **k)
-        monkeypatch.setattr(_NetClient, "loop_start", lambda self: bridge.handle_central_connect())
+        def start_and_connect(self):
+            self.loop_started = True
+            bridge.handle_central_connect()
+
+        monkeypatch.setattr(_NetClient, "loop_start", start_and_connect)
         return bridge
 
     monkeypatch.setattr(cli, "make_bridge", make_and_connect)
@@ -1281,6 +1312,444 @@ def test_concurrent_presync_capture_and_sync_keeps_every_event_once(tmp_path):
     for t in threads:
         t.join()
     bridge.publish_status(HEARTBEAT)
+    ack_all(bridge, central)
 
     dets = [m["object_id"] for t, m, _q in decode_published(central) if t == formats.TOPIC_DETECTIONS]
     assert dets == names  # all delivered, once, in capture order
+
+
+# --- C1: on_disconnect must not wait for the bridge lock ---------------------
+
+
+class _MutexClient(FakeMqttClient):
+    """publish() waits on a mutex, as paho's publish() waits on _out_message_mutex."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.mutex = threading.Lock()
+        self.in_publish = threading.Event()
+
+    def publish(self, topic, payload, qos=0):
+        self.in_publish.set()
+        with self.mutex:
+            return super().publish(topic, payload, qos)
+
+
+def test_central_on_disconnect_does_not_deadlock_with_publish(tmp_path):
+    """paho's _handle_connack holds _out_message_mutex, calls loop_write, and a socket
+    error fires on_disconnect, while the local thread holds the bridge lock inside
+    central.publish(), waiting for that mutex."""
+    central = _MutexClient()
+    bridge = make_bridge(central, tmp_path=tmp_path)
+    bridge.wire()
+
+    central.mutex.acquire()  # the network thread is inside _handle_connack
+    local_thread = threading.Thread(
+        target=bridge.dispatch,
+        args=("frigate/events", json.dumps(frigate_payload("new", "trk-1")).encode()),
+        daemon=True,
+    )
+    local_thread.start()
+    assert central.in_publish.wait(5)  # local thread: holds the lock, waits for the mutex
+
+    disconnect = threading.Thread(
+        target=central.on_disconnect, args=(central, None, None, _ConnackRC(True), None), daemon=True
+    )
+    disconnect.start()
+    disconnect.join(1.0)
+    alive = disconnect.is_alive()
+    central.mutex.release()
+    local_thread.join(5)
+    assert not alive, "on_disconnect waited for the bridge lock"
+    assert bridge.central_connected is False
+
+
+# --- C2: one rewrite per lock hold, however fast acks arrive -----------------
+
+
+def _seed(outbox, count):
+    outbox.enqueue_many(
+        [(formats.TOPIC_DETECTIONS, {"event_id": f"e{i}", "object_id": f"s{i}"}) for i in range(count)]
+    )
+
+
+def _count_rewrites(monkeypatch, outbox, during=None) -> list:
+    calls: list[int] = []
+    real = outbox._rewrite
+
+    def counting():
+        calls.append(1)
+        if during is not None:
+            during(len(calls))
+        real()
+
+    monkeypatch.setattr(outbox, "_rewrite", counting)
+    return calls
+
+
+def test_posted_acks_are_applied_with_one_rewrite(tmp_path, monkeypatch):
+    central = FakeMqttClient()
+    outbox = Outbox(str(tmp_path / "outbox.jsonl"), max_bytes=10_000_000, max_age_s=1e9)
+    _seed(outbox, 20)
+    bridge = make_bridge(central, tmp_path=tmp_path, outbox=outbox)
+    rewrites = _count_rewrites(monkeypatch, outbox)
+
+    for mid in range(1, 21):
+        bridge._acks.put(mid)
+    bridge.expire_tracks()
+
+    assert len(rewrites) == 1
+    assert outbox_lines(tmp_path) == []
+
+
+def test_acks_arriving_during_a_rewrite_do_not_extend_the_lock_hold(tmp_path, monkeypatch):
+    # PUBACKs arrive faster than one rewrite + fsync. A drain that loops until the
+    # mailbox is empty holds the lock until the whole backlog is gone.
+    central = FakeMqttClient()
+    outbox = Outbox(str(tmp_path / "outbox.jsonl"), max_bytes=10_000_000, max_age_s=1e9)
+    _seed(outbox, 60)
+    bridge = make_bridge(central, tmp_path=tmp_path, outbox=outbox)
+    next_mid = iter(range(2, 61))
+
+    def another_ack_arrives(_count):
+        mid = next(next_mid, None)
+        if mid is not None:
+            bridge._acks.put(mid)
+
+    rewrites = _count_rewrites(monkeypatch, outbox, during=another_ack_arrives)
+    bridge._acks.put(1)
+    with bridge._lock:
+        bridge._drain_acks()
+    assert len(rewrites) == 1
+
+
+def test_ack_posted_during_a_lock_hold_is_applied_when_the_holder_releases(tmp_path):
+    # The poster's try-acquire fails while another thread holds the lock, and this may
+    # be the last ack of the window, so the holder has to pick it up on release.
+    class AckedDuringPublish(FakeMqttClient):
+        def publish(self, topic, payload, qos=0):
+            info = super().publish(topic, payload, qos)
+            poster = threading.Thread(target=bridge._paho_on_publish, args=(self, None, info.mid))
+            poster.start()
+            poster.join()
+            return info
+
+    central = AckedDuringPublish()
+    bridge = make_bridge(central, tmp_path=tmp_path)
+    bridge.dispatch("frigate/events", json.dumps(frigate_payload("new", "trk-1")).encode())
+    assert outbox_lines(tmp_path) == []
+
+
+# --- I1: send window, publish result codes, no stacked copies ----------------
+
+MQTT_ERR_QUEUE_SIZE = 15
+
+
+def test_reconnect_sends_a_window_and_acks_advance_it(tmp_path):
+    central = FakeMqttClient()
+    outbox = Outbox(str(tmp_path / "outbox.jsonl"), max_bytes=10_000_000, max_age_s=1e9)
+    _seed(outbox, 50)
+    bridge = make_bridge(central, tmp_path=tmp_path, outbox=outbox, connected=False)
+    bridge.wire()
+
+    central.on_connect(central, None, None, _ConnackRC(False), None)
+    assert len(central.published) == 20
+
+    central.on_publish(central, None, 1, None, None)
+    central.on_publish(central, None, 2, None, None)
+    assert len(central.published) == 22  # acks open the window with no other trigger
+
+    ack_all(bridge, central)
+    sent = [json.loads(p)["object_id"] for _t, p, _q in central.published]
+    assert sent == [f"s{i}" for i in range(50)]  # each once, in order
+    assert outbox_lines(tmp_path) == []
+
+
+def test_connect_discards_paho_retained_copies_before_replay(tmp_path):
+    central = FakeMqttClient()
+    outbox = Outbox(str(tmp_path / "outbox.jsonl"), max_bytes=10_000_000, max_age_s=1e9)
+    _seed(outbox, 3)
+    bridge = make_bridge(central, tmp_path=tmp_path, outbox=outbox)
+    bridge.wire()
+    assert len(central.published) == 3
+
+    # The link dropped with those three unacked: paho keeps copies and would re-send
+    # them on CONNACK alongside the replay.
+    central.on_disconnect(central, None, None, _ConnackRC(True), None)
+    central._out_messages.update({1: "copy", 2: "copy", 3: "copy"})
+    central._inflight_messages = 3
+
+    central.on_connect(central, None, None, _ConnackRC(False), None)
+    assert central._out_messages == {}
+    assert central._inflight_messages == 0
+    assert len(central.published) == 6  # the replay is now the only copy
+
+
+def test_refused_connack_keeps_paho_state(tmp_path):
+    central = FakeMqttClient()
+    bridge = make_bridge(central, tmp_path=tmp_path, connected=False)
+    bridge.wire()
+    central._out_messages[1] = "copy"
+    central.on_connect(central, None, None, _ConnackRC(True), None)
+    assert central._out_messages == {1: "copy"}
+
+
+def test_rejected_publish_is_not_marked_sent_and_colliding_puback_keeps_entry(tmp_path):
+    class RejectingClient(FakeMqttClient):
+        reject = True
+
+        def publish(self, topic, payload, qos=0):
+            if self.reject:
+                # paho returns the colliding mid along with MQTT_ERR_QUEUE_SIZE.
+                self.published.append((topic, payload, qos))
+                return _FakeInfo(7, rc=MQTT_ERR_QUEUE_SIZE)
+            return super().publish(topic, payload, qos)
+
+    central = RejectingClient()
+    bridge = make_bridge(central, tmp_path=tmp_path)
+    bridge.wire()
+    bridge.dispatch("frigate/events", json.dumps(frigate_payload("new", "trk-1")).encode())
+    assert len(central.published) == 1
+
+    # A PUBACK for the colliding mid belongs to some other message.
+    central.on_publish(central, None, 7, None, None)
+    assert len(outbox_lines(tmp_path)) == 1
+
+    # The entry was not marked sent, so a later flush retries it.
+    central.reject = False
+    central.published.clear()
+    bridge.publish_status(HEARTBEAT)
+    assert central.published[0][0] == formats.TOPIC_DETECTIONS
+
+
+def test_rejected_publish_stops_the_flush_to_preserve_order(tmp_path):
+    class RejectOnce(FakeMqttClient):
+        rejected = False
+
+        def publish(self, topic, payload, qos=0):
+            if not self.rejected:
+                self.rejected = True
+                return _FakeInfo(0, rc=MQTT_ERR_QUEUE_SIZE)
+            return super().publish(topic, payload, qos)
+
+    central = RejectOnce()
+    outbox = Outbox(str(tmp_path / "outbox.jsonl"), max_bytes=10_000_000, max_age_s=1e9)
+    _seed(outbox, 3)
+    bridge = make_bridge(central, tmp_path=tmp_path, outbox=outbox, connected=False)
+    bridge.handle_central_connect()
+    assert central.published == []  # nothing overtook the rejected head entry
+
+
+# --- M1: acks posted before a reconnect count ---------------------------------
+
+
+def test_acks_posted_before_reconnect_are_applied_before_replay(tmp_path):
+    central = FakeMqttClient()
+    bridge = make_bridge(central, tmp_path=tmp_path)
+    bridge.wire()
+    bridge.dispatch("frigate/events", json.dumps(frigate_payload("new", "trk-1")).encode())
+    assert len(central.published) == 1
+
+    bridge._acks.put(1)  # acked, but not yet applied when the link drops
+    central.on_disconnect(central, None, None, _ConnackRC(True), None)
+    central.on_connect(central, None, None, _ConnackRC(False), None)
+
+    assert len(central.published) == 1  # not re-sent: replay would have forgotten mid 1
+    assert outbox_lines(tmp_path) == []
+
+
+# --- I3: updates dropped while central is down keep the pending cue ----------
+
+
+def test_update_dropped_while_central_down_keeps_pending_cue(tmp_path):
+    central = FakeMqttClient()
+    bridge = make_bridge(central, tmp_path=tmp_path)
+    bridge.wire()
+    feed(bridge, "new", "trk-1")
+    cue = {"rf_cue_id": "rf-9", "zone": "perimeter-north", "ts_epoch": FIXED_EPOCH}
+    bridge.dispatch(formats.TOPIC_RF_CUES_IN, json.dumps(cue).encode())
+
+    central.on_disconnect(central, None, None, _ConnackRC(True), None)
+    feed(bridge, "update", "trk-1")  # dropped, so it cannot have delivered the cue
+    assert "trk-1" in bridge._pending_cue
+
+    feed(bridge, "end", "trk-1")
+    central.on_connect(central, None, None, _ConnackRC(False), None)
+    ends = [
+        m
+        for t, m, _q in decode_published(central)
+        if t == formats.TOPIC_DETECTIONS and m["event"] == "object_end"
+    ]
+    assert ends[-1]["attributes"]["rf_cue_id"] == "rf-9"
+
+
+# --- I4: a clock flip mid-handler must not let an event overtake held ones ---
+
+
+class _FlipClock:
+    """Not ready for the first ``not_ready_reads`` reads, ready ever after."""
+
+    def __init__(self, not_ready_reads: int) -> None:
+        self.reads_left = not_ready_reads
+        self.ready_ts = FIXED_TS
+
+    def now_rfc3339(self) -> str:
+        if self.reads_left > 0:
+            self.reads_left -= 1
+            raise formats.ClockNotReady("not yet")
+        return self.ready_ts
+
+
+def _flip_bridge(tmp_path):
+    clock = _FlipClock(not_ready_reads=10_000)
+    central = FakeMqttClient()
+    bridge = make_bridge(central, tmp_path=tmp_path, clock=clock, monotonic_fn=_Mono())
+    feed(bridge, "new", "trk-held")
+    assert central.published == []
+    return bridge, central, clock
+
+
+def _tick_until_ready(bridge, clock) -> None:
+    """Heartbeat past any remaining not-ready reads, then once more to release."""
+    while clock.reads_left > 0:
+        bridge.publish_status(HEARTBEAT)
+    bridge.publish_status(HEARTBEAT)
+
+
+# The flip lands after the handler's 1st or 2nd clock read, so a handler that reads the
+# clock separately for release and for stamping sees the two disagree on one of these.
+@pytest.mark.parametrize("not_ready_reads", [1, 2, 3])
+def test_clock_flip_mid_frigate_handler_cannot_overtake_held(tmp_path, not_ready_reads):
+    bridge, central, clock = _flip_bridge(tmp_path)
+    clock.reads_left = not_ready_reads
+    feed(bridge, "new", "trk-new")
+    _tick_until_ready(bridge, clock)
+    ids = [m["object_id"] for t, m, _q in decode_published(central) if t == formats.TOPIC_DETECTIONS]
+    assert ids == ["trk-held", "trk-new"]
+
+
+@pytest.mark.parametrize("not_ready_reads", [1, 2, 3])
+def test_clock_flip_mid_cue_handler_cannot_overtake_held(tmp_path, not_ready_reads):
+    bridge, central, clock = _flip_bridge(tmp_path)
+    clock.reads_left = not_ready_reads
+    cue = {"rf_cue_id": "rf-1", "zone": "perimeter-north", "ts_epoch": FIXED_EPOCH}
+    bridge.dispatch(formats.TOPIC_RF_CUES_IN, json.dumps(cue).encode())
+    _tick_until_ready(bridge, clock)
+    topics = [t for t, _m, _q in decode_published(central) if t != formats.TOPIC_STATUS]
+    assert topics == [formats.TOPIC_DETECTIONS, formats.TOPIC_CUE_ACKS]
+
+
+def test_clock_flip_mid_status_does_not_overtake_or_stamp(tmp_path):
+    bridge, central, clock = _flip_bridge(tmp_path)
+    clock.reads_left = 1
+    bridge.publish_status(HEARTBEAT)  # this tick read "not ready": no release, no stamp
+    assert central.published == []
+    bridge.publish_status(HEARTBEAT)
+    topics = [t for t, _m, _q in decode_published(central)]
+    assert topics == [formats.TOPIC_DETECTIONS, formats.TOPIC_STATUS]
+
+
+# --- I5: OSError in a callback sets a fatal flag; main exits nonzero ---------
+
+
+def _disk_full(*_a, **_k):
+    raise OSError(28, "No space left on device")
+
+
+def test_oserror_in_on_message_sets_fatal_instead_of_raising(tmp_path, monkeypatch):
+    central, local = FakeMqttClient(), FakeMqttClient()
+    outbox = Outbox(str(tmp_path / "outbox.jsonl"), max_bytes=10_000_000, max_age_s=1e9)
+    bridge = make_bridge(central, tmp_path=tmp_path, outbox=outbox, local_client=local)
+    bridge.wire()
+    assert bridge.fatal is False
+    monkeypatch.setattr(outbox, "_append", _disk_full)
+    message = type("M", (), {"topic": "frigate/events", "retain": False})()
+    message.payload = json.dumps(frigate_payload("new", "trk-1")).encode()
+    local.on_message(local, None, message)  # must not raise into paho
+    assert bridge.fatal is True
+
+
+def test_oserror_in_on_publish_sets_fatal_instead_of_raising(tmp_path, monkeypatch):
+    central = FakeMqttClient()
+    outbox = Outbox(str(tmp_path / "outbox.jsonl"), max_bytes=10_000_000, max_age_s=1e9)
+    _seed(outbox, 1)
+    bridge = make_bridge(central, tmp_path=tmp_path, outbox=outbox)
+    bridge.wire()
+    monkeypatch.setattr(outbox, "_rewrite", _disk_full)
+    central.on_publish(central, None, 1, None, None)
+    assert bridge.fatal is True
+
+
+def test_oserror_in_on_connect_sets_fatal_instead_of_raising(tmp_path, monkeypatch):
+    # A connect releases held events into the outbox, which writes to disk.
+    clock = formats.SystemClock()
+    central = FakeMqttClient()
+    outbox = Outbox(str(tmp_path / "outbox.jsonl"), max_bytes=10_000_000, max_age_s=1e9)
+    bridge = make_bridge(central, tmp_path=tmp_path, outbox=outbox, clock=clock, connected=False)
+    bridge.wire()
+    feed(bridge, "new", "trk-1")
+    clock.mark_synced()
+    monkeypatch.setattr(outbox, "_append", _disk_full)
+    central.on_connect(central, None, None, _ConnackRC(False), None)
+    assert bridge.fatal is True
+
+
+def _run_main_rc(monkeypatch, tmp_path, *, setup=None):
+    """Run cli.main with fake clients; ``setup(bridge, central, local)`` runs before it."""
+    import yaml
+
+    from camerabridge import cli
+
+    cfg = cli.load_config(str(CONFIG_DIR / "bridge.example.yaml"))
+    cfg["outbox"]["path"] = str(tmp_path / "outbox.jsonl")
+    config_path = tmp_path / "bridge.yaml"
+    config_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    central, local = _NetClient(), _NetClient()
+    monkeypatch.setattr(cli, "_build_central_client", lambda _cfg: central)
+    monkeypatch.setattr(cli, "_build_local_client", lambda _cfg: local)
+    monkeypatch.setattr(cli, "_ntp_synchronized", lambda: True)
+    real_make = cli.make_bridge
+
+    def make(*a, **k):
+        bridge = real_make(*a, **k)
+        if setup:
+            setup(bridge, central, local)
+        return bridge
+
+    monkeypatch.setattr(cli, "make_bridge", make)
+    ticks = {"count": 0}
+
+    def sleep(_seconds):
+        ticks["count"] += 1
+        if ticks["count"] >= 3:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.time, "sleep", sleep)
+    return cli.main(["run", "--config", str(config_path)])
+
+
+def test_main_exits_zero_on_keyboard_interrupt_when_healthy(monkeypatch, tmp_path):
+    assert _run_main_rc(monkeypatch, tmp_path) == 0
+
+
+def test_main_exits_nonzero_when_bridge_is_fatal(monkeypatch, tmp_path):
+    def setup(bridge, _central, _local):
+        bridge._fatal = True
+
+    assert _run_main_rc(monkeypatch, tmp_path, setup=setup) == 1
+
+
+@pytest.mark.parametrize("which", ["central", "local"])
+def test_main_exits_nonzero_when_a_client_thread_dies(monkeypatch, tmp_path, which):
+    def setup(_bridge, central, local):
+        (central if which == "central" else local).thread_dies = True
+
+    assert _run_main_rc(monkeypatch, tmp_path, setup=setup) == 1
+
+
+def test_main_exits_nonzero_on_oserror_in_the_heartbeat(monkeypatch, tmp_path):
+    def setup(bridge, _central, _local):
+        monkeypatch.setattr(bridge, "publish_status", _disk_full)
+
+    assert _run_main_rc(monkeypatch, tmp_path, setup=setup) == 1

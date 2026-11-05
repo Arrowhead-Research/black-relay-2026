@@ -240,8 +240,36 @@ def start_client(client: Any, host: str, port: int, *, min_delay: int = 1, max_d
     client.loop_start()
 
 
+def _loop_alive(client: Any) -> bool:
+    """Return whether the client's paho network thread is running.
+
+    paho has no public accessor. A paho upgrade that renames ``_thread`` reads as dead,
+    which restarts the service loudly (and fails the real-broker test) rather than
+    leaving a dead thread unnoticed.
+    """
+    thread = getattr(client, "_thread", None)
+    return thread is not None and thread.is_alive()
+
+
+def _failure(bridge: Bridge, central: Any, local: Any) -> Optional[str]:
+    """Return why the service can no longer run and must restart, or ``None``."""
+    if bridge.fatal:
+        return "outbox I/O failed in an MQTT callback"
+    if not _loop_alive(central):
+        return "the central MQTT network thread died"
+    if not _loop_alive(local):
+        return "the local MQTT network thread died"
+    return None
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """Entry point for ``camerabridge run --config <path>``."""
+    """Entry point for ``camerabridge run --config <path>``.
+
+    Exits nonzero if a callback hit an outbox I/O error, a network thread died, or the
+    heartbeat hit an I/O error, so the service manager restarts the bridge. A dead
+    thread would otherwise leave a node reporting a stale ``link_online``. The service
+    unit therefore needs ``Restart=always``.
+    """
     parser = argparse.ArgumentParser(prog="camerabridge", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="run the edge bridge service")
@@ -279,12 +307,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             # Publish the heartbeat (and retire stale tracks/pending cues) at the
             # TOP of the loop so a node is not status-silent for a whole interval at
             # boot; then sleep until the next tick.
+            failure = _failure(bridge, central, local)
+            if failure:
+                logger.critical("exiting for a restart: %s", failure)
+                return 1
             mark_clock_if_synced(clock)
             bridge.publish_status(bridge.node_state())
             bridge.expire_tracks()
             time.sleep(status_interval)
     except KeyboardInterrupt:
         logger.info("shutting down")
+    except OSError:
+        logger.exception("exiting for a restart: outbox I/O failed in the heartbeat")
+        return 1
     finally:
         for client in (central, local):
             client.loop_stop()

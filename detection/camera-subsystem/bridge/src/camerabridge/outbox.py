@@ -43,6 +43,15 @@ line. The ``publish`` callback returns the broker-assigned message id; the outbo
 maps that returned id back to the entry so :meth:`ack` (wired to the broker's
 publish-acknowledgement) removes the right line. :meth:`ack` also accepts an
 entry's own ``mid`` directly and is idempotent for an unknown id.
+
+Send window
+-----------
+At most :data:`_SEND_WINDOW` entries are in flight (sent and unacked) at once;
+acknowledgements open the window for the next ones. A large backlog therefore never
+sits in the MQTT client's memory, and a replay costs a bounded amount of work per
+round trip. Acks are applied in batches (:meth:`ack_many`) with one file rewrite per
+batch, because a rewrite is proportional to the backlog and acks can arrive faster
+than one rewrite per ack can keep up with.
 """
 
 from __future__ import annotations
@@ -68,7 +77,11 @@ _SEP = (",", ":")
 # (QoS 0) is never written here.
 _DURABLE_QOS = 1
 
-# A publish callback: publish(topic, payload_bytes, qos) -> broker message id.
+# Most entries in flight at once. Matches paho's default max_inflight_messages.
+_SEND_WINDOW = 20
+
+# A publish callback: publish(topic, payload_bytes, qos) -> broker message id, or None
+# if the client did not accept the message (the entry stays unsent).
 PublishFn = Callable[[str, bytes, int], object]
 
 
@@ -198,66 +211,66 @@ class Outbox:
     # --- send / replay ------------------------------------------------------
 
     def flush(self, publish: PublishFn) -> list:
-        """Publish queued durable entries not yet sent, FIFO, at QoS 1.
+        """Publish unsent durable entries, FIFO, at QoS 1, up to the send window.
 
         Returns the broker message ids in send order. An entry already handed to
-        publish on this connection is skipped so a repeated flush does not
-        duplicate it; use :meth:`replay` to resend everything after a reconnect.
+        publish on this connection is skipped so a repeated flush does not duplicate
+        it; a further flush after acks sends the next ones. A rejected publish stops
+        the flush, so nothing overtakes the entry that will be retried.
         """
         mids = []
         for entry in list(self._entries.values()):
-            if entry.mid in self._sent:
+            if len(self._sent) >= _SEND_WINDOW:
+                break
+            if entry.mid in self._sent or entry.mid not in self._entries:
                 continue
-            mids.append(self._publish_entry(entry, publish))
+            broker_mid = publish(entry.topic, entry.payload, entry.qos)
+            if broker_mid is None:
+                break
+            self._sent.add(entry.mid)
+            self._inflight[broker_mid] = entry.mid
+            mids.append(broker_mid)
         return mids
 
     def replay(self, publish: PublishFn) -> list:
-        """Re-publish every unacked entry, FIFO, with its ORIGINAL bytes.
+        """Re-publish unacked entries, FIFO, with their ORIGINAL bytes, up to the window.
 
-        Called on reconnect. The previous connection's broker ids are void, so
-        the in-flight map and the sent-set are reset and all pending entries are
-        re-sent verbatim — no re-serialize, no re-stamp — preserving
-        ``event_id``/``timestamp`` and order. Returns the new broker ids.
+        Called on reconnect. The previous connection's broker ids are void, so the
+        in-flight map and the sent-set are reset and sending restarts from the oldest
+        pending entry, verbatim — no re-serialize, no re-stamp — preserving
+        ``event_id``/``timestamp`` and order. Returns the new broker ids. The caller
+        must ensure its MQTT client holds no copies of its own from the old connection.
         """
         self._inflight.clear()
         self._sent.clear()
-        mids = []
-        for entry in list(self._entries.values()):
-            mids.append(self._publish_entry(entry, publish))
-        return mids
-
-    def _publish_entry(self, entry: _Entry, publish: PublishFn) -> object:
-        """Send one entry, mark it sent, and map its broker id back for ack()."""
-        broker_mid = publish(entry.topic, entry.payload, entry.qos)
-        self._sent.add(entry.mid)
-        if broker_mid is not None:
-            self._inflight[broker_mid] = entry.mid
-        return broker_mid
+        return self.flush(publish)
 
     # --- ack ----------------------------------------------------------------
 
     def ack(self, mid) -> None:
-        """Remove the acked message from the file.
+        """Remove one acked message from the file. See :meth:`ack_many`."""
+        self.ack_many([mid])
 
-        ``mid`` is the broker id returned by ``publish`` (paho's PUBACK mid),
-        resolved to an entry **only** via the in-flight map. A mid absent from that
-        map — a stray or duplicate PUBACK, or one whose integer happens to collide
-        with some entry's own internal id — is a no-op. Entry-own ids are never
-        consulted here, so the two id spaces (broker mids vs internal entry mids)
-        can never be confused and a stray PUBACK cannot evict the wrong entry. Acks
-        can arrive late or twice; both are safely ignored.
+    def ack_many(self, mids) -> None:
+        """Remove the acked messages from the file, with one rewrite for the batch.
+
+        Each mid is a broker id returned by ``publish`` (paho's PUBACK mid), resolved
+        to an entry **only** via the in-flight map. A mid absent from that map — a
+        stray or duplicate PUBACK, or one whose integer happens to collide with some
+        entry's own internal id — is a no-op. Entry-own ids are never consulted here,
+        so the two id spaces (broker mids vs internal entry mids) can never be confused
+        and a stray PUBACK cannot evict the wrong entry. Acks can arrive late or twice;
+        both are safely ignored.
         """
-        entry_mid = self._inflight.pop(mid, None)
-        if entry_mid is None:
-            return
-        if self._entries.pop(entry_mid, None) is None:
-            return
-        self._sent.discard(entry_mid)
-        # Drop any other broker ids that pointed at this now-removed entry.
-        for broker_mid, target in list(self._inflight.items()):
-            if target == entry_mid:
-                del self._inflight[broker_mid]
-        self._rewrite()
+        removed = False
+        for mid in mids:
+            entry_mid = self._inflight.pop(mid, None)
+            if entry_mid is None or self._entries.pop(entry_mid, None) is None:
+                continue
+            self._sent.discard(entry_mid)
+            removed = True
+        if removed:
+            self._rewrite()
 
     # --- overflow -----------------------------------------------------------
 

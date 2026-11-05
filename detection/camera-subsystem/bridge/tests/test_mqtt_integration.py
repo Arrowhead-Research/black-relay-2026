@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import queue
 import shutil
+import signal
 import socket
 import subprocess
 import time
@@ -59,6 +60,7 @@ class Broker:
         self._conf.write_text(
             f"listener {self.port} 127.0.0.1\n"
             "allow_anonymous true\n"
+            "max_queued_messages 0\n"
             "persistence true\n"
             f"persistence_location {directory}/\n",
             encoding="utf-8",
@@ -81,9 +83,26 @@ class Broker:
 
     def stop(self) -> None:
         if self._proc is not None:
+            self._proc.send_signal(signal.SIGCONT)
             self._proc.terminate()
             self._proc.wait(10)
             self._proc = None
+
+    def save_state(self) -> None:
+        """Ask mosquitto to write its database now, so a later crash keeps sessions."""
+        db = self._conf.parent / "mosquitto.db"
+        before = db.stat().st_mtime_ns if db.exists() else 0
+        self._proc.send_signal(signal.SIGUSR1)
+        wait_until(lambda: db.exists() and db.stat().st_mtime_ns != before, what="mosquitto db")
+
+    def freeze(self) -> None:
+        """Stop the process: the socket stays open but nothing is read or acknowledged."""
+        self._proc.send_signal(signal.SIGSTOP)
+
+    def crash(self) -> None:
+        self._proc.kill()
+        self._proc.wait(10)
+        self._proc = None
 
 
 class Peer:
@@ -140,7 +159,9 @@ class Peer:
 class Service:
     """The bridge with its two real paho clients, wired as ``cli.main`` wires them."""
 
-    def __init__(self, tmp_path: Path, central_port: int, local_port: int) -> None:
+    def __init__(
+        self, tmp_path: Path, central_port: int, local_port: int, *, local_keepalive: int = 60
+    ) -> None:
         self.outbox_path = tmp_path / "outbox.jsonl"
         cfg = {
             "node_id": "cam-01",
@@ -164,7 +185,17 @@ class Service:
         )
         self.bridge.wire()
         cli.start_client(self.central, "127.0.0.1", central_port, min_delay=1, max_delay=1)
-        cli.start_client(self.local, "127.0.0.1", local_port, min_delay=1, max_delay=1)
+        self.local_disconnects = 0
+        on_local_disconnect = self.local.on_disconnect
+
+        def count_local_disconnect(*args, **kwargs):
+            self.local_disconnects += 1
+            on_local_disconnect(*args, **kwargs)
+
+        self.local.on_disconnect = count_local_disconnect
+        self.local.reconnect_delay_set(min_delay=1, max_delay=1)
+        self.local.connect_async("127.0.0.1", local_port, keepalive=local_keepalive)
+        self.local.loop_start()
 
     def outbox_payloads(self) -> list[bytes]:
         if not self.outbox_path.exists():
@@ -186,8 +217,8 @@ def rig(tmp_path):
     local.start()
     central.start()
 
-    def service() -> Service:
-        svc = Service(tmp_path, central.port, local.port)
+    def service(**kwargs) -> Service:
+        svc = Service(tmp_path, central.port, local.port, **kwargs)
         cleanups.insert(0, svc.close)
         return svc
 
@@ -215,7 +246,26 @@ def frigate_new(object_id: str) -> bytes:
     return json.dumps({"type": "new", "before": after, "after": after}).encode()
 
 
-def test_event_survives_central_outage_and_replays_byte_identical(rig):
+def object_ids(payloads: list[bytes]) -> list[str]:
+    return [json.loads(p)["object_id"] for p in payloads]
+
+
+def drain(peer: Peer, topic: str, *, settle: float = 1.5) -> list[bytes]:
+    """Everything received on ``topic``, once nothing new arrives for ``settle`` seconds."""
+    got: list[bytes] = []
+    deadline = time.monotonic() + settle
+    while time.monotonic() < deadline:
+        try:
+            got_topic, payload = peer.received.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        if got_topic == topic:
+            got.append(payload)
+        deadline = time.monotonic() + settle
+    return got
+
+
+def connected_rig(rig):
     local, central, service, peer = rig
     fusion = peer(central.port, subscribe=formats.TOPIC_DETECTIONS)
     svc = service()
@@ -223,20 +273,109 @@ def test_event_survives_central_outage_and_replays_byte_identical(rig):
     wait_until(lambda: svc.bridge.central_connected, what="central connection")
     wait_until(lambda: svc.local.is_connected(), what="local connection")
     time.sleep(0.2)  # let the local SUBACK land before Frigate publishes
+    return local, central, fusion, svc, frigate
+
+
+def test_events_survive_central_outage_and_replay_once_in_order_byte_identical(rig):
+    local, central, fusion, svc, frigate = connected_rig(rig)
 
     central.stop()
     wait_until(lambda: not svc.bridge.central_connected, what="central disconnect")
 
-    frigate.publish("frigate/events", frigate_new("trk-outage"))
-    wait_until(lambda: len(svc.outbox_payloads()) == 1, what="event to reach the outbox")
-    persisted = svc.outbox_payloads()[0]
-    assert json.loads(persisted)["object_id"] == "trk-outage"
+    names = ["trk-0", "trk-1", "trk-2", "trk-3"]
+    for name in names:
+        frigate.publish("frigate/events", frigate_new(name))
+    wait_until(lambda: len(svc.outbox_payloads()) == len(names), what="events to reach the outbox")
+    persisted = svc.outbox_payloads()
+    assert object_ids(persisted) == names
     assert svc.local.is_connected()  # the local side never noticed the outage
+    # The outbox alone holds them: paho must not be carrying its own copies.
+    assert len(svc.central._out_messages) == 0
 
     central.start()
-    received = fusion.next_on(formats.TOPIC_DETECTIONS)
-    assert received == persisted
-    wait_until(lambda: svc.outbox_payloads() == [], what="PUBACK to empty the outbox")
+    wait_until(lambda: svc.outbox_payloads() == [], what="PUBACKs to empty the outbox")
+    assert drain(fusion, formats.TOPIC_DETECTIONS) == persisted  # exact bytes, order, count
+
+
+def test_message_in_flight_at_disconnect_is_delivered_exactly_once(rig):
+    _local, central, fusion, svc, frigate = connected_rig(rig)
+    central.save_state()  # keep fusion's session through the crash below
+    central.freeze()
+
+    frigate.publish("frigate/events", frigate_new("trk-inflight"))
+    wait_until(lambda: len(svc.central._out_messages) == 1, what="the publish to be in flight")
+    persisted = svc.outbox_payloads()
+    assert object_ids(persisted) == ["trk-inflight"]
+
+    central.crash()
+    wait_until(lambda: not svc.bridge.central_connected, what="central disconnect")
+    assert object_ids(svc.outbox_payloads()) == ["trk-inflight"]  # unacked, so still held
+
+    central.start()
+    wait_until(lambda: svc.outbox_payloads() == [], what="the PUBACK to empty the outbox")
+    # Not one copy from paho's retained queue plus one from the replay.
+    assert drain(fusion, formats.TOPIC_DETECTIONS) == persisted
+    assert len(svc.central._out_messages) == 0
+
+
+def test_local_events_survive_a_large_replay(tmp_path, rig):
+    """A large replay must not trap the local thread: with a 2 s keepalive, holding the
+    lock past 3 s gets the local client dropped, and Frigate's events are lost."""
+    from camerabridge.outbox import Outbox
+
+    backlog = 3000
+    local, central, service, peer = rig
+    fusion = peer(central.port, subscribe=formats.TOPIC_DETECTIONS)
+    seeded = Outbox(str(tmp_path / "outbox.jsonl"), max_bytes=64 * 2**20, max_age_s=1e9)
+    clock = formats.FixedClock("2026-11-04T19:40:00Z")
+    seeded.enqueue_many(
+        [
+            (
+                formats.TOPIC_DETECTIONS,
+                formats.detection_event(
+                    node_id="cam-01",
+                    event="object_start",
+                    object_id=f"seed-{i}",
+                    label="person",
+                    confidence=0.8,
+                    zones=["perimeter-north"],
+                    attributes={},
+                    clock=clock,
+                ),
+            )
+            for i in range(backlog)
+        ]
+    )
+    del seeded
+
+    frigate = peer(local.port)
+    central.stop()  # so the local side is up and subscribed before the replay begins
+    svc = service(local_keepalive=2)
+    wait_until(lambda: svc.local.is_connected(), what="local connection")
+    time.sleep(0.3)
+    central.start()
+    wait_until(lambda: svc.bridge.central_connected, what="central connection")
+
+    live = [f"live-{i}" for i in range(40)]
+    for name in live:
+        frigate.publish("frigate/events", frigate_new(name))
+        time.sleep(0.05)
+
+    wait_until(lambda: svc.outbox_payloads() == [], timeout=120, what="the backlog to drain")
+    received = object_ids(drain(fusion, formats.TOPIC_DETECTIONS))
+    assert svc.local_disconnects == 0
+    assert received == [f"seed-{i}" for i in range(backlog)] + live
+
+
+def test_paho_exposes_the_thread_and_retained_state_the_service_relies_on(rig):
+    # The fatal-exit check and the replay rely on paho internals; a paho upgrade that
+    # renames them must fail here.
+    _local, _central, _fusion, svc, _frigate = connected_rig(rig)
+    assert cli._loop_alive(svc.central) is True
+    assert cli._loop_alive(svc.local) is True
+    svc.local.loop_stop()
+    assert cli._loop_alive(svc.local) is False
+    svc.local.loop_start()
 
 
 def test_frigate_health_tracked_and_central_stays_up_when_local_dies(rig):

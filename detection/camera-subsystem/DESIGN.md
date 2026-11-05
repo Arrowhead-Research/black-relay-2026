@@ -250,8 +250,9 @@ The bridge derives health from Frigate's topics on the node-local broker
 - `camera_online`: `camera_fps > 0` for this camera in fresh stats.
 - `detector_ok`: at least one detector is present in fresh stats, and every one has a
   process id and a positive inference speed.
-- `recording_ok`: Frigate is `online` and the recordings state is `ON`. This is
-  Frigate's recording **setting**, not proof that segments are being written.
+- `recording_ok`: the recordings state is `ON` and `camera_online` is true, so a dead
+  camera never reads as recording. The state is Frigate's recording **setting**, so
+  this is still not proof that segments are being written.
 - `link_online`: the central MQTT connection is currently up.
 
 **Fail safe:** no data, stats older than 3 status intervals, Frigate not `online`, or
@@ -313,6 +314,16 @@ outbox — a long outage must not backlog a flood of stale object positions, and
 replay must never resurrect an out-of-date track location. The outbox therefore
 holds only the durable kinds: `object_start`, `object_end`, `cue-ack`, and
 `node-status`.
+
+**Send window.** At most 20 entries are in flight (sent and unacked) at once, and
+acknowledgements release the next ones. A reconnect discards the MQTT client's own
+unacked copies and replays from the oldest entry, so the outbox is the one record of
+what is undelivered. Acknowledgements are applied in batches with one file rewrite per
+batch, so a large replay cannot stall Frigate's event handling.
+
+**I/O failure.** If the outbox cannot write (a full disk, for example), or a network
+thread dies, the bridge exits nonzero so its service manager restarts it. The service
+unit needs `Restart=always`. The event being handled at that moment is lost.
 
 **Overflow policy (FIFO drop-oldest-first).** The queue is bounded by size
 (`max_bytes`) and per-entry age (`max_age_s`). Because `object_update` is never

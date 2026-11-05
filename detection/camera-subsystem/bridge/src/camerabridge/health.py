@@ -156,9 +156,11 @@ class FrigateHealth:
                 recording_ok=False,
                 detector_ok=False,
             )
+        camera_online = self._camera_online(stats)
         return NodeState(
-            camera_online=self._camera_online(stats),
+            camera_online=camera_online,
             link_online=link_online,
-            recording_ok=self._recording_on,
+            # The recordings state is Frigate's setting: it stays ON with no frames.
+            recording_ok=self._recording_on and camera_online,
             detector_ok=self._detector_ok(stats),
         )
