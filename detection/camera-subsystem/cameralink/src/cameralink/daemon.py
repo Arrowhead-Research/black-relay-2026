@@ -21,6 +21,11 @@ One already seen is held until the generation changes or the file names another 
 Errors from the camera, the store, render and systemd end the tick's work and are reported. Any
 other exception is a bug and is left to crash into ``Restart=always``. The state file lives in the
 service's runtime directory, so it goes too, and nothing can read a stale state as current.
+
+A Hailo detector can crash and leave Frigate's stats looking normal, so the daemon also reads
+Frigate's log. A failure found there stays reported until the container starts again, because no
+line in the log proves the detector recovered. A daemon restart reads the whole log of the running
+container, so the report survives it.
 """
 
 import ipaddress
@@ -78,6 +83,14 @@ _LIMIT_REACHED = (
     "the camera's login limit is reached, see retry_after, or run camera-link clear-limits"
 )
 _LOCAL_SECRET_RE = re.compile(rb"[0-9a-f]{64}\s*")
+
+LOG_SCAN_SECONDS = 30
+# Overlaps the last read, which docker timed in whole seconds. Reading a line twice is harmless.
+_LOG_OVERLAP_SECONDS = 5
+_DOCKER = "/usr/bin/docker"
+_FRIGATE_CONTAINER = "frigate"
+_DOCKER_TIMEOUT = 20
+_HAILO_FAILURE_RE = re.compile(r"\[HailoRT\] \[error\]|HailoRTException")
 
 
 class SystemdError(Exception):
@@ -156,6 +169,37 @@ class Systemctl:
         except OSError as err:
             failure = type(err).__name__
         raise SystemdError(f"systemctl {' '.join(args)}: {failure}")
+
+
+class FrigateLog:
+    """Asks docker about Frigate's container. None means docker gave no answer. Nothing it
+    returns is logged or reported, because a log line can quote a setting."""
+
+    def __init__(self, run=subprocess.run):
+        self._run = run
+
+    def started_at(self) -> str | None:
+        output = self._docker("inspect", "--format", "{{.State.StartedAt}}", _FRIGATE_CONTAINER)
+        return (output.strip() or None) if output is not None else None
+
+    def since_time(self, since: str) -> str | None:
+        return self._docker("logs", "--since", since, _FRIGATE_CONTAINER)
+
+    def _docker(self, *args: str) -> str | None:
+        try:
+            result = self._run(
+                [_DOCKER, *args],
+                stdout=subprocess.PIPE,
+                # HailoRT writes its own lines from native code, past Frigate's logger.
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+                timeout=_DOCKER_TIMEOUT,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        return result.stdout if result.returncode == 0 else None
 
 
 @dataclass(frozen=True)
@@ -245,6 +289,7 @@ class Daemon:
         step_fn=step,
         clock=None,
         client_factory=ReolinkClient,
+        frigate_log=None,
     ):
         self._paths = paths
         self._systemd = systemd
@@ -255,6 +300,11 @@ class Daemon:
         self._link = self._load_link()
         self._published = None
         self._frigate_down_ticks = 0
+        self._frigate_log = frigate_log or FrigateLog()
+        self._frigate_started = None
+        self._detector_error = False
+        self._log_checked_at = None
+        self._log_read_at = None
 
     def run(self, stop) -> None:
         while not stop.is_set():
@@ -262,6 +312,7 @@ class Daemon:
             stop.wait(TICK_SECONDS)
 
     def tick(self) -> None:
+        self._scan_frigate_log()
         problems = []
         try:
             lease = self._observe_link(problems)
@@ -508,6 +559,33 @@ class Daemon:
         _write_file(path, f"{secret}\n".encode(), 0o600)
         return secret
 
+    # Frigate's log
+
+    def _scan_frigate_log(self) -> None:
+        now = self._clock().timestamp()
+        checked = self._log_checked_at
+        if checked is not None and 0 <= now - checked < LOG_SCAN_SECONDS:
+            return
+        self._log_checked_at = now
+        started = self._frigate_log.started_at()
+        if started is None:
+            return  # no container or no docker: no evidence either way, so nothing changes
+        if started != self._frigate_started:
+            self._frigate_started = started
+            self._detector_error = False
+            self._log_read_at = None
+        text = self._frigate_log.since_time(self._log_since(started, now))
+        if text is None:
+            return
+        self._log_read_at = now
+        if _HAILO_FAILURE_RE.search(text):
+            self._detector_error = True
+
+    def _log_since(self, started: str, now: float) -> str:
+        """Where to read from. A clock stepped back would hide lines, so that reads it all."""
+        read = self._log_read_at
+        return started if read is None or now < read else str(int(read) - _LOG_OVERLAP_SECONDS)
+
     # Reporting
 
     def _publish(self, state, mac, record, reason) -> None:
@@ -518,6 +596,7 @@ class Daemon:
             "updated": int(now),
             "retry_after": _retry_after(state, record, now),
             "reason": reason,
+            "detector_error": self._detector_error,
         }
         if (state, mac, reason) != self._published:
             _log.info("link: %s, camera %s, reason: %s", state.value, mac, reason)

@@ -27,11 +27,14 @@ from cameralink.adopt import (
     LinkState,
     step,
 )
+from cameralink import daemon as daemon_module
 from cameralink.daemon import (
     FRIGATE_DOWN_TICKS,
+    LOG_SCAN_SECONDS,
     RUNNING_STATES,
     TICK_SECONDS,
     Daemon,
+    FrigateLog,
     Paths,
     Systemctl,
     SystemdError,
@@ -51,6 +54,30 @@ OTHER_PASSWORD = "other-S3cret-password"
 RELAY_PASSWORD = "relay-S3cret-password"
 UNITS = Path(__file__).parents[1] / "ops"
 NFT = Path(__file__).parents[2] / "provision" / "ops" / "black-relay.nft"
+
+
+class FakeFrigateLog:
+    """Frigate's container as docker reports it: when it started, and what it has logged."""
+
+    def __init__(self):
+        self.started = "2026-11-05T10:00:00.000000000Z"
+        self.text = ""
+        self.since = []
+
+    def started_at(self):
+        return self.started
+
+    def since_time(self, since):
+        self.since.append(since)
+        return self.text
+
+
+@pytest.fixture(autouse=True)
+def frigate_log(monkeypatch):
+    """No test here may reach a real docker."""
+    log = FakeFrigateLog()
+    monkeypatch.setattr(daemon_module, "FrigateLog", lambda: log)
+    return log
 
 
 class FakeSystemd:
@@ -1349,6 +1376,7 @@ def test_state_file_holds_no_secret(live):
         "updated": NOW,
         "retry_after": None,
         "reason": None,
+        "detector_error": False,
     }
 
 
@@ -2036,6 +2064,190 @@ def test_docker_and_hailo_settings():
     assert (UNITS / "hailo_pci.conf").read_text().strip().splitlines()[-1] == (
         "options hailo_pci force_desc_page_size=4096"
     )
+
+
+# Frigate's log
+
+
+HAILO_LINE = "2026-11-05 10:00:09 [HailoRT] [error] CHECK_SUCCESS failed with status=74\n"
+HAILO_EXCEPTION = "    raise HailoRTException(msg)\nhailo_platform.HailoRTException: boom\n"
+
+
+@pytest.mark.parametrize("text", [HAILO_LINE, HAILO_EXCEPTION])
+def test_a_hailo_failure_in_frigates_log_is_reported(node, frigate_log, text):
+    frigate_log.text = "frigate.app INFO : Starting Frigate\n" + text
+    node.daemon.tick()
+    assert node.state()["detector_error"] is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "frigate.detectors.plugins.hailo8l INFO : [HailoRT] loaded\n",
+        "some other [error] line\n",
+    ],
+)
+def test_a_clean_log_reports_no_detector_error(node, frigate_log, text):
+    frigate_log.text = text
+    node.daemon.tick()
+    assert node.state()["detector_error"] is False
+
+
+def test_the_log_is_read_once_per_interval(node, frigate_log):
+    node.daemon.tick()
+    node.daemon.tick()
+    assert len(frigate_log.since) == 1
+    node.clock_epoch += LOG_SCAN_SECONDS - 1
+    node.daemon.tick()
+    assert len(frigate_log.since) == 1
+    node.clock_epoch += 1
+    node.daemon.tick()
+    assert len(frigate_log.since) == 2
+
+
+def test_the_first_read_covers_all_of_this_frigate_and_later_ones_only_the_rest(node, frigate_log):
+    node.daemon.tick()
+    node.clock_epoch += LOG_SCAN_SECONDS
+    node.daemon.tick()
+    assert frigate_log.since[0] == frigate_log.started
+    # With an overlap: a line written during the last read must not fall between two reads.
+    assert int(frigate_log.since[1]) < NOW
+    assert int(frigate_log.since[1]) >= NOW - LOG_SCAN_SECONDS
+
+
+def test_a_detector_error_outlives_the_lines_that_showed_it(node, frigate_log):
+    frigate_log.text = HAILO_LINE
+    node.daemon.tick()
+    frigate_log.text = ""
+    node.clock_epoch += LOG_SCAN_SECONDS
+    node.daemon.tick()
+    assert node.state()["detector_error"] is True
+
+
+def test_a_frigate_restart_clears_the_detector_error(node, frigate_log):
+    frigate_log.text = HAILO_LINE
+    node.daemon.tick()
+    frigate_log.text = ""
+    frigate_log.started = "2026-11-05T11:00:00.000000000Z"
+    node.clock_epoch += LOG_SCAN_SECONDS
+    node.daemon.tick()
+    assert node.state()["detector_error"] is False
+    assert frigate_log.since[-1] == frigate_log.started
+
+
+def test_a_failure_right_after_the_restart_is_still_seen(node, frigate_log):
+    frigate_log.text = HAILO_LINE
+    node.daemon.tick()
+    frigate_log.started = "2026-11-05T11:00:00.000000000Z"
+    node.clock_epoch += LOG_SCAN_SECONDS
+    node.daemon.tick()
+    assert node.state()["detector_error"] is True
+
+
+def test_a_restarted_daemon_finds_the_failure_again(node, frigate_log):
+    frigate_log.text = HAILO_LINE
+    node.daemon.tick()
+    node.restart_daemon()
+    node.daemon.tick()
+    assert node.state()["detector_error"] is True
+    assert frigate_log.since[-1] == frigate_log.started
+
+
+def test_a_clock_stepped_back_reads_from_the_start_again(node, frigate_log):
+    node.daemon.tick()
+    node.clock_epoch -= 1000
+    node.daemon.tick()
+    assert frigate_log.since[-1] == frigate_log.started
+    assert len(frigate_log.since) == 2
+
+
+def test_no_docker_answer_changes_nothing_and_does_not_stop_the_tick(node, frigate_log):
+    frigate_log.text = HAILO_LINE
+    node.daemon.tick()
+    frigate_log.started = None
+    node.clock_epoch += LOG_SCAN_SECONDS
+    node.daemon.tick()
+    assert node.state()["detector_error"] is True
+    assert node.state()["updated"] == node.clock_epoch
+
+
+def test_an_unreadable_log_is_read_again_from_the_same_place(node, frigate_log):
+    frigate_log.since_time = lambda since: frigate_log.since.append(since)  # returns None
+    node.daemon.tick()
+    node.clock_epoch += LOG_SCAN_SECONDS
+    node.daemon.tick()
+    assert node.state()["detector_error"] is False
+    assert frigate_log.since == [frigate_log.started, frigate_log.started]
+
+
+def test_a_docker_that_does_not_answer_is_not_asked_every_tick(node, frigate_log):
+    asked = []
+    frigate_log.started_at = lambda: asked.append(1)
+    node.daemon.tick()
+    node.daemon.tick()
+    assert len(asked) == 1
+
+
+def test_a_failed_link_reading_still_reports_the_detector_error(node, frigate_log):
+    frigate_log.text = HAILO_LINE
+    node.paths.boot_id.unlink()
+    node.daemon.tick()
+    state = node.state()
+    assert state["state"] == "failed"
+    assert state["detector_error"] is True
+
+
+def _fake_run(calls, *, stdout="", returncode=0, raises=None):
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if raises is not None:
+            raise raises
+        return subprocess.CompletedProcess(argv, returncode, stdout=stdout)
+
+    return run
+
+
+def test_frigate_log_asks_docker_for_the_containers_start():
+    calls = []
+    log = FrigateLog(run=_fake_run(calls, stdout="2026-11-05T10:00:00Z\n"))
+    assert log.started_at() == "2026-11-05T10:00:00Z"
+    assert calls[0][0] == [
+        "/usr/bin/docker", "inspect", "--format", "{{.State.StartedAt}}", "frigate",
+    ]
+    assert calls[0][1]["timeout"] > 0
+
+
+def test_frigate_log_reads_both_output_streams():
+    # HailoRT writes its own lines from native code, not through Frigate's logger.
+    calls = []
+    log = FrigateLog(run=_fake_run(calls, stdout=HAILO_LINE))
+    assert log.since_time("1800000000") == HAILO_LINE
+    argv, kwargs = calls[0]
+    assert argv == ["/usr/bin/docker", "logs", "--since", "1800000000", "frigate"]
+    assert kwargs["stdout"] == subprocess.PIPE
+    assert kwargs["stderr"] == subprocess.STDOUT
+    assert kwargs["errors"] == "replace"
+    assert kwargs["timeout"] > 0
+
+
+@pytest.mark.parametrize(
+    "fake",
+    [
+        {"returncode": 1, "stdout": "Error: No such container: frigate\n"},
+        {"raises": subprocess.TimeoutExpired("docker", 1)},
+        {"raises": FileNotFoundError("docker")},
+        {"raises": PermissionError("docker")},
+    ],
+)
+def test_frigate_log_gives_none_when_docker_does_not_answer(fake):
+    log = FrigateLog(run=_fake_run([], **fake))
+    assert log.started_at() is None
+    assert log.since_time("0") is None
+
+
+def test_frigate_log_gives_no_start_for_an_empty_answer():
+    assert FrigateLog(run=_fake_run([], stdout="\n")).started_at() is None
 
 
 def test_firewall_accepts_dhcp_on_the_camera_link_ahead_of_the_drop():
