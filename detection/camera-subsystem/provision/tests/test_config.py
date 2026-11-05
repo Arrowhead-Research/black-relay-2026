@@ -426,3 +426,20 @@ def test_config_module_logs_no_secrets(
         written(tmp_path)
     for secret in (*SECRETS, "short"):
         assert secret not in caplog.text
+
+
+def test_unserializable_value_error_never_carries_secret_values(tmp_path: Path) -> None:
+    """PyYAML quotes the object it cannot represent, and a str subclass passes validate."""
+
+    class TaintedStr(str):
+        pass
+
+    cfg = make_config(broker=broker(password=TaintedStr(BROKER_PASSWORD)))
+    path = tmp_path / "bridge.yaml"
+
+    with pytest.raises(ValueError) as raised:
+        write_bridge_config(cfg, path)
+
+    assert BROKER_PASSWORD not in str(raised.value)
+    assert raised.value.__suppress_context__
+    assert not path.exists()

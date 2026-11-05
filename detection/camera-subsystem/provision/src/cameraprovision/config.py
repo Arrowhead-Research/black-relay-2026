@@ -242,5 +242,9 @@ def write_bridge_config(cfg: NodeConfig, path: str | os.PathLike[str]) -> None:
     errors = validate(cfg)
     if errors:
         raise ValueError("invalid node config: " + "; ".join(errors))
-    text = yaml.safe_dump(_bridge_mapping(cfg), sort_keys=False, allow_unicode=True)
+    try:
+        text = yaml.safe_dump(_bridge_mapping(cfg), sort_keys=False, allow_unicode=True)
+    except yaml.YAMLError:
+        # PyYAML's message quotes the value it could not represent.
+        raise ValueError("node config holds a value that cannot be written as YAML") from None
     _write_private_atomic(Path(path), text)
