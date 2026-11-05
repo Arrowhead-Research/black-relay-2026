@@ -61,7 +61,7 @@ _INITIAL_INFERENCE_SPEED = 10.0
 # frigate/object_detection/base.py:182 averages the 1000 ms in at one tenth, so whatever the
 # average was, it is now at least 100 ms. Kit 1's Hailo runs at 7.65 ms.
 _INFERENCE_SPEED_CEILING = 100.0
-# A detection in progress for longer is stuck. Frigate v0.18.2: frigate/watchdog.py:125, whose
+# A detection in progress for longer is stuck. Frigate v0.18.2: frigate/watchdog.py:124, whose
 # restart keeps the speed, so nothing else in the stats shows it.
 _DETECTION_STUCK_S = 10.0
 # Frigate's uptime and last_updated are separate whole-second readings of the clock.

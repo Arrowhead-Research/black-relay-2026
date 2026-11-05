@@ -683,7 +683,7 @@ def test_a_detector_recovered_below_the_ceiling_reads_true_again():
 
 
 def test_a_detection_stuck_for_over_ten_seconds_is_false():
-    # watchdog.py:125 calls the same thing stuck, and restarting keeps the speed.
+    # watchdog.py:124 calls the same thing stuck, and restarting keeps the speed.
     health = make_health()
     online(health, stats(detectors=hailo(started=WALL - 60)))
     assert health.evaluate(link_online=True).detector_ok is False
