@@ -27,12 +27,11 @@ objects:
     - person
     - car
 go2rtc:
+  rtsp:
+$rtsp
   streams:
     "$node_id":
-      - "rtsp://admin:{FRIGATE_CAMERA_PASSWORD}@10.77.0.10:554/h264Preview_01_sub"
-  publish:
-    "$node_id":
-      - "$publish_url"
+      - "rtsp://admin:{FRIGATE_CAMERA_PASSWORD}@10.77.0.10:554/h264Preview_01_main"
 cameras:
   "$node_id":
     ffmpeg:
@@ -49,7 +48,7 @@ cameras:
       enabled: true
       width: 640
       height: 480
-      fps: 5
+      fps: 15
     snapshots:
       enabled: true
       retain:

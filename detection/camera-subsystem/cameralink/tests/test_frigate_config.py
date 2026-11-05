@@ -6,7 +6,7 @@ import os
 import re
 import stat
 from pathlib import Path
-from urllib.parse import parse_qs, quote_plus, unquote, urlsplit
+from urllib.parse import quote_plus
 
 import pytest
 import yaml
@@ -30,7 +30,6 @@ def text(**overrides) -> str:
     args = {
         "node_id": "cam-8da040",
         "covered_zones": ["driveway", "gate"],
-        "mediamtx_address": "10.0.0.2:8554",
         "relay_user": "kit1",
         "existing": None,
         "proxy_secret": PROXY_SECRET,
@@ -79,7 +78,6 @@ def test_a_node_id_yaml_would_read_as_another_type_stays_a_string(node_id):
     cfg = config(node_id=node_id, covered_zones=["gate"])
     assert list(cfg["cameras"]) == [node_id]
     assert list(cfg["go2rtc"]["streams"]) == [node_id]
-    assert list(cfg["go2rtc"]["publish"]) == [node_id]
 
 
 def test_detect_uses_sub_stream_and_record_uses_main():
@@ -90,7 +88,9 @@ def test_detect_uses_sub_stream_and_record_uses_main():
 
 
 def test_detect_is_explicitly_enabled_because_frigate_defaults_it_off():
-    assert camera()["detect"] == {"enabled": True, "width": 640, "height": 480, "fps": 5}
+    # Nothing else is set: max_disappeared, min_initialized and the stationary threshold
+    # and interval all default to a multiple of fps in Frigate, so they keep their meaning.
+    assert camera()["detect"] == {"enabled": True, "width": 640, "height": 480, "fps": 15}
 
 
 def test_person_and_car_are_tracked():
@@ -150,7 +150,6 @@ def test_no_password_appears_in_the_yaml():
     assert set(inspect.signature(render).parameters) == {
         "node_id",
         "covered_zones",
-        "mediamtx_address",
         "relay_user",
         "existing",
         "proxy_secret",
@@ -175,10 +174,8 @@ def test_each_secret_uses_the_reference_syntax_its_reader_expands():
     # Frigate's create_config.py runs str.format over go2rtc.streams.
     for source in cfg["go2rtc"]["streams"]["cam-8da040"]:
         assert f"admin:{camera_ref}@" in source
-    # create_config.py leaves go2rtc.publish alone, and go2rtc's own loader expands ${VAR}.
-    for destination in cfg["go2rtc"]["publish"]["cam-8da040"]:
-        assert "${" + RELAY_PASSWORD_ENV + "}" in destination
-        assert "{" + RELAY_PASSWORD_ENV + "}" not in destination.replace("${", "")
+    # create_config.py runs Frigate's own substitution over go2rtc.rtsp.password.
+    assert cfg["go2rtc"]["rtsp"]["password"] == "{" + RELAY_PASSWORD_ENV + "}"
 
 
 def test_stream_sources_survive_frigates_str_format_pass():
@@ -188,67 +185,63 @@ def test_stream_sources_survive_frigates_str_format_pass():
         assert "x-y@10.77.0.10" in source.format(**env)
 
 
-# Restream. Unverified on hardware: see the module docstring.
+# Live view. Unverified on hardware: see the module docstring.
 
 
-def test_restream_source_is_the_sub_stream_under_the_camera_name():
+def test_live_view_serves_the_main_stream_under_the_camera_name():
     assert config()["go2rtc"]["streams"] == {
         "cam-8da040": [
             "rtsp://admin:{"
             + CAMERA_PASSWORD_ENV
-            + "}@10.77.0.10:554/h264Preview_01_sub"
+            + "}@10.77.0.10:554/h264Preview_01_main"
         ]
     }
 
 
-def test_restream_publishes_over_rtmp_because_go2rtc_has_no_rtsp_consumer():
-    assert config()["go2rtc"]["publish"] == {
-        "cam-8da040": [
-            "rtmp://10.0.0.2:1935/cam-8da040?user=kit1&pass=${"
-            + RELAY_PASSWORD_ENV
-            + "}"
-        ]
+def test_live_view_requires_the_relay_login():
+    assert config()["go2rtc"]["rtsp"] == {
+        "username": "kit1",
+        "password": "{" + RELAY_PASSWORD_ENV + "}",
     }
+
+
+def test_nothing_keeps_the_camera_open_or_publishes_video():
+    # go2rtc dials a source for its first consumer and drops it after the last. publish
+    # and preload would each hold a consumer open, so neither may appear.
+    assert set(config()["go2rtc"]) == {"rtsp", "streams"}
+
+
+def test_no_rtmp_or_relay_address_is_left():
+    module = Path(__file__).parents[1] / "src/cameralink/frigate_config.py"
+    template = module.parent / "templates/frigate.yml.tmpl"
+    for body in (module.read_text(), template.read_text(), text()):
+        assert "rtmp" not in body.lower()
+        assert "mediamtx_address" not in body
+        assert "1935" not in body
+
+
+def test_anonymous_broker_leaves_rtsp_on_loopback_with_no_login():
+    # go2rtc skips the login check when no username is set, and an open video port is
+    # worse than no live view. Raising would cost local detection and recording as well.
+    cfg = config(relay_user="")
+    assert cfg["go2rtc"]["rtsp"] == {"listen": "127.0.0.1:8554"}
+    assert "{" + RELAY_PASSWORD_ENV + "}" not in text(relay_user="")
+
+
+@pytest.mark.parametrize("user", ["kit1", "Kit_1", "a.b-c", "me@site", "a+b~c"])
+def test_ordinary_relay_users_are_written_as_they_are(user):
+    assert config(relay_user=user)["go2rtc"]["rtsp"]["username"] == user
 
 
 @pytest.mark.parametrize(
-    ("address", "host"),
-    [
-        ("10.0.0.2:8554", "10.0.0.2:1935"),
-        ("10.0.0.2", "10.0.0.2:1935"),
-        ("relay.local:8554", "relay.local:1935"),
-        ("[fd00::2]:8554", "[fd00::2]:1935"),
-        ("[fd00::2]", "[fd00::2]:1935"),
-    ],
+    "user",
+    # ":" splits Basic auth. Braces go through Frigate's substitution, and "$" through
+    # go2rtc's, before the name is ever compared.
+    ["a:b", "{FRIGATE_X}", "a{{b", "a}b", "${HOME}", "a b", "a\nb", "é", "bad\ud800", 'a"b', None, 7],
 )
-def test_publish_host_comes_from_the_mediamtx_address(address, host):
-    url = config(mediamtx_address=address)["go2rtc"]["publish"]["cam-8da040"][0]
-    assert urlsplit(url).netloc == host
-
-
-@pytest.mark.parametrize("address", ["10.0.0.2:1", "10.0.0.2:65535", "a-b.example:8554", "relay"])
-def test_well_formed_mediamtx_addresses_are_accepted(address):
-    text(mediamtx_address=address)
-
-
-def test_relay_user_is_encoded_so_it_cannot_change_the_url():
-    url = config(relay_user="a&pass=b c/{d}$e")["go2rtc"]["publish"]["cam-8da040"][0]
-    query = parse_qs(urlsplit(url).query)
-    assert query["user"] == ["a&pass=b c/{d}$e"]
-    assert list(query) == ["user", "pass"]
-
-
-def test_anonymous_broker_publishes_with_no_credentials():
-    # Provisioning allows an anonymous broker. A relay that refuses it costs the live view
-    # only, and raising here would cost local detection and recording as well.
-    url = config(relay_user="")["go2rtc"]["publish"]["cam-8da040"][0]
-    assert url == "rtmp://10.0.0.2:1935/cam-8da040"
-
-
-def test_go2rtc_opens_no_new_port():
-    # The firewall keeps 1984, 8554 and 8555 closed. Publishing is outbound only, so the
-    # config has no business naming listeners, and must not add an rtmp one.
-    assert set(config()["go2rtc"]) == {"streams", "publish"}
+def test_unusable_relay_user_raises(user):
+    with pytest.raises(FrigateConfigError, match="relay_user"):
+        text(relay_user=user)
 
 
 # Auth
@@ -413,50 +406,6 @@ def test_invalid_node_id_raises(node_id):
         text(node_id=node_id)
 
 
-@pytest.mark.parametrize(
-    "address",
-    [
-        "",
-        "rtsp://10.0.0.2:8554",
-        "10.0.0.2:8554/x",
-        "a b:8554",
-        "fd00::2",
-        "10.0.0.2:",
-        "h\n",
-        None,
-        "..",
-        ".",
-        "a..b",
-        "-a.example",
-        "a-.example",
-        "a.example.",
-        "x" * 64,
-        "[:::::]",
-        "[]",
-        "[10.0.0.2]",
-        "[fe80::1%eth0]",
-        "10.0.0.2:99999",
-        "10.0.0.2:65536",
-        "10.0.0.2:0",
-        "999.0.0.1",
-        "10.0.0",
-    ],
-)
-def test_invalid_mediamtx_address_raises(address):
-    with pytest.raises(FrigateConfigError, match="mediamtx_address"):
-        text(mediamtx_address=address)
-
-
-def test_relay_user_must_be_text():
-    with pytest.raises(FrigateConfigError, match="relay_user"):
-        text(relay_user=None)
-
-
-def test_a_relay_user_that_cannot_be_encoded_raises():
-    with pytest.raises(FrigateConfigError, match="relay_user"):
-        text(relay_user="bad\ud800")
-
-
 # Determinism
 
 
@@ -550,20 +499,27 @@ def test_write_env_is_deterministic(tmp_path):
     assert a.read_bytes() == b.read_bytes()
 
 
-@pytest.mark.parametrize("password", ["p@ss:w/rd?#", "with space", "100%", "a+b&c=d", "{x}${y}", "é", 'q"\'\\'])
-def test_relay_password_is_percent_encoded_and_decodes_back(tmp_path, password):
-    # It lands in a URL query by plain substitution, and nothing encodes it after that.
+@pytest.mark.parametrize("password", ["p@ss:w/rd?#", "100%", "a+b&c=d", "{x}", "a!*()[],;<>|^"])
+def test_relay_password_is_written_literally(tmp_path, password):
+    # go2rtc compares it with the client's login as it is, so encoding would change it.
     path = tmp_path / "frigate.env"
     write_env(path, CAMERA_PASSWORD, password, PROXY_SECRET)
-    value = env_lines(path)[RELAY_PASSWORD_ENV]
-    assert re.fullmatch(r"[A-Za-z0-9._~%-]+", value)
-    assert unquote(value) == password
+    assert env_lines(path)[RELAY_PASSWORD_ENV] == password
 
 
-def test_a_newline_in_the_relay_password_cannot_add_an_env_line(tmp_path):
+@pytest.mark.parametrize(
+    "password",
+    # "$" could become a go2rtc ${VAR}. The rest do not pass the same way through every
+    # env file reader, and a newline would add a line.
+    ["with space", "a\nFRIGATE_EVIL=1", "${HOME}", 'q"', "q'", "back\\slash", "tick`", "é", "bad\ud800"],
+)
+def test_relay_password_an_env_file_cannot_carry_is_refused(tmp_path, password):
     path = tmp_path / "frigate.env"
-    write_env(path, CAMERA_PASSWORD, "a\nFRIGATE_EVIL=1", PROXY_SECRET)
-    assert "FRIGATE_EVIL" not in env_lines(path)
+    with pytest.raises(FrigateConfigError, match="relay password") as caught:
+        write_env(path, CAMERA_PASSWORD, password, PROXY_SECRET)
+    assert password not in str(caught.value)
+    assert caught.value.__context__ is None
+    assert not path.exists()
 
 
 def test_camera_password_is_written_literally(tmp_path):
@@ -585,16 +541,6 @@ def test_camera_password_needing_encoding_is_refused(tmp_path, password):
     with pytest.raises(FrigateConfigError, match="camera password") as caught:
         write_env(path, password, RELAY_PASSWORD, PROXY_SECRET)
     assert password not in str(caught.value)
-    assert not path.exists()
-
-
-def test_relay_password_that_cannot_be_encoded_raises_with_nothing_attached(tmp_path):
-    # A UnicodeEncodeError's .object holds the whole password, so it must not ride along.
-    path = tmp_path / "frigate.env"
-    with pytest.raises(FrigateConfigError, match="relay password") as caught:
-        write_env(path, CAMERA_PASSWORD, "bad\ud800", PROXY_SECRET)
-    assert caught.value.__cause__ is None
-    assert caught.value.__context__ is None
     assert not path.exists()
 
 

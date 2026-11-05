@@ -229,7 +229,7 @@ class ReolinkClient:
 
     def set_streams(self) -> None:
         # SetEnc rejects vType, gop, width and height (rspCode -4). See
-        # fixtures/reolink/setenc.json and setenc_ok.json.
+        # fixtures/reolink/setenc.json and setenc_ok.json. The values are in getenc.json's range.
         self._call(
             "SetEnc",
             {
@@ -237,15 +237,15 @@ class ReolinkClient:
                     "channel": 0,
                     "audio": 0,
                     "mainStream": {
-                        "size": "2560*1920",
-                        "frameRate": 15,
-                        "bitRate": 4096,
+                        "size": "2304*1296",
+                        "frameRate": 25,
+                        "bitRate": 6144,
                         "profile": "High",
                     },
                     "subStream": {
                         "size": "640*480",
-                        "frameRate": 7,
-                        "bitRate": 256,
+                        "frameRate": 15,
+                        "bitRate": 512,
                         "profile": "High",
                     },
                 }

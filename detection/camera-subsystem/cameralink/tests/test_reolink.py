@@ -561,21 +561,48 @@ def test_password_is_never_in_a_log_record(caplog):
 # --- writes match the recorded bodies --------------------------------------
 
 
-def test_set_streams_sends_sub_640x480_at_7fps_and_main_at_15fps():
+def test_set_streams_sends_main_2304x1296_at_25fps_and_sub_640x480_at_15fps():
     client, opener = logged_in(SetEnc=recorded("setenc_ok")["response"])
 
     client.set_streams()
 
-    body = opener.bodies("Login")[0]
-    assert body == recorded("setenc_ok")["request"]
-    enc = body[0]["param"]["Enc"]
-    assert enc["subStream"]["size"] == "640*480"
-    assert enc["subStream"]["frameRate"] == 7
-    assert enc["mainStream"]["size"] == "2560*1920"
-    assert enc["mainStream"]["frameRate"] == 15
-    assert enc["mainStream"]["bitRate"] == 4096
-    for stream in (enc["mainStream"], enc["subStream"]):
-        assert not {"vType", "gop", "width", "height"} & stream.keys()
+    enc = opener.bodies("Login")[0][0]["param"]["Enc"]
+    assert enc["mainStream"] == {"size": "2304*1296", "frameRate": 25, "bitRate": 6144, "profile": "High"}
+    assert enc["subStream"] == {"size": "640*480", "frameRate": 15, "bitRate": 512, "profile": "High"}
+
+
+def test_set_streams_uses_the_body_shape_the_camera_accepted():
+    # The recorded values are older, so only the keys are compared. SetEnc rejects vType,
+    # gop, width and height.
+    client, opener = logged_in(SetEnc=recorded("setenc_ok")["response"])
+
+    client.set_streams()
+
+    sent = opener.bodies("Login")[0][0]
+    accepted = recorded("setenc_ok")["request"][0]
+    assert {k: v for k, v in sent.items() if k != "param"} == {k: v for k, v in accepted.items() if k != "param"}
+    sent_enc, accepted_enc = sent["param"]["Enc"], accepted["param"]["Enc"]
+    assert sent_enc.keys() == accepted_enc.keys()
+    assert (sent_enc["channel"], sent_enc["audio"]) == (accepted_enc["channel"], accepted_enc["audio"])
+    for stream in ("mainStream", "subStream"):
+        assert sent_enc[stream].keys() == accepted_enc[stream].keys()
+        assert sent_enc[stream]["profile"] == accepted_enc[stream]["profile"]
+
+
+def test_set_streams_values_are_in_the_range_the_camera_reports():
+    client, opener = logged_in(SetEnc=recorded("setenc_ok")["response"])
+
+    client.set_streams()
+
+    enc = opener.bodies("Login")[0][0]["param"]["Enc"]
+    modes = recorded("getenc")["response"][0]["range"]["Enc"]
+    mode = next(m for m in modes if m["mainStream"]["size"] == enc["mainStream"]["size"])
+    for stream in ("mainStream", "subStream"):
+        allowed = mode[stream]
+        assert enc[stream]["size"] == allowed["size"]
+        assert enc[stream]["frameRate"] in allowed["frameRate"]
+        assert enc[stream]["bitRate"] in allowed["bitRate"]
+        assert enc[stream]["profile"] in allowed["profile"]
 
 
 def test_rejected_write_raises_api_error_with_the_rsp_code():

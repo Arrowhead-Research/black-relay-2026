@@ -5,21 +5,19 @@ is a reference to the 0600 env file, in the syntax of whatever expands that fiel
 
 - ``proxy.auth_secret`` and camera input paths: ``{FRIGATE_*}``. Both are Frigate
   ``EnvString`` fields.
-- ``go2rtc.streams``: ``{FRIGATE_*}``. Frigate's ``create_config.py`` runs ``str.format``
-  over them.
-- ``go2rtc.publish``: ``${FRIGATE_*}``. ``create_config.py`` does not touch this section,
-  and go2rtc's own config loader expands ``${VAR}`` from its environment.
+- ``go2rtc.streams`` and ``go2rtc.rtsp.password``: ``{FRIGATE_*}``. Frigate's
+  ``create_config.py`` expands them when it writes go2rtc's own config.
 
-The restream is unverified on hardware. go2rtc's ``publish`` only takes rtmp, rtmps and
-rtmpx destinations (``internal/streams/handlers.go``, ``GetConsumer``), and an rtsp one
-only logs "unsupported scheme". So the stream goes to MediaMTX's RTMP port, on the same
-path, and MediaMTX still serves it to readers over RTSP at ``<host>:8554/<node_id>``.
+Live view is unverified on hardware. go2rtc serves the camera's main stream on RTSP port
+8554 as ``<node_id>``, and the central node pulls it while someone watches. go2rtc dials
+the camera for its first consumer and drops it after the last, so nothing in this config
+may hold a consumer open: no ``publish``, no ``preload``. go2rtc skips the login check for
+loopback clients and when no username is set, so with no relay user it listens on loopback.
 
 Rendering is deterministic, so that a changed output means a changed config. A changed
 secret changes only the env file.
 """
 
-import ipaddress
 import os
 import re
 import tempfile
@@ -28,7 +26,6 @@ from importlib import resources
 from pathlib import Path
 from string import Template
 from typing import Any
-from urllib.parse import quote
 
 import yaml
 
@@ -40,8 +37,6 @@ PROXY_SECRET_ENV = "FRIGATE_PROXY_SECRET"
 # pixel coordinates, and "1" sorts below it.
 FULL_FRAME = "0,0,1,0,1,1,0,1"
 
-_RELAY_RTMP_PORT = 1935
-
 # Frigate's REGEX_CAMERA_NAME.
 _NODE_ID_RE = re.compile(r"[a-zA-Z0-9_-]+")
 # Frigate's loader takes any key, but its zone editor needs two characters and refuses a
@@ -49,8 +44,6 @@ _NODE_ID_RE = re.compile(r"[a-zA-Z0-9_-]+")
 # its polygon drawn or could break a topic. Names are never rewritten, because fusion
 # matches them against the RF side's site vocabulary.
 _ZONE_NAME_RE = re.compile(r"[a-zA-Z0-9_-]{2,}")
-_ADDRESS_RE = re.compile(r"(\[[^\]]*\]|[^:\[\]]*)(?::([0-9]{1,5}))?")
-_HOST_LABEL_RE = re.compile(r"[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?")
 _COORDINATE_RE = re.compile(r"[0-9]+(\.[0-9]+)?")
 # Characters that mean the same with or without URL encoding, and pass unchanged through
 # env files, which differ on quotes, backslashes and whitespace.
@@ -58,6 +51,11 @@ _COORDINATE_RE = re.compile(r"[0-9]+(\.[0-9]+)?")
 # through Frigate's quote_plus on ffmpeg inputs but not to go2rtc, so no encoded value
 # could serve both.
 _LITERAL_SECRET_RE = re.compile(r"[a-zA-Z0-9._~-]+")
+# go2rtc compares the relay login as it is, so neither can be encoded. A user goes through
+# Frigate's brace substitution, and ":" would split Basic auth. The password may be typed by
+# an operator, so it allows what env files carry literally. "$" could become a go2rtc ${VAR}.
+_RELAY_USER_RE = re.compile(r"[a-zA-Z0-9._~@+-]+")
+_RELAY_PASSWORD_RE = re.compile(r"[!#%&(-\[\]-_a-~]*")
 
 
 class FrigateConfigError(Exception):
@@ -68,7 +66,6 @@ class FrigateConfigError(Exception):
 def render(
     node_id: str,
     covered_zones: Sequence[str],
-    mediamtx_address: str,
     relay_user: str,
     existing: Mapping | None,
     proxy_secret: str,
@@ -77,47 +74,41 @@ def render(
 
     ``existing`` is the previously loaded config: zones still covered keep its coordinates,
     even if ``node_id`` has changed. ``proxy_secret`` is only checked here, because the YAML
-    refers to it by name. An empty ``relay_user`` means an anonymous broker, and publishes
-    with no login.
+    refers to it by name. An empty ``relay_user`` means an anonymous broker: live view then
+    stays on loopback, because go2rtc would otherwise serve it with no login.
     """
     _check_node_id(node_id)
     _check_proxy_secret(proxy_secret)
-    if not isinstance(relay_user, str):
-        raise FrigateConfigError("relay_user must be text")
-    encoded_user = _url_encoded(relay_user)
-    if encoded_user is None:
-        raise FrigateConfigError("relay_user cannot be encoded for a URL")
+    rtsp = _rtsp_section(relay_user)
     zones = {
         name: {"coordinates": _coordinates(name, node_id, existing)}
         for name in _zone_names(covered_zones, node_id)
     }
     return _template().substitute(
         node_id=node_id,
-        publish_url=_publish_url(node_id, mediamtx_address, encoded_user),
-        zones=_indented_yaml(zones),
+        rtsp=_indented_yaml(rtsp, 4),
+        zones=_indented_yaml(zones, 6),
     )
 
 
 def write_env(path: Path, camera_password: str, relay_password: str, proxy_secret: str) -> None:
     """Atomically replace the env file that Frigate's container starts with, mode 0600.
 
-    The camera password is written as it is, and one that would need URL encoding is
-    refused. The relay password only lands in a URL query, by plain substitution, so it is
-    written percent-encoded. An empty ``relay_password`` means an anonymous broker.
+    Every value is written as it is, so a value an env file cannot carry literally is
+    refused. An empty ``relay_password`` means an anonymous broker.
     """
     if not isinstance(camera_password, str) or not _LITERAL_SECRET_RE.fullmatch(camera_password):
         raise FrigateConfigError(
             "the camera password must be non-empty, using letters, digits and . _ ~ - only"
         )
-    if not isinstance(relay_password, str):
-        raise FrigateConfigError("the relay password must be text")
+    if not isinstance(relay_password, str) or not _RELAY_PASSWORD_RE.fullmatch(relay_password):
+        raise FrigateConfigError(
+            "the relay password must be printable ASCII, with no space, quote, backslash or $"
+        )
     _check_proxy_secret(proxy_secret)
-    encoded_relay_password = _url_encoded(relay_password)
-    if encoded_relay_password is None:
-        raise FrigateConfigError("the relay password cannot be encoded for a URL")
     body = (
         f"{CAMERA_PASSWORD_ENV}={camera_password}\n"
-        f"{RELAY_PASSWORD_ENV}={encoded_relay_password}\n"
+        f"{RELAY_PASSWORD_ENV}={relay_password}\n"
         f"{PROXY_SECRET_ENV}={proxy_secret}\n"
     )
     try:
@@ -129,15 +120,6 @@ def write_env(path: Path, camera_password: str, relay_password: str, proxy_secre
 def _template() -> Template:
     source = resources.files("cameralink").joinpath("templates/frigate.yml.tmpl")
     return Template(source.read_text(encoding="utf-8"))
-
-
-def _url_encoded(value: str) -> str | None:
-    """``value`` percent-encoded, or None if it has no UTF-8 form. Callers raise outside
-    any ``except``, as a UnicodeEncodeError's ``object`` holds the whole value."""
-    try:
-        return quote(value, safe="")
-    except UnicodeEncodeError:
-        return None
 
 
 def _check_node_id(node_id: Any) -> None:
@@ -215,43 +197,19 @@ def _checked_coordinates(name: str, coordinates: Any) -> str | list[str]:
     return result
 
 
-def _publish_url(node_id: str, mediamtx_address: Any, encoded_user: str) -> str:
-    url = f"rtmp://{_relay_host(mediamtx_address)}:{_RELAY_RTMP_PORT}/{node_id}"
-    if encoded_user:
-        # MediaMTX takes RTMP logins from the query. go2rtc sends the URL as the tcUrl with
-        # the query intact, as this path has one level and so an empty stream key.
-        url += f"?user={encoded_user}&pass=${{{RELAY_PASSWORD_ENV}}}"
-    return url
-
-
-def _relay_host(mediamtx_address: Any) -> str:
-    """The host of ``host[:port]``. The port is checked though only the host is used, as a
-    bad one means a mistyped address, and go2rtc would retry it forever with no report."""
-    match = _ADDRESS_RE.fullmatch(mediamtx_address) if isinstance(mediamtx_address, str) else None
-    if match is None or not _is_host(match[1]) or not (match[2] is None or 0 < int(match[2]) < 65536):
+def _rtsp_section(relay_user: Any) -> dict[str, str]:
+    if relay_user == "":
+        return {"listen": "127.0.0.1:8554"}
+    if not isinstance(relay_user, str) or not _RELAY_USER_RE.fullmatch(relay_user):
         raise FrigateConfigError(
-            f"mediamtx_address {mediamtx_address!r} must be a host, with an optional port"
+            f"relay_user {relay_user!r} must use only letters, digits and . _ ~ @ + -"
         )
-    return match[1]
+    return {"username": relay_user, "password": f"{{{RELAY_PASSWORD_ENV}}}"}
 
 
-def _is_host(host: str) -> bool:
-    """A hostname, an IPv4 address, or a bracketed IPv6 address with no scope."""
-    try:
-        if host.startswith("["):
-            return "%" not in host and bool(ipaddress.IPv6Address(host[1:-1]))
-        labels = host.split(".")
-        if len(host) > 253 or not all(_HOST_LABEL_RE.fullmatch(label) for label in labels):
-            return False
-        # A name whose last label is a number can only be a mistyped IPv4 address.
-        return not labels[-1].isdigit() or bool(ipaddress.IPv4Address(host))
-    except ValueError:
-        return False
-
-
-def _indented_yaml(zones: Mapping) -> str:
-    text = yaml.safe_dump(dict(zones), sort_keys=True, default_flow_style=False, width=2**16)
-    return "".join(f"      {line}\n" for line in text.splitlines()).rstrip("\n")
+def _indented_yaml(section: Mapping, indent: int) -> str:
+    text = yaml.safe_dump(dict(section), sort_keys=True, default_flow_style=False, width=2**16)
+    return "".join(" " * indent + f"{line}\n" for line in text.splitlines()).rstrip("\n")
 
 
 def _replace_file(path: Path, body: str) -> None:
