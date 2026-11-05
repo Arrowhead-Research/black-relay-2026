@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from jsonschema.validators import Draft202012Validator
 
 from camerabridge import formats
@@ -68,7 +69,7 @@ class FakeMqttClient:
 
     def __init__(self) -> None:
         self.published: list[tuple[str, bytes, int]] = []
-        self.subscriptions: list[str] = []
+        self.subscriptions: list[tuple[str, int]] = []
         self._next_mid = 1
         self.on_connect = None
         self.on_message = None
@@ -548,13 +549,23 @@ def test_start_client_survives_broker_down_boot():
 # --- node_id validation (M1) ------------------------------------------------
 
 
-def test_make_bridge_rejects_invalid_node_id(tmp_path):
-    import pytest
-
+@pytest.mark.parametrize(
+    "bad_node_id",
+    [
+        "CAM_01",  # uppercase + underscore
+        "cam_01",  # underscore
+        "-cam-01",  # leading hyphen
+        "cam 01",  # space
+        "cam-01\n",  # trailing newline: Python `$` would pass, fullmatch rejects
+        "",  # empty
+        42,  # not a string
+    ],
+)
+def test_make_bridge_rejects_invalid_node_id(tmp_path, bad_node_id):
     from camerabridge import cli
 
     cfg = {
-        "node_id": "CAM_01",  # uppercase + underscore: violates ^[a-z0-9][a-z0-9-]*$
+        "node_id": bad_node_id,
         "covered_zones": ["perimeter-north"],
         "outbox": {"path": str(tmp_path / "outbox.jsonl")},
         "frigate": {"topic": "frigate/events", "base_url": "http://x"},

@@ -121,6 +121,43 @@ def test_detection_event_preserves_passed_event_id():
     _validate("detection.v0.schema.json", msg)
 
 
+def test_detection_event_copies_zones_and_attributes():
+    # A caller mutating its input lists/dicts after the build must not alias into
+    # (and silently change) the already-emitted message.
+    zones = ["perimeter-north"]
+    attributes = {"bbox": [1, 2, 3, 4]}
+    msg = formats.detection_event(
+        node_id="cam-01",
+        event="object_start",
+        object_id="trk-1",
+        label="person",
+        confidence=0.5,
+        zones=zones,
+        attributes=attributes,
+        clock=FakeClock(),
+    )
+    zones.append("driveway")
+    attributes["snapshot_url"] = "https://node.local/x.jpg"
+    assert msg["zones"] == ["perimeter-north"]
+    assert "snapshot_url" not in msg["attributes"]
+
+
+def test_node_status_copies_attributes():
+    attributes = {"detection_fps": 5.0}
+    msg = formats.node_status(
+        node_id="cam-01",
+        camera_online=True,
+        link_online=True,
+        recording_ok=True,
+        detector_ok=True,
+        attributes=attributes,
+        clock=FakeClock(),
+    )
+    attributes["detection_fps"] = 99.0
+    attributes["new_key"] = 1
+    assert msg["attributes"] == {"detection_fps": 5.0}
+
+
 def test_detection_event_empty_zones_validates():
     msg = formats.detection_event(
         node_id="cam-01",

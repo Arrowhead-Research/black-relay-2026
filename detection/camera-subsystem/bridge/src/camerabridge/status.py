@@ -56,11 +56,12 @@ class NodeState:
         "detector_ok",
     )
 
-    def attributes(self) -> dict[str, Any]:
+    def _attributes(self) -> dict[str, Any]:
         """Return the set optional fields as the heartbeat's ``attributes`` dict.
 
         Only fields with a non-``None`` value are included, so an unset field is
-        omitted entirely rather than carried as ``null``.
+        omitted entirely rather than carried as ``null``. Internal helper — not
+        part of the public contract (callers use :func:`build_status`).
         """
         return {
             f.name: getattr(self, f.name)
@@ -69,7 +70,7 @@ class NodeState:
         }
 
 
-def build_status(state: NodeState, node_id: str, clock: formats.Clock) -> dict:
+def build_status(state: NodeState, node_id: str, clock: formats.Clock) -> dict[str, Any]:
     """Compose a ``camera.node-status.v0`` heartbeat for ``state``.
 
     Passes the four health booleans and the set optional telemetry (as the
@@ -83,6 +84,6 @@ def build_status(state: NodeState, node_id: str, clock: formats.Clock) -> dict:
         link_online=state.link_online,
         recording_ok=state.recording_ok,
         detector_ok=state.detector_ok,
-        attributes=state.attributes(),
+        attributes=state._attributes(),
         clock=clock,
     )

@@ -53,13 +53,15 @@ _DEFAULT_CUE_WINDOW_S = 5.0
 # Every camera.* message carries node_id, and the contract pins it to this pattern
 # (schemas/*.schema.json). A bad field-provisioned value (uppercase, underscore,
 # leading hyphen) would make every message schema-invalid and be silently dropped
-# by fusion — so it is validated once, loudly, at startup.
-_NODE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+# by fusion — so it is validated once, loudly, at startup. The pattern carries no
+# `$` and is applied with re.fullmatch so a trailing newline ("cam-01\n") is
+# rejected, matching the JSON-schema ECMA `$` (Python's `$` would let it pass).
+_NODE_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 
 
 def _validate_node_id(node_id: Any) -> str:
     """Return ``node_id`` if it matches the contract pattern, else raise ValueError."""
-    if not isinstance(node_id, str) or not _NODE_ID_RE.match(node_id):
+    if not isinstance(node_id, str) or not _NODE_ID_RE.fullmatch(node_id):
         raise ValueError(
             f"node_id {node_id!r} is invalid: must match ^[a-z0-9][a-z0-9-]*$ "
             "(lowercase letters, digits and hyphens; no leading hyphen). Fix the "
@@ -236,11 +238,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logger.info("camerabridge running for node %s", cfg["node_id"])
     try:
         while True:
-            time.sleep(status_interval)
+            # Publish the heartbeat (and retire stale tracks/pending cues) at the
+            # TOP of the loop so a node is not status-silent for a whole interval at
+            # boot; then sleep until the next tick.
             mark_clock_if_synced(clock)
             bridge.publish_status(_default_node_state(link_online=True))
-            # Retire stale tracks / pending cues so neither grows over a 24/7 uptime.
             bridge.expire_tracks()
+            time.sleep(status_interval)
     except KeyboardInterrupt:
         logger.info("shutting down")
     finally:

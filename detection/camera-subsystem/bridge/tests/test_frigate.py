@@ -177,3 +177,36 @@ def test_does_not_mutate_input_payload():
     snapshot = copy.deepcopy(payload)
     parse_frigate_event(payload)
     assert payload == snapshot
+
+
+# --- defensive copies: the event must not alias the payload's lists ----------
+
+
+def test_zones_and_bbox_are_copied_out_of_payload():
+    payload = load_fixture()
+    result = parse_frigate_event(payload)
+    # Mutating the SOURCE lists after parse must not change the built event.
+    payload["after"]["current_zones"].append("driveway")
+    payload["after"]["box"].append(999)
+    assert result.zones == ["perimeter-north"]
+    assert result.bbox == [120, 80, 64, 180]
+
+
+# --- numeric coercion: a flaky upstream type can't leak a non-numeric through -
+
+
+def test_numeric_fields_are_coerced_to_float_and_int():
+    payload = load_fixture()
+    payload["after"]["score"] = "0.81"  # stringified float from a flaky upstream
+    payload["after"]["area"] = "11520"
+    result = parse_frigate_event(payload)
+    assert result is not None
+    assert result.confidence == 0.81 and isinstance(result.confidence, float)
+    assert result.area_px == 11520 and isinstance(result.area_px, int)
+
+
+def test_non_numeric_score_is_treated_as_malformed():
+    payload = load_fixture()
+    payload["after"]["score"] = "not-a-number"
+    # Non-coercible numeric → treated as malformed (None), never raises.
+    assert parse_frigate_event(payload) is None

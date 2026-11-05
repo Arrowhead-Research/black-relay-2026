@@ -80,16 +80,20 @@ def parse_frigate_event(payload: dict) -> FrigateEvent | None:
         # Optional fields: fall back to defaults that match the contract's
         # attribute shapes. `or` collapses both "missing" and explicit null
         # (Frigate sends current_zones: null when an object is in no zone).
-        confidence = after.get("score") or 0.0
-        zones = after.get("current_zones") or []
-        bbox = after.get("box") or []
-        area_px = after.get("area") or 0
+        # Numeric fields are coerced so a flaky upstream type cannot leak a
+        # non-numeric through (a non-coercible value raises ValueError and is
+        # treated as malformed below → None). zones/bbox are copied out so the
+        # FrigateEvent never shares a list object with the input payload.
+        confidence = float(after.get("score") or 0.0)
+        zones = list(after.get("current_zones") or [])
+        bbox = list(after.get("box") or [])
+        area_px = int(after.get("area") or 0)
         stationary = bool(after.get("stationary"))
         # Frigate's MQTT event carries no URL (the edge service builds one from
         # the Frigate host per DESIGN 5.6); pass through an enriched value if an
         # upstream stage set one, else None.
         snapshot_url = after.get("snapshot_url")
-    except (KeyError, TypeError, AttributeError):
+    except (KeyError, TypeError, AttributeError, ValueError):
         return None
 
     return FrigateEvent(

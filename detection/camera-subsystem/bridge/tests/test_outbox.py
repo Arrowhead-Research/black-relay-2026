@@ -313,3 +313,44 @@ def test_overflow_survives_restart(tmp_path):
     p2 = RecordingPublish()
     box2.replay(p2)
     assert [json.loads(x)["event_id"] for x in p2.payloads] == eids[2:]
+
+
+# --- ack id namespacing: a stray/colliding mid never evicts the wrong entry ---
+
+
+def test_stray_puback_colliding_with_entry_mid_does_not_evict(tmp_path):
+    path = str(tmp_path / "outbox.jsonl")
+    box = Outbox(path, max_bytes=10_000_000, max_age_s=1e9)
+    a = make_detection("object_start", 1)
+    box.enqueue(formats.TOPIC_DETECTIONS, a, durable=True)  # entry's own mid == 1
+    # Broker mids start well above entry mids, so the in-flight map is {1000: 1}.
+    p = RecordingPublish(start_mid=1000)
+    mids = box.flush(p)
+
+    # A stray/duplicate PUBACK whose mid (1) collides with the entry's OWN internal
+    # id must NOT evict it — only the genuine broker mid may. (Pre-fix, the
+    # entry-own-mid fallback would have wrongly removed entry 1 here.)
+    box.ack(1)
+    assert read_event_ids(Path(path)) == [a["event_id"]]
+
+    # The real broker ack still removes it.
+    box.ack(mids[0])
+    assert read_event_ids(Path(path)) == []
+
+
+# --- overflow: a lone oversized entry is dropped with a DISTINCT warning -------
+
+
+def test_oversized_single_entry_logs_distinct_warning(tmp_path, caplog):
+    path = tmp_path / "outbox.jsonl"
+    # A cap far smaller than one serialized durable line: the lone entry can't fit.
+    box = Outbox(str(path), max_bytes=10, max_age_s=1e9)
+    with caplog.at_level(logging.WARNING):
+        box.enqueue(formats.TOPIC_DETECTIONS, make_detection("object_start", 1), durable=True)
+
+    # It is still dropped (the cap is honoured) ...
+    assert read_event_ids(path) == []
+    # ... but a DISTINCT warning names the single-entry-exceeds-cap case, so a lone
+    # oversized durable event is not hidden inside the normal FIFO-overflow message.
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("single durable entry" in m and "exceeds max_bytes" in m for m in messages)

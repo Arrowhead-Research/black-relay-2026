@@ -224,13 +224,15 @@ class Outbox:
     def ack(self, mid) -> None:
         """Remove the acked message from the file.
 
-        ``mid`` is normally the broker id returned by ``publish`` (resolved via
-        the in-flight map); an entry's own stable mid is also accepted. Unknown
-        or already-removed ids are a no-op (acks can arrive late or twice).
+        ``mid`` is the broker id returned by ``publish`` (paho's PUBACK mid),
+        resolved to an entry **only** via the in-flight map. A mid absent from that
+        map — a stray or duplicate PUBACK, or one whose integer happens to collide
+        with some entry's own internal id — is a no-op. Entry-own ids are never
+        consulted here, so the two id spaces (broker mids vs internal entry mids)
+        can never be confused and a stray PUBACK cannot evict the wrong entry. Acks
+        can arrive late or twice; both are safely ignored.
         """
         entry_mid = self._inflight.pop(mid, None)
-        if entry_mid is None and mid in self._entries:
-            entry_mid = mid
         if entry_mid is None:
             return
         if self._entries.pop(entry_mid, None) is None:
@@ -264,6 +266,21 @@ class Outbox:
 
         while self._entries and self._serialized_size() > self._max_bytes:
             oldest_mid = next(iter(self._entries))
+            oldest = self._entries[oldest_mid]
+            # A single entry whose own on-disk line already exceeds the whole cap
+            # can never fit; it is still dropped (keeping the cap), but with a
+            # DISTINCT warning so it is not hidden inside the normal FIFO-overflow
+            # message — a lone oversized durable event is a signal worth seeing.
+            line_size = len(self._line(oldest).encode("utf-8"))
+            if line_size > self._max_bytes:
+                logger.warning(
+                    "outbox: dropping a single durable entry (mid=%s topic=%s) whose "
+                    "%d-byte line alone exceeds max_bytes=%s; it can never fit the cap",
+                    oldest.mid,
+                    oldest.topic,
+                    line_size,
+                    self._max_bytes,
+                )
             del self._entries[oldest_mid]
             self._discard_entry_state(oldest_mid)
             dropped += 1

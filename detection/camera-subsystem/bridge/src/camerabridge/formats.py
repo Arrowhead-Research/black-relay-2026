@@ -147,8 +147,10 @@ def detection_event(
         "object_id": object_id,
         "label": label,
         "confidence": confidence,
-        "zones": zones,
-        "attributes": attributes,
+        # Copy the caller's mutable inputs so a later mutation of the source list /
+        # dict cannot alias into (and silently change) an already-emitted message.
+        "zones": list(zones),
+        "attributes": dict(attributes),
     }
 
 
@@ -206,5 +208,6 @@ def node_status(
         "link_online": link_online,
         "recording_ok": recording_ok,
         "detector_ok": detector_ok,
-        "attributes": attributes,
+        # Copy so a later mutation of the caller's dict can't alias the message.
+        "attributes": dict(attributes),
     }

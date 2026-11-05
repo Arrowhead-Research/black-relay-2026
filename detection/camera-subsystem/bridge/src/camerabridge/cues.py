@@ -180,7 +180,7 @@ class CueMatcher:
         return best_object_id
 
 
-def handle_cue(cue: RfCue, matcher: CueMatcher, node_id: str, clock) -> dict:
+def handle_cue(cue: RfCue, matcher: CueMatcher, node_id: str, clock: formats.Clock) -> dict:
     """Compose a ``camera.cue-ack.v0`` for ``cue``, matched or not.
 
     Delegates the match decision to ``matcher`` (which never raises for an
