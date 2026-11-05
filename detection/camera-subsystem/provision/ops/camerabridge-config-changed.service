@@ -5,4 +5,6 @@ Description=Restart the camera bridge after its config changed
 
 [Service]
 Type=oneshot
+# Debounce: a save can change the file more than once in quick succession.
+ExecStartPre=/bin/sleep 2
 ExecStart=/usr/bin/systemctl restart --no-block camerabridge.service

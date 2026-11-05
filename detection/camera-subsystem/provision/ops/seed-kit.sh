@@ -56,9 +56,10 @@ nmcli --offline connection modify connection.autoconnect no <"$staged" >/dev/nul
 mv -f -- "$staged" "$profile"
 trap - EXIT
 
-nmcli connection reload
-
+# Print first: the profile holds this passphrase now, even if the reload fails.
 printf 'BLACK RELAY CAMERA KIT\n'
 printf 'Setup WiFi:  BlackRelay-CAM-%s\n' "$serial"
 printf 'Passphrase:  %s\n' "$passphrase"
 printf 'Setup page:  http://10.42.0.1/\n'
+
+nmcli connection reload

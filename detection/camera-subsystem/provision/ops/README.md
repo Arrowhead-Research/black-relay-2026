@@ -5,8 +5,7 @@ Builds the SD image for a camera edge node and defines how to check it in the fi
 **Nothing here has been verified on hardware.** Every check in the
 [field verification checklist](#field-verification-checklist) is labeled NOT YET RUN.
 
-**Covered by Plan 3, not here:** Frigate, go2rtc, camera link setup (the `eth0` static
-address and any DHCP server on it), and bench configuration of the camera. Plan 3 must meet
+**Covered by Plan 3, not here:** Frigate, go2rtc, camera link setup (the `eth0` static address), and bench configuration of the camera. Plan 3 must meet
 [these requirements](#requirements-on-plan-3).
 
 ## Files
@@ -36,6 +35,9 @@ Balena wifi-connect could run the WiFi-join flow, but its fixed UI collects only
 credentials. This plan runs its own portal because it also collects VPN, hostname, `node_id`,
 and central endpoints (DESIGN 7.2).
 
+NetworkManager must be at least 1.28 for `802-11-wireless.ap-isolation`, and at least 1.40 for the
+`nmcli --offline` call in `seed-kit.sh`. C01 checks the installed version.
+
 Changing `10.42.0.1` means changing the profile, captive DNS, firewall, and the daemon's `--ap-ip`
 together. A site LAN that uses `10.42.0.0/24` cannot host this node: the firewall treats that range
 as AP clients.
@@ -47,16 +49,10 @@ as AP clients.
 `frigate.mqtt_host` is already `127.0.0.1`.
 
 Frigate in a bridged Docker network cannot reach the host's loopback. The other fix is a second
-listener on the Docker gateway address, and it is rejected for these reasons:
-
-- **It breaks camera isolation.** A bridged container's RTSP pull is forwarded out `eth0`, and
-  the rule set must drop all forwarding to and from `eth0`. A carve-out would contradict that
-  requirement. Under host networking, the pull is the node's own traffic and is not forwarded.
-- **Published ports skip the input chain.** Docker's DNAT sends them through forward, so an AP
-  client could reach a published Frigate port at `10.42.0.1`, and the input rules below would
-  not apply. Under host networking, every Frigate port goes through the input chain.
-- **The gateway address may not exist yet.** mosquitto cannot bind it until Docker creates the
-  network, which ties the broker's start to Docker's.
+listener on the Docker gateway address. It is rejected because of RTSP: a bridged container's pull
+from the camera is forwarded out `eth0`, and the rule set must drop all forwarding to and from
+`eth0`. A carve-out would contradict that requirement. Under host networking, the pull is the
+node's own traffic and is not forwarded.
 
 **How it is enforced:**
 
@@ -78,22 +74,29 @@ roles, told apart by address: anything from `10.42.0.0/24` or to `10.42.0.1` is 
 |---|---|
 | `lo` | Everything, including the broker and Frigate's internal ports |
 | `wlan0`, AP client | Portal (TCP 80), DNS (TCP/UDP 53), and DHCP (UDP 67), to `10.42.0.1` only |
-| `wlan0`, site LAN | SSH (22), Frigate UI (5000, 8971), DHCP replies, Tailscale direct (UDP 41641), mDNS (so `<host>.local` in `snapshot_url` resolves), ping, IPv6 neighbor discovery |
-| `tailscale0` | SSH (22), Frigate UI (5000, 8971), ping |
-| `eth0` | DHCP requests (UDP 67) only |
+| `wlan0`, site LAN | SSH (22), Frigate (5000, 8971), DHCP replies, Tailscale direct (UDP 41641), mDNS (so `<host>.local` in `snapshot_url` resolves), ping, IPv6 neighbor discovery. Link-local IPv6 cannot reach SSH or Frigate, and only addresses held on `wlan0` itself are reachable |
+| `tailscale0` | SSH (22), Frigate (5000, 8971), ping |
+| `eth0` | Nothing |
 | Forwarding | Nothing. Explicit drops to and from `eth0`, and a default drop for everything else |
 
-- **Camera link:** the node opens RTSP to the camera, so the reply is accepted. RTSP must use
-  TCP: UDP RTP from the camera starts a new flow and is dropped.
-- **DHCP on `eth0`:** this is the one exception to "DHCP only on `wlan0`". It exists only for a
-  camera-link DHCP server, if Plan 3 runs one, and nothing listens there until then. The AP's
-  dnsmasq stays on `wlan0`. Portal and DNS are never allowed on `eth0`.
-- **Frigate ports:** 5000 is the unauthenticated port in `frigate.base_url`, and 8971 is the
-  authenticated UI (DESIGN 5.6). The firewall leaves go2rtc (1984), RTSP (8554), and WebRTC
-  (8555) closed from outside the node.
-- **Reloads:** the file replaces only its own table, so `systemctl reload nftables` keeps the
-  tables that NetworkManager and tailscaled own. **Do not run `systemctl stop nftables`:** the
-  Debian unit runs `nft flush ruleset`, which removes every table.
+- **Camera link:** the camera is statically addressed (DESIGN 11), so `eth0` needs no DHCP. The node
+  opens RTSP to the camera, so the reply is accepted. RTSP must use TCP: UDP RTP from the camera
+  starts a new flow and is dropped.
+- **Port 5000 has no authentication.** Any host on the site LAN and any tailnet peer gets Frigate's
+  unauthenticated API on port 5000. That may include writing Frigate's config: this is unverified,
+  and C24 records the answer. `frigate.base_url` and DESIGN 5.6 use this port for snapshots, so it
+  is open today. **Whether it stays open is an owner decision that is still open.** Port 8971 is the
+  authenticated UI.
+- **Other Frigate ports:** the firewall leaves go2rtc (1984), RTSP (8554), and WebRTC (8555) closed
+  from outside the node.
+- **Reloads:** the file replaces only its own table, so `systemctl reload nftables` keeps the tables
+  that NetworkManager and tailscaled own. **Do not run `systemctl stop nftables` or
+  `systemctl restart nftables`:** the Debian unit's `ExecStop` runs `nft flush ruleset`, which removes
+  every table, including theirs, and restart runs it too.
+- **If nftables fails at boot:** with host networking, Frigate's ports are then open on every
+  interface, including port 5000 on `eth0` and to AP clients, and nothing signals it. The daemon
+  refuses to start, so no AP opens, but that does not protect Frigate. Plan 3's `Requires=nftables.service`
+  on the Frigate unit covers this: Frigate does not start without the firewall.
 
 ### SSH policy
 
@@ -110,14 +113,15 @@ roles, told apart by address: anything from `10.42.0.0/24` or to `10.42.0.1` is 
 | `nftables.service` | Early boot, before `network-pre.target` | Firewall exists before any interface is up |
 | `NetworkManager.service` | `network-pre.target` | |
 | `camera-provision.service` | `NetworkManager`, `nftables` | `ExecStartPre` refuses to start without the `black_relay` table, because the AP turns on IP forwarding |
-| `mosquitto.service` | `network-online.target`, from the Debian unit | Instant once wait-online is disabled, see below |
+| `mosquitto.service` | `network-online.target`, from the Debian unit | Instant once wait-online is masked, see below |
 | `camerabridge.service` | `NetworkManager`, `mosquitto`, ordering only | Wants mosquitto but does not require it |
 | `tailscaled.service` | Independent | Enabled on its own |
 
-- **No `network-online.target` wait:** image build step 9 disables
-  `NetworkManager-wait-online.service`. Otherwise the Debian mosquitto unit, and the bridge
-  behind it, could wait for a network that may be down, while detect and record should continue.
-  Docker's own unit would otherwise wait the same way.
+- **No `network-online.target` wait:** image build step 9 masks
+  `NetworkManager-wait-online.service`. Otherwise, on a boot with WiFi down, the Debian mosquitto unit
+  and the bridge behind it wait up to 60 s, while detect and record should continue. Docker's own
+  unit would wait the same way. Disabling is not enough: `NetworkManager.service` has
+  `Also=NetworkManager-wait-online.service`, so enabling NetworkManager enables it again.
 - **No dependency on `tailscaled`:** the bridge uses the site LAN, and the daemon only calls
   `tailscale up` once provisioned and retries with backoff. The daemon must not wait on it,
   because it reads the setup button once at startup.
@@ -131,11 +135,31 @@ roles, told apart by address: anything from `10.42.0.0/24` or to `10.42.0.1` is 
 
 ### Time
 
-`systemd-timesyncd` syncs the clock once there is an uplink. The bridge reads
-`timedatectl show -p NTPSynchronized --value`, and holds `object_start`, `object_end`, and
-cue-acks until that says `yes` (DESIGN 7.5). The portal has no NTP field, so the server is set
-per site in image build step 8. Without a reachable server the bridge never sends those events
-to the central broker and sends no heartbeat.
+`systemd-timesyncd` syncs the clock once there is an uplink. The portal has no NTP field, so the
+server is set in image build step 8. The bridge reads
+`timedatectl show -p NTPSynchronized --value`, and until that says `yes` (DESIGN 7.5):
+
+- It logs `NTP not yet synchronized; holding durable events until it is`.
+- `object_start`, `object_end`, and cue-acks are held **in RAM only**, capped at 10,000 with the
+  oldest dropped first, and **lost on any restart or power cut**.
+- **Nothing enters the outbox**, so the outbox gives these events no protection.
+- `object_update` is dropped, and **no heartbeat is sent**, so the node looks dead to the central
+  node, though it is still detecting and recording.
+
+**Do not use the central node as the only NTP source.** A node that boots during a central outage
+would never sync, so its events stay in RAM for the whole outage, which is when the outbox is needed.
+List the site gateway first, then the central node.
+
+To change the server on a running node:
+
+```bash
+sudo install -d /etc/systemd/timesyncd.conf.d
+printf '[Time]\nNTP=<site-ntp>\n' | sudo tee /etc/systemd/timesyncd.conf.d/black-relay.conf
+sudo systemctl restart systemd-timesyncd
+timedatectl timesync-status
+```
+
+`<site-ntp>` is one address or a space-separated list.
 
 ### Requirements on Plan 3
 
@@ -147,11 +171,12 @@ to the central broker and sends no heartbeat.
    isolation, since a drop in this rule set is final, but it keeps Docker's rules out of the way.
 4. `eth0` has a static NetworkManager profile with `ipv4.method=manual`, `ipv4.never-default=yes`,
    `ipv6.method=disabled`, never `shared`. Delete the automatic `Wired connection 1` profile.
-5. A DHCP server on `eth0`, if used, binds `eth0` only and does not listen on port 53 there
-   (`interface=eth0`, `bind-interfaces`, `port=0`).
-6. go2rtc reads `MEDIAMTX_ADDRESS` from `EnvironmentFile=/etc/camerabridge/mediamtx.env`, never
+5. go2rtc reads `MEDIAMTX_ADDRESS` from `EnvironmentFile=/etc/camerabridge/mediamtx.env`, never
    `bridge.yaml`.
-7. Opening another port from outside the node means editing `black-relay.nft`.
+6. Opening another port from outside the node means editing `black-relay.nft`.
+7. The Frigate container is not privileged, and gets only the devices it needs.
+8. The unit that starts Frigate has `Requires=nftables.service` and `After=nftables.service`, so
+   Frigate never runs without the firewall. Stopping nftables then stops Frigate too.
 
 ## Build the image
 
@@ -237,8 +262,8 @@ unless marked. `<CC>`, `<build-pi>`, `<site-ntp>`, and `<sdX>` are placeholders.
    sudo sshd -t
    ```
 
-8. **Set the NTP server for the site:** the central node or site gateway (DESIGN 7.5). Fusion
-   must not depend on the WAN, so do not rely on the fallback public pool.
+8. **Set the NTP servers for the site:** the site gateway first, then the central node
+   ([why](#time)). Fusion must not depend on the WAN, so do not rely on the fallback public pool.
 
    ```bash
    sudo install -d /etc/systemd/timesyncd.conf.d
@@ -249,10 +274,11 @@ unless marked. `<CC>`, `<build-pi>`, `<site-ntp>`, and `<sdX>` are placeholders.
    session on `eth0`, and starting the daemon would write state into the image.
 
    ```bash
-   sudo systemctl disable NetworkManager-wait-online.service
-   sudo systemctl enable nftables.service NetworkManager.service mosquitto.service \
+      sudo systemctl enable nftables.service NetworkManager.service mosquitto.service \
      tailscaled.service systemd-timesyncd.service camera-provision.service \
      camerabridge.service camerabridge-config.path
+   # After the enable, which turns wait-online back on through Also=.
+   sudo systemctl mask NetworkManager-wait-online.service
    ```
 
 10. **Do the Plan 3 steps** that belong in the image, without rebooting. A reboot would apply the
@@ -336,8 +362,9 @@ hard cap 1800 s.
 | Join fails (wrong password, router away) | After 120 s opens the AP with a WiFi-only portal. Rejoins after the window, and alternates until it works |
 | AP window ends with no config | Stays on the AP with the full portal |
 | Button held at boot | Opens the AP with the full portal. With a config and no submission, rejoins after the window |
-| WiFi lost after provisioning | No AP. NetworkManager keeps retrying |
-| Central broker, central node, or Tailscale down | No effect on provisioning. The bridge queues durable events |
+| WiFi lost after provisioning | No AP. NetworkManager keeps retrying, and the daemon re-issues the join every 180 s |
+| Central broker, central node, or Tailscale down | No effect on provisioning. Once the clock has synced, the bridge queues durable events in the outbox |
+| Clock not synced yet | The bridge logs `NTP not yet synchronized; holding durable events until it is`. Durable events are held in RAM only, capped at 10,000, and lost on restart. Nothing enters the outbox, and no heartbeat is sent |
 
 Detect and record do not depend on any of this.
 
@@ -384,22 +411,27 @@ journalctl -b -u camera-provision --no-pager -g ' -> |portal' # state changes th
 | `camera_fps` on a dead camera | C33 |
 | `detector_ok` idle values | C34 |
 | Outbox drain time on SD | C35 |
+| AP liveness check | C37 |
+| Rejoin retry every 180 s | C38 |
+| Moving a node to another tailnet | C39 |
 
 ### Static checks and adapters
 
 **C01. Artifacts parse on Bookworm's tool versions. NOT YET RUN.**
 
 ```bash
-nft --version; nmcli --version; systemctl --version | head -1; dnsmasq --version | head -1
+sudo nft --version; nmcli --version; systemctl --version | head -1; sudo dnsmasq --version | head -1
 sudo nft -c -f /etc/nftables.conf; echo "nft rc=$?"
 cd /etc/systemd/system && systemd-analyze verify camera-provision.service camerabridge.service \
   camerabridge-config.path camerabridge-config-changed.service; echo "verify rc=$?"
-dnsmasq --test --conf-file=/etc/NetworkManager/dnsmasq-shared.d/black-relay-captive.conf
+sudo dnsmasq --test --conf-file=/etc/NetworkManager/dnsmasq-shared.d/black-relay-captive.conf
 systemctl cat nftables.service | grep -E 'Before|ExecStop'
 ```
 
-Expect: `nft rc=0`, `verify rc=0` with no errors about these units, `syntax check OK`, and
-`network-pre.target` in the nftables `Before=`.
+Expect: NetworkManager at least 1.40 (1.28 for `ap-isolation`, 1.40 for `nmcli --offline`), `nft rc=0`,
+`verify rc=0` with no errors about these units, `syntax check OK`, and `network-pre.target` in the
+nftables `Before=`. The `nft` check also proves the kernel has the `fib` expression the rule set
+uses: without it the whole table fails to load.
 Earlier offline checks used newer versions than Bookworm ships.
 
 **C02. Full suites on Bookworm's Python 3.11. NOT YET RUN.** Run on a build card, before step 11.
@@ -427,8 +459,13 @@ nmcli --terse --mode multiline --fields GENERAL.STATE,802-11-wireless.mode,DHCP4
 Run it with the uplink active, activating, and inactive, and once with `black-relay-setup-ap` as
 the profile while the AP is up. Expect, in order: `GENERAL.STATE:activated` with
 `802-11-wireless.mode:infrastructure` and a `DHCP4.OPTION[n]:ip_address = ...` line; a state other
-than `activated`; no `GENERAL.STATE` line; and mode `ap`. Compare with the fixtures in
-`tests/test_system.py`, and record the real text there if it differs.
+than `activated`; no `GENERAL.STATE` line; and mode `ap`. Also run the AP liveness query with the AP
+up and down: `nmcli --terse --mode multiline --fields GENERAL.STATE connection show black-relay-setup-ap`
+prints `GENERAL.STATE:activated`, then nothing.
+
+Compare all of it with `tests/fixtures/nmcli/`, which was recorded on a laptop with nmcli 1.52.1, not
+on Bookworm. Its `README.md` lists the commands. If the text differs, replace the fixtures with the
+Bookworm output and re-run the suite.
 
 **C04. Other nmcli behavior. NOT YET RUN.**
 
@@ -467,7 +504,14 @@ sudo rm .black-relay-uplink.nmconnection.staged.tmp
 
 Expect: no `decoy` in the list. Also read the AP profile back and confirm `ap-isolation`:
 `sudo nmcli --get-values 802-11-wireless.ap-isolation connection show black-relay-setup-ap`
-prints `1` or `true`.
+prints `1` or `true`. With the AP up, look for a warning that isolation was not applied:
+
+```bash
+sudo journalctl -b -u NetworkManager -u wpa_supplicant --no-pager -g 'isolat'
+```
+
+Expect: no warning. No warning does not prove isolation works: the two-client test in C24 is the
+proof.
 
 **C06. Button and libgpiod. NOT YET RUN.** With the AI HAT+ fitted.
 
@@ -487,7 +531,7 @@ Expect: a chip and offset, then `0`, then `1`. Also expect no `reading the setup
 ```bash
 journalctl -b -u camera-provision --no-pager -g ' -> |portal'
 nmcli --fields NAME,TYPE,DEVICE connection show --active
-iw dev wlan0 info | grep type
+sudo iw dev wlan0 info | grep type
 ```
 
 Expect: `unprovisioned + boot -> ap_up`, `portal listening in full mode`, the profile
@@ -511,8 +555,9 @@ by `camerabridge`, `mediamtx.env` is 0644, the keyfile is 0600, and the bridge i
 the reboot: `joining` then `provisioned`, with no `ap_up`, no setup SSID visible at any point
 (watch from a phone during boot), and no operator action.
 
-Also check the hostname: `hostnamectl --static` prints what was typed, once the Task 6 fix round
-adds it. It is not set today.
+Also check the hostname, which the daemon sets on entering `joining`: `hostnamectl --static` prints
+what was typed, including after the reboot, and `journalctl -b -u camera-provision -g 'hostname'`
+shows no `setting the hostname failed`.
 
 **C09. Malformed or incomplete submission. NOT YET RUN.** From a laptop on the AP, on a blank node.
 Save a listing first, then compare after each POST.
@@ -523,13 +568,14 @@ sudo ls -la /etc/camerabridge /var/lib/camera-provision /etc/NetworkManager/syst
 ```
 
 ```bash
-# On the laptop. Each must print 400 and show an error naming the field:
+# On the laptop. Each must end in HTTP 400, with an errors block naming the field:
+post() { curl -s -w '\nHTTP %{http_code}\n' -d "$1" http://10.42.0.1/; }
 GOOD='wifi_psk=password123&node_id=cam-01&hostname=cam-01&covered_zones=driveway&frigate_base_url=http://cam-01.local:5000&broker_host=10.0.0.2&broker_port=1883&broker_username=u&broker_password=p&mediamtx_address=10.0.0.2:8554'
-curl -s -o /dev/null -w '%{http_code}\n' -d "$GOOD" http://10.42.0.1/                         # missing SSID
-curl -s -o /dev/null -w '%{http_code}\n' -d "wifi_ssid=site&$GOOD&vpn_requested=on" http://10.42.0.1/   # VPN with empty key
-curl -s -o /dev/null -w '%{http_code}\n' -d "wifi_ssid=site&${GOOD/node_id=cam-01/node_id=-bad}" http://10.42.0.1/
-curl -s -o /dev/null -w '%{http_code}\n' -d "wifi_ssid=site&${GOOD/hostname=cam-01/hostname=bad_name}" http://10.42.0.1/
-curl -s -o /dev/null -w '%{http_code}\n' -d "wifi_ssid=site&${GOOD/covered_zones=driveway/covered_zones=}" http://10.42.0.1/
+post "$GOOD"                                                   # missing SSID
+post "wifi_ssid=site&$GOOD&vpn_requested=on"                   # VPN with empty key
+post "wifi_ssid=site&${GOOD/node_id=cam-01/node_id=-bad}"
+post "wifi_ssid=site&${GOOD/hostname=cam-01/hostname=bad_name}"
+post "wifi_ssid=site&${GOOD/covered_zones=driveway/covered_zones=}"
 ```
 
 ```bash
@@ -537,18 +583,30 @@ curl -s -o /dev/null -w '%{http_code}\n' -d "wifi_ssid=site&${GOOD/covered_zones
 sudo ls -la /etc/camerabridge /var/lib/camera-provision /etc/NetworkManager/system-connections | diff /tmp/before -
 ```
 
-Expect: five `400`s, the state still `ap_up`, and no difference apart from the `state.json` time.
-Also try one bad submission from a phone, and confirm the message is clear.
+Expect: five `HTTP 400`s with a clear message in each body, the state still `ap_up`, and no
+difference apart from the `state.json` time. Also try one bad submission from a phone.
 
-**C10. `node_id` with a newline, uppercase, or empty. NOT YET RUN.** Same setup as C09.
+Run C10 now, then finish with this positive control, which proves the rejections above came from
+validation and not from a broken request:
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' -d "wifi_ssid=site&${GOOD/node_id=cam-01/node_id=cam-01%0A}" http://10.42.0.1/
-curl -s -o /dev/null -w '%{http_code}\n' -d "wifi_ssid=site&${GOOD/node_id=cam-01/node_id=CAM-01}" http://10.42.0.1/
-curl -s -o /dev/null -w '%{http_code}\n' -d "wifi_ssid=site&${GOOD/node_id=cam-01/node_id=}" http://10.42.0.1/
+# On the laptop:
+post "wifi_ssid=site&$GOOD"
 ```
 
-Expect: three `400`s, no `/etc/camerabridge/bridge.yaml`, and the same empty `diff` as C09.
+Expect: `HTTP 200` with the `Settings saved` page, and the state moving to `joining`.
+
+**C10. `node_id` with a newline, uppercase, or empty. NOT YET RUN.** Same setup as C09, before its
+positive control.
+
+```bash
+post "wifi_ssid=site&${GOOD/node_id=cam-01/node_id=cam-01%0A}"
+post "wifi_ssid=site&${GOOD/node_id=cam-01/node_id=CAM-01}"
+post "wifi_ssid=site&${GOOD/node_id=cam-01/node_id=}"
+```
+
+Expect: three `HTTP 400`s naming `node_id`, no `/etc/camerabridge/bridge.yaml`, and the same empty
+`diff` as C09.
 
 **C11. Wrong password or router out of range falls back within the timeout. NOT YET RUN.**
 
@@ -557,7 +615,7 @@ router off and reboot.
 
 ```bash
 journalctl -b -u camera-provision --no-pager -o short-precise -g ' -> |portal'
-iw dev wlan0 info | grep type
+sudo iw dev wlan0 info | grep type
 ```
 
 Expect, in both cases: `joining + uplink_timeout -> fallback_ap` about 120 s after entering
@@ -578,11 +636,22 @@ right password, adding `&broker_host=evil.example` by curl: the node joins and r
 Repeat with the Tailscale key already used, so `/var/lib/camera-provision/tailscale.key` is gone:
 the repair must still succeed.
 
-**C13. Fallback AP with no config serves the full form. NOT YET RUN.** In `fallback_ap` on the
-bench only:
+**C13. Fallback AP with no config serves the full form. NOT YET RUN.** "No config" means no WiFi
+profile or no hostname. In `fallback_ap` on the bench only, first show that a damaged bridge config
+does not count:
 
 ```bash
-sudo rm /etc/camerabridge/bridge.yaml
+sudo mv /etc/camerabridge/bridge.yaml /tmp/bridge.yaml.saved
+journalctl -u camera-provision -n 5 --no-pager
+sudo mv /tmp/bridge.yaml.saved /etc/camerabridge/bridge.yaml
+```
+
+Expect: `the bridge config is missing or invalid; the bridge cannot run`, and the portal stays in
+`wifi_only` mode. The node keeps its WiFi and its fallback cycle. Then remove the WiFi profile:
+
+```bash
+sudo rm /etc/NetworkManager/system-connections/black-relay-uplink.nmconnection
+sudo nmcli connection reload
 journalctl -u camera-provision -f -g 'portal'
 ```
 
@@ -603,20 +672,26 @@ router returning (up to 300 s of AP and 120 s of joining). The bridge and mosqui
 throughout, and detection and recording continue. Repeat 3 times with the router returning at
 different points in the cycle.
 
-**C15. Central outage does not open the AP. NOT YET RUN.** On a provisioned node, stop the central
-broker, or the whole central node, for 15 minutes.
+**C15. Central outage does not open the AP. NOT YET RUN.** On a provisioned node with a synced clock,
+stop the central broker, or the whole central node, for 15 minutes.
 
 ```bash
 sudo cat /var/lib/camera-provision/state.json
-iw dev wlan0 info | grep type
+sudo iw dev wlan0 info | grep type
+timedatectl show -p NTPSynchronized --value
 sudo wc -l /var/lib/camerabridge/outbox.jsonl
 journalctl -b -u camera-provision --no-pager -g 'ap_up|fallback_ap'
 ```
 
-Expect: state `provisioned`, `type managed`, the outbox growing as events occur, no AP lines, and
-no setup SSID visible. Reboot during the outage: `joining` then `provisioned` again with no AP.
-Restart the central broker: the outbox drains. Repeat with Tailscale logged out or `tailscaled`
-stopped.
+Expect: state `provisioned`, `type managed`, sync `yes`, the outbox growing as events occur, no AP
+lines, and no setup SSID visible. Restart the central broker: the outbox drains.
+
+Then reboot during an outage: `joining` then `provisioned` again, with no AP. **The outbox only grows
+if the clock syncs after that reboot.** With the sync source also down, expect sync `no`, the journal
+line `NTP not yet synchronized; holding durable events until it is`, nothing entering the outbox, and
+no heartbeat: events are held in RAM (C31).
+
+Repeat with Tailscale logged out or `tailscaled` stopped.
 
 **C16. Re-provision only by held button. NOT YET RUN.**
 
@@ -638,7 +713,7 @@ the router off for 10 minutes, then on.
 
 ```bash
 sudo cat /var/lib/camera-provision/state.json
-iw dev wlan0 info | grep type
+sudo iw dev wlan0 info | grep type
 nmcli --fields NAME,DEVICE connection show --active
 systemctl is-active camerabridge.service
 ```
@@ -655,7 +730,9 @@ journalctl -b -u camera-provision --no-pager -g ' -> |failed'
 ```
 
 Expect: every boot ends with the whole old config or the whole new one, and either a full portal
-or a join. No `apply.journal` or `.tmp` files remain after startup.
+or a join. No `apply.journal` or `.tmp` files remain after startup. On a blank node left with no
+saved config, the bridge is off: no `/etc/camerabridge/bridge.yaml`, and
+`systemctl is-active camerabridge.service` prints `inactive`.
 
 **C19. Tailscale login. NOT YET RUN.** Submit with VPN on and a real key.
 
@@ -727,8 +804,8 @@ sudo ss -lunp
 pgrep -a dnsmasq
 ```
 
-Expect: nothing on port 80, nothing on ports 53 or 67 from NetworkManager's dnsmasq, and no `pgrep`
-line naming `dnsmasq-shared.d`. A Plan 3 DHCP server on `eth0` may appear separately. The `camera-provision` process has no listening socket. Port 1883 shows `127.0.0.1` only.
+Expect: nothing on port 80, nothing on ports 53 or 67 from NetworkManager's dnsmasq, and `pgrep`
+empty. The `camera-provision` process has no listening socket. Port 1883 shows `127.0.0.1` only.
 
 **C23. AP client cannot reach the camera. NOT YET RUN.** With the AP up and the camera connected,
 from a laptop on the AP, using `<camera-ip>` and `<pi-eth0-ip>` from Plan 3's addressing.
@@ -743,7 +820,7 @@ nc -zv -w 3 <pi-eth0-ip> 5000
 
 ```bash
 # On the node:
-sysctl net.ipv4.ip_forward
+sudo sysctl net.ipv4.ip_forward
 sudo nft list chain inet black_relay forward
 ffprobe -rtsp_transport tcp -v error -show_entries stream=codec_name "rtsp://<user>:<password>@<camera-ip>/h264Preview_01_sub"
 ```
@@ -771,7 +848,30 @@ nc -zv -w 3 10.42.0.1 22; nc -zv -w 3 10.42.0.1 5000; nc -zv -w 3 10.42.0.1 1883
 Expect: `200` from the LAN and the tailnet; the broker, go2rtc, and RTSP ports refused or timed out
 from the LAN; key SSH passing and password SSH refused; `.local` resolving; all ports failing from
 the AP and `eth0`. Also from the AP, with two clients: one cannot ping the other. That depends on
-the `brcmfmac` driver honoring `ap-isolation`.
+the `brcmfmac` driver honoring `ap-isolation`, and this test is the proof that it does.
+
+Record what port 5000 exposes, from a site LAN host on the bench. The endpoint is from memory of
+Frigate's API, so confirm it against the deployed version. Report the result to the owner, for the
+[open decision](#firewall-policy):
+
+```bash
+curl -s http://<node-lan-ip>:5000/api/config | head -c 300; echo
+curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{}' \
+  http://<node-lan-ip>:5000/api/config/set
+```
+
+Then test the IPv6 and strong-host rules:
+
+```bash
+# On the node, with the AP up. Expect no output:
+ip -6 addr show wlan0
+# From a site LAN host, with the node provisioned. All must fail:
+nc -6 -zv -w 3 <node-link-local>%<nic> 5000
+nc -6 -zv -w 3 <node-link-local>%<nic> 22
+sudo ip route add <pi-eth0-ip>/32 via <node-lan-ip>
+nc -zv -w 3 <pi-eth0-ip> 5000
+sudo ip route del <pi-eth0-ip>/32
+```
 
 ```bash
 # On the node:
@@ -836,8 +936,14 @@ journalctl -u camera-provision --no-pager -n 10
 systemd-analyze security --no-pager camera-provision camerabridge | tail -3
 ```
 
-Expect: `Restart=always`, `RestartUSec=5s`, and `StartLimitIntervalUSec=0` for all three. The daemon
-returns within about 5 s, with `restored state ... after a daemon restart`, and without a new boot
+Also confirm that the daemon runs as root, which `nmcli` and `tailscale` authorization depend on:
+
+```bash
+ps -o user= -p "$(systemctl show -p MainPID --value camera-provision)"
+```
+
+Expect: `root`; `Restart=always`, `RestartUSec=5s`, and `StartLimitIntervalUSec=0` for all three. The
+daemon returns within about 5 s, with `restored state ... after a daemon restart`, and without a new boot
 event. Repeat the kill for the other two. C06, C08, and C20 prove the hardening leaves libgpiod,
 nmcli, and port 80 working. Also look for `SECCOMP` or `Permission denied` in the unit's journal.
 
@@ -864,7 +970,7 @@ mosquitto_sub -h 127.0.0.1 -t 'frigate/stats' -C 1 -W 90 | head -c 200
 ```
 
 Expect: both `active` within seconds of `NetworkManager`, no `network-online` wait in the chain, and
-`disabled`. Frigate stats arrive with WiFi down, because detect and record continue.
+`masked`. Frigate stats arrive with WiFi down, because detect and record continue.
 
 **C30. Bridge starts and restarts on config. NOT YET RUN.**
 
@@ -886,11 +992,45 @@ systemctl is-enabled systemd-timesyncd.service
 timedatectl show -p NTPSynchronized --value
 timedatectl timesync-status
 journalctl -b -u systemd-timesyncd --no-pager | tail -5
+journalctl -b -u camerabridge --no-pager -g 'NTP'
 ```
 
-Expect: `enabled`, then `yes` shortly after the uplink, with `<site-ntp>` as the server. Before sync
-the central broker sees no heartbeat. Events captured before sync are stamped and delivered after
-it. Repeat on a site with no WAN.
+Expect: `enabled`, then `yes` shortly after the uplink, with a `<site-ntp>` address as the server, and
+`NTP synchronized; clock marked ready`. Repeat on a site with no WAN.
+
+**No-server test.** The kernel's sync flag only clears at boot, so this needs a reboot. Set a server
+that cannot answer, with no fallback:
+
+```bash
+printf '[Time]\nNTP=192.0.2.1\nFallbackNTP=\n' | sudo tee /etc/systemd/timesyncd.conf.d/black-relay.conf
+sudo reboot
+```
+
+After the boot, walk in front of the camera, then:
+
+```bash
+timedatectl show -p NTPSynchronized --value
+journalctl -b -u camerabridge --no-pager -g 'NTP not yet synchronized'
+sudo wc -l /var/lib/camerabridge/outbox.jsonl
+mosquitto_sub -h <central> -u <user> -P <password> -t 'detection/camera/status/nodes' -W 120 -C 1; echo "rc=$?"
+```
+
+Expect: `no`, the journal line, the outbox count unchanged by the walk, and no heartbeat before the
+timeout. Other nodes' heartbeats share this topic, so filter by `node_id` on a multi-node site.
+
+Now show that the events are held. Restore the real server:
+
+```bash
+printf '[Time]\nNTP=<site-ntp>\n' | sudo tee /etc/systemd/timesyncd.conf.d/black-relay.conf
+sudo systemctl restart systemd-timesyncd
+journalctl -u camerabridge --no-pager -f -g 'NTP'
+```
+
+Expect: `yes`, `NTP synchronized; clock marked ready`, the held events reaching the central broker
+with timestamps from the walk, and heartbeats resuming.
+
+Finally, repeat the no-server steps, and run `sudo systemctl restart camerabridge` before restoring the
+server. Expect: the events from that walk never arrive. That loss is documented in DESIGN 7.5.
 
 ### Frigate and bridge on live hardware
 
@@ -970,3 +1110,41 @@ mosquitto_sub -h 127.0.0.1 -t 'frigate/<cam>/recordings/state' -C 1 -W 10
 
 Expect: `online` and `ON`. If either never arrives, `recording_ok` stays false after a restart: set
 `persistence true` in `/etc/mosquitto/conf.d/black-relay.conf` and record it.
+
+### Daemon behavior added after the first checklist
+
+**C37. AP liveness check. NOT YET RUN.** With the AP up, stop it behind the daemon's back:
+
+```bash
+sudo nmcli connection down black-relay-setup-ap
+journalctl -u camera-provision -f -g 'no longer active|portal'
+```
+
+Expect: within about 10 s, `the AP is no longer active, so restarting it`, then `portal closed`, the
+AP returning, and `portal listening`. A phone can reach the form again.
+
+**C38. Rejoin retry. NOT YET RUN.** NetworkManager can stop autoconnecting after a no-secrets failure,
+so a provisioned node re-issues the join every 180 s. On a provisioned node, change the router's WiFi
+password, wait 5 minutes, and change it back. Touch nothing on the node.
+
+```bash
+journalctl -b -u NetworkManager --no-pager -o short-precise -g 'black-relay-uplink' | tail -20
+journalctl -b -u camera-provision --no-pager -g ' -> |re-issuing'
+sudo cat /var/lib/camera-provision/state.json
+```
+
+Expect: activation attempts about 180 s apart while the password is wrong, the uplink back within
+about 180 s of restoring it, the state `provisioned` throughout, and no AP.
+
+**C39. Moving a node to another tailnet. NOT YET RUN.** The daemon runs `tailscale up` without
+`--force-reauth`, so a node already logged in may stay on its old tailnet, even though the login
+reports success and the key is deleted. Hold the button at boot, and submit a key from a second
+tailnet.
+
+```bash
+tailscale status --json | python3 -c "import json,sys; print(json.load(sys.stdin)['CurrentTailnet'])"
+journalctl -b -u camera-provision --no-pager -g 'tailscale'
+```
+
+Expect: record which tailnet the node is on. If it did not move, run `sudo tailscale logout` from a
+console, then re-provision with a new key, and add that step to the re-provisioning procedure.

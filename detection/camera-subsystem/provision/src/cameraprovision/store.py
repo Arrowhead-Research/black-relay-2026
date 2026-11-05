@@ -378,6 +378,16 @@ class NodeStore:
             if _backup(target).exists():
                 _restore(target)
 
+    def _remove_stray_bridge_config(self) -> None:
+        """Delete a bridge config left with no node file, so a blank node's bridge stays off.
+
+        A power cut during the rollback of a first save can leave one. Skipped while a
+        journal remains, because a later start needs the file to finish that commit.
+        """
+        paths = self._paths
+        if not paths.node_file.exists() and not paths.journal.exists():
+            paths.bridge_config.unlink(missing_ok=True)
+
     def _sweep(self) -> None:
         paths = self._paths
         if paths.journal.exists():
@@ -397,6 +407,7 @@ class NodeStore:
         steps = (
             lambda: paths.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True),
             self._settle_interrupted_save,
+            self._remove_stray_bridge_config,
             self._sweep,
         )
         for step in steps:

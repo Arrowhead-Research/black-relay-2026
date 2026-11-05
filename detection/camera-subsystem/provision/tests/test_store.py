@@ -421,6 +421,45 @@ def test_recover_removes_stale_temp_files(store: NodeStore, paths: Paths) -> Non
     assert snapshot(paths) == before
 
 
+def test_recover_removes_a_stray_bridge_config_from_a_blank_node(
+    store: NodeStore, paths: Paths
+) -> None:
+    """Without this the bridge would start on a node that opens the setup AP as blank."""
+    paths.bridge_config.parent.mkdir(parents=True)
+    paths.bridge_config.write_text("node_id: stray\n")
+
+    store.recover()
+
+    assert not paths.bridge_config.exists()
+
+
+def test_recover_keeps_the_bridge_config_of_a_saved_node(store: NodeStore, paths: Paths) -> None:
+    store.save(config())
+    before = snapshot(paths)
+
+    store.recover()
+
+    assert snapshot(paths) == before
+
+
+def test_recover_keeps_the_bridge_config_while_a_journal_remains(
+    store: NodeStore, paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If settling failed, a later start can still finish the commit, and needs this file."""
+    store.save(config())
+    paths.journal.write_text("{}")
+    paths.node_file.unlink()
+
+    def fail() -> None:
+        raise OSError("disk trouble")
+
+    monkeypatch.setattr(store, "_settle_interrupted_save", fail)
+
+    store.recover()
+
+    assert paths.bridge_config.exists()
+
+
 def test_recover_creates_the_state_directory(store: NodeStore, paths: Paths) -> None:
     store.recover()
 

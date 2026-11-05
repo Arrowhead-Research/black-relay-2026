@@ -39,6 +39,11 @@ table inet black_relay {
         # Replies to what the node started, including RTSP it pulls from the camera.
         ct state established,related accept
 
+        # The Frigate and SSH rules below must not be reachable over link-local IPv6, or
+        # through an address this node holds on another interface.
+        iifname $WIFI_IF ip6 daddr fe80::/10 tcp dport { 22, 5000, 8971 } drop
+        iifname $WIFI_IF fib daddr . iif type != { local, broadcast, multicast } drop
+
         # wlan0 as the setup AP: the portal, DNS and DHCP, and nothing else.
         iifname $WIFI_IF ip saddr $AP_NET ip daddr $AP_IP tcp dport 80 counter accept
         iifname $WIFI_IF ip saddr $AP_NET ip daddr $AP_IP meta l4proto { tcp, udp } th dport 53 counter accept
@@ -65,9 +70,7 @@ table inet black_relay {
         iifname $TAILSCALE_IF icmpv6 type echo-request accept
         iifname $TAILSCALE_IF counter drop
 
-        # eth0: the camera may ask a camera-link DHCP server for a lease. Nothing else
-        # starts from this side. The AP's dnsmasq listens on wlan0 only.
-        iifname $CAMERA_IF udp sport 68 udp dport 67 counter accept
+        # eth0: the camera link is statically addressed, and nothing starts from this side.
         iifname $CAMERA_IF counter drop
     }
 
