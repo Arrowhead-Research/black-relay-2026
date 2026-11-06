@@ -149,6 +149,39 @@ def test_byte_accounting_survives_a_restart(make_relay):
     assert relay.app.state.store.stored_bytes() == before
 
 
+def test_the_running_byte_total_stays_true_through_both_kinds_of_pruning(make_relay):
+    relay = make_relay(
+        retain_bytes=5000, retain_updates=4, retain_durable=6, retention_check_every=2
+    )
+    store = relay.app.state.store
+    for index in range(40):
+        event = "object_update" if index % 3 else "object_start"
+        relay.mqtt.deliver(DETECTIONS, detection(event, attributes={"x": "y" * (index * 10)}))
+        assert store._bytes == store.stored_bytes()
+    assert store.stored_bytes() <= 5000
+
+
+def test_the_retention_check_does_not_sum_the_table(make_relay):
+    # It would read every page of up to 256 MiB, with the lock held, every 256 events.
+    relay = make_relay(retain_updates=2, retain_durable=2, retention_check_every=1)
+    store = relay.app.state.store
+    statements = []
+    store._db.set_trace_callback(statements.append)
+    for _ in range(6):
+        relay.mqtt.deliver(DETECTIONS, detection("object_update"))
+    store._db.set_trace_callback(None)
+    assert not [s for s in statements if "sum(length(message))" in s and "seq <=" not in s]
+
+
+def test_a_store_reopened_at_the_limit_keeps_its_byte_total(make_relay):
+    relay = make_relay(retain_bytes=3000, retention_check_every=1)
+    for _ in range(20):
+        relay.mqtt.deliver(DETECTIONS, detection())
+    relay.restart()
+    store = relay.app.state.store
+    assert store._bytes == store.stored_bytes() <= 3000
+
+
 def test_stream_batches_are_capped_by_bytes(relay):
     store = relay.app.state.store
     for _ in range(5):

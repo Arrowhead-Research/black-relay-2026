@@ -178,9 +178,11 @@ class Store:
                 return False
             self._bytes += len(message)
             self._since_check += 1
-            if self._since_check >= self._check_every or self._bytes > self._retain_bytes:
+            if self._since_check >= self._check_every:
                 self._since_check = 0
-                self._prune()
+                self._prune_by_count()
+            if self._bytes > self._retain_bytes:
+                self._prune_by_bytes()
             return True
 
     def stored_bytes(self) -> int:
@@ -192,15 +194,27 @@ class Store:
             0
         ]
 
-    def _prune(self) -> None:
+    def _prune_by_count(self) -> None:
         for durable, keep in self._retain.items():
+            cut = self._db.execute(
+                "SELECT seq FROM events WHERE durable = ? ORDER BY seq DESC LIMIT 1 OFFSET ?",
+                (durable, keep),
+            ).fetchone()
+            if cut is None:
+                continue
+            # Only the rows going are read. Summing the whole table here would read every page of
+            # it on each check, with the lock held.
+            freed = self._db.execute(
+                "SELECT sum(length(message)) FROM events WHERE durable = ? AND seq <= ?",
+                (durable, cut[0]),
+            ).fetchone()[0]
             self._db.execute(
-                "DELETE FROM events WHERE durable = ? AND seq <= "
-                "(SELECT seq FROM events WHERE durable = ? ORDER BY seq DESC LIMIT 1 OFFSET ?)",
-                (durable, durable, keep),
+                "DELETE FROM events WHERE durable = ? AND seq <= ?", (durable, cut[0])
             )
-        self._bytes = self._total_bytes()
-        # By bytes: updates go first, then the oldest of the rest.
+            self._bytes -= freed
+
+    def _prune_by_bytes(self) -> None:
+        # Updates go first, then the oldest of the rest.
         for durable in (0, 1):
             excess = self._bytes - self._retain_bytes
             if excess <= 0:
