@@ -17,6 +17,8 @@ dev = [
     # and the portal's node_id rule equals this package's. Never runtime dependencies of the API.
     "cameralink",
     "cameraprovision",
+    # Starlette's TestClient runs on this. The API itself and these tests' fakes use httpx.
+    "httpx2>=2.16.0",
     "pytest>=8.0",
 ]
 
