@@ -9,10 +9,10 @@ from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
 
 MIB = 1024 * 1024
-# No site's LAN can be any of these, and a site subnet overlapping them would admit them.
-_NEVER_A_SITE = tuple(
-    ipaddress.ip_network(net)
-    for net in ("0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4", "240.0.0.0/4")
+# RFC 1918. A site's LAN is one of these, which also keeps public addresses, CGNAT, loopback,
+# link-local and multicast out of what the relay will dial.
+_PRIVATE = tuple(
+    ipaddress.ip_network(net) for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 )
 
 
@@ -37,6 +37,8 @@ class Settings:
     site_subnet: IPv4Network
     internal_subnets: tuple[IPv4Network, ...] = ()
     central_ip: IPv4Address | None = None
+    # Written by netguard once its rules are verified. Until then no path is created.
+    guard_ready_file: Path | None = None
     broker_host: str = "mosquitto"
     broker_port: int = 1883
     db_path: Path = Path("/data/relay.sqlite3")
@@ -94,6 +96,7 @@ class Settings:
         for attribute, name in {
             "db_path": "RELAY_DB_PATH",
             "schema_dir": "RELAY_SCHEMA_DIR",
+            "guard_ready_file": "RELAY_GUARD_READY_FILE",
         }.items():
             if env.get(name):
                 values[attribute] = Path(env[name])
@@ -146,8 +149,10 @@ def _site_subnet(env: Mapping[str, str], internal: tuple[IPv4Network, ...]) -> I
     network = _network(_required(env, name), name)
     if network.prefixlen < 8 or network.prefixlen > 30:
         raise SettingsError(f"{name} must be between a /8 and a /30")
-    if any(network.overlaps(other) for other in (*_NEVER_A_SITE, *internal)):
-        raise SettingsError(f"{name} overlaps loopback, link-local or the bundle's own networks")
+    if not any(network.subnet_of(private) for private in _PRIVATE):
+        raise SettingsError(f"{name} must be a private range, inside RFC 1918")
+    if any(network.overlaps(other) for other in internal):
+        raise SettingsError(f"{name} overlaps the bundle's own networks")
     return network
 
 

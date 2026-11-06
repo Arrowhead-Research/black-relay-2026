@@ -100,8 +100,16 @@ class PathSync:
         if self._loop is not None:
             self._loop.call_soon_threadsafe(self._wake.set)
 
+    def guard_ready(self) -> bool:
+        ready_file = self._settings.guard_ready_file
+        return ready_file is None or ready_file.exists()
+
     def status(self) -> dict:
-        return {"last_sync_at": self._last_sync_at, "failing": len(self._failing)}
+        return {
+            "last_sync_at": self._last_sync_at,
+            "failing": len(self._failing),
+            "guard_ready": self.guard_ready(),
+        }
 
     async def run(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -146,6 +154,11 @@ class PathSync:
                 pruned = self._store.prune_nodes(cutoff)
                 if pruned:
                     logger.info("removed %d nodes unseen for the retention time", pruned)
+            # Docker's restart at boot ignores compose's depends_on, so MediaMTX can run before
+            # its egress rules exist, or with none. With no path it has no source to dial.
+            if not self.guard_ready():
+                logger.warning("the egress guard is not ready: no video paths are being created")
+                return
             desired = self._desired()
             for node_id in set(self._applied) - set(desired):
                 self._applied.pop(node_id, None)

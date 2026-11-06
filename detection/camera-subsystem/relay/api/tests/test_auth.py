@@ -151,12 +151,25 @@ def test_the_token_is_compared_in_constant_time(relay, monkeypatch):
         "169.254.0.0/16",
         "224.0.0.0/4",
         "240.0.0.0/4",
+        "8.8.8.0/24",
+        "8.0.0.0/8",
+        "100.64.0.0/10",
+        "11.0.0.0/8",
+        "172.32.0.0/16",
+        "192.167.0.0/16",
+        "192.0.0.0/8",
+        "172.0.0.0/8",
         "192.168.8.0/24\n",
     ],
 )
 def test_an_unusable_site_subnet_stops_startup(subnet):
     with pytest.raises(SettingsError, match="RELAY_SITE_SUBNET"):
         Settings.from_env({**ENV, "RELAY_SITE_SUBNET": subnet})
+
+
+@pytest.mark.parametrize("subnet", ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "10.1.2.0/24"])
+def test_every_private_range_can_be_a_site(subnet):
+    assert str(Settings.from_env({**ENV, "RELAY_SITE_SUBNET": subnet}).site_subnet) == subnet
 
 
 def test_a_site_subnet_overlapping_the_bundles_networks_stops_startup():

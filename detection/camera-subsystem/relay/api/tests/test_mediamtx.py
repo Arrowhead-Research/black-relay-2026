@@ -163,6 +163,26 @@ def test_a_quick_pass_makes_no_call_for_a_path_already_right(relay):
     assert relay.mediamtx.calls == []
 
 
+def test_no_path_is_created_until_the_egress_guard_says_it_is_ready(make_relay, tmp_path):
+    # Docker's restart at boot ignores depends_on, so MediaMTX can run with the guard's rules
+    # not loaded. With no path it has no source, and so nothing to dial.
+    ready = tmp_path / "ready"
+    relay = make_relay(guard_ready_file=ready)
+    relay.mqtt.deliver(STATUS, heartbeat())
+    relay.sync_paths()
+    assert relay.mediamtx.writes == []
+    assert relay.mediamtx.paths == {}
+    assert relay.http.get("/nodes").json()["paths"]["guard_ready"] is False
+    ready.touch()
+    relay.sync_paths()
+    assert "cam-01" in relay.mediamtx.paths
+    assert relay.http.get("/nodes").json()["paths"]["guard_ready"] is True
+
+
+def test_with_no_guard_file_configured_it_counts_as_ready(relay):
+    assert relay.http.get("/nodes").json()["paths"]["guard_ready"] is True
+
+
 def test_a_new_address_updates_the_path(relay):
     relay.mqtt.deliver(STATUS, heartbeat(timestamp="2026-11-05T12:00:00Z", address="192.168.8.5"))
     relay.sync_paths()
