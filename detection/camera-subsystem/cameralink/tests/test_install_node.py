@@ -37,6 +37,7 @@ case "$name $*" in
     ;;
   "pip "*) fail_if pip ;;
   "camera-link --help"|"camera-provision run --help"|"camerabridge run --help") ;;
+  "python -c import cameralink.reolink") fail_if reolink ;;
   "nft -c -f "*) fail_if nft-check ;;
   "nft list table inet black_relay") [[ -e $state/table ]] || exit 1 ;;
   "nmcli -t -f RUNNING general") [[ -e $state/nm-down ]] && echo stopped || echo running ;;
@@ -206,6 +207,40 @@ def test_installs_the_three_packages_into_their_own_venvs(rig):
         venv = rig.path(f"opt/black-relay/{name}")
         assert f"python3 -m venv {venv}" in calls
         assert any(c.startswith("pip install") and c.endswith(f"/{package}") for c in calls)
+
+
+def test_proves_the_camera_library_imports_with_the_venvs_python(rig):
+    """camera-link --help loads it lazily, so a bad wheel would first show at a factory camera."""
+    assert rig.install().returncode == 0
+    assert "python -c import cameralink.reolink" in rig.calls()
+
+
+def test_a_camera_library_that_cannot_import_fails_the_install(rig):
+    rig.set("fail-reolink")
+    result = rig.install()
+    assert result.returncode not in (0, 3)
+    assert "INSTALL FAILED" in result.stderr + result.stdout
+
+
+@pytest.mark.parametrize(
+    "secret", ["relay/.env", "bridge/.env", "relay/.env.old", "field-run.local.env"]
+)
+def test_refuses_a_source_tree_holding_a_secrets_file(rig, secret):
+    leaked = rig.path(f"opt/black-relay/src/{secret}")
+    leaked.parent.mkdir(parents=True)
+    leaked.write_text("RELAY_API_TOKEN=do-not-print\n")
+    result = rig.install()
+    assert result.returncode not in (0, 3)
+    assert secret in result.stderr + result.stdout
+    assert "do-not-print" not in result.stderr + result.stdout
+    assert not rig.path("opt/black-relay/cameralink").exists()
+
+
+def test_the_env_example_alone_does_not_stop_the_install(rig):
+    example = rig.path("opt/black-relay/src/relay/.env.example")
+    example.parent.mkdir(parents=True)
+    example.write_text("RELAY_API_TOKEN=\n")
+    assert rig.install().returncode == 0
 
 
 def test_creates_the_service_user_once(rig):

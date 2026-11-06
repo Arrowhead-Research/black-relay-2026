@@ -363,6 +363,12 @@ begin 'Checking what this needs'
 [[ $EUID -eq 0 || -n $root ]] || die "run as root"
 [[ -f $cameralink_ops/$cache_mount ]] || die "this is not a whole source tree: no $cache_mount in $cameralink_ops"
 [[ -d $src/bridge && -d $src/provision && -d $src/cameralink ]] || die "this is not a whole source tree: $src"
+# The installed tree goes into every clone. The relay's .env holds the central node's secrets.
+if [[ -d $root/opt/black-relay/src ]]; then
+    secret=$(find "$root/opt/black-relay/src" -xdev \( -name .env -o -name '.env.*' -o -name '*.local.env' \) \
+        ! -name .env.example -print -quit)
+    [[ -z $secret ]] || die "a secrets file is on this node: $secret. Remove it, and fix the rsync that brought it"
+fi
 for tool in python3 nft nmcli systemctl docker dnsmasq sha256sum ss ip modinfo dpkg useradd \
     systemd-tmpfiles; do
     command -v "$tool" >/dev/null || die "$tool is missing. Do README steps 2 and 9 first"
@@ -382,6 +388,8 @@ done
 "$root/opt/black-relay/provision/bin/camera-provision" run --help >/dev/null
 "$root/opt/black-relay/bridge/bin/camerabridge" run --help >/dev/null
 "$root/opt/black-relay/cameralink/bin/camera-link" --help >/dev/null
+# camera-link loads this library only when a camera needs it, so --help does not prove it.
+"$root/opt/black-relay/cameralink/bin/python" -c 'import cameralink.reolink' >/dev/null
 
 begin 'Service user camerabridge'
 if ! id -u camerabridge >/dev/null 2>&1; then

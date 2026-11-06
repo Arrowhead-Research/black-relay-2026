@@ -62,7 +62,7 @@ ok "systemd is PID 1 ($state)"
 
 on install -d /opt/black-relay/src
 tar -C "$repo" --exclude=.venv --exclude=__pycache__ --exclude=.pytest_cache --exclude=.ruff_cache \
-    -c bridge cameralink provision | docker exec -i "$name" tar -C /opt/black-relay/src -x
+    --exclude=.env --exclude='.env.*' -c bridge cameralink provision | docker exec -i "$name" tar -C /opt/black-relay/src -x
 sh_on 'printf model > /tmp/yolov6n.hef; printf wrong > /tmp/wrong.hef'
 
 printf '\n--- a wrong model stops it, and it names the step\n'
@@ -90,7 +90,7 @@ check "camera-provision runs from its venv" on /opt/black-relay/provision/bin/ca
 check "camerabridge runs from its venv" on /opt/black-relay/bridge/bin/camerabridge run --help
 check "the Frigate template is in the package" on /opt/black-relay/cameralink/bin/python -c \
     'from cameralink.frigate_config import _template; assert "go2rtc" in _template().template'
-check "reolink_aio loads on demand" on /opt/black-relay/cameralink/bin/python -c 'import reolink_aio'
+check "the camera library imports" on /opt/black-relay/cameralink/bin/python -c 'import cameralink.reolink'
 
 printf '\n--- nothing started, frigate not enabled\n'
 for unit in camera-link camera-link-dhcp camera-provision frigate camerabridge; do
