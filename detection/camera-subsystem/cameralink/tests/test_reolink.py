@@ -1181,6 +1181,34 @@ def test_a_logout_failure_logs_its_type_and_not_its_text(caplog):
     assert PASSWORD not in caplog.text
 
 
+class _ConnectionWithNoDropCall:
+    """What a reolink_aio upgrade that renames the private call would leave."""
+
+
+def test_a_renamed_drop_connection_does_not_turn_success_into_an_error(caplog):
+    ports = recorded("baichuan_factory_ports")
+    baichuan = FakeBaichuan(ports["before"])
+    baichuan._connection = _ConnectionWithNoDropCall()
+
+    factory = run_enable(baichuan)
+
+    assert baichuan.ports == ports["after_enabling_http_and_rtsp"]
+    assert baichuan.calls[-1] == "logout"
+    assert factory.closed
+    assert "AttributeError" in caplog.text
+
+
+def test_a_renamed_drop_connection_does_not_hide_a_rejected_login():
+    baichuan = FakeBaichuan({}, login_error=rl_exc.CredentialsInvalidError("bad"))
+    baichuan._connection = _ConnectionWithNoDropCall()
+    factory = FakeHostFactory(baichuan)
+
+    with pytest.raises(AuthFailed):
+        asyncio.run(enable_services(HOST, "", host_factory=factory, probe=port_is_open))
+
+    assert factory.closed
+
+
 def test_real_host_session_is_closed_after_enable_services():
     # The session is opened by Host's constructor and baichuan.logout leaves it
     # open. Only the Baichuan calls are stubbed, so nothing reaches the network.

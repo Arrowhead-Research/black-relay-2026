@@ -404,11 +404,13 @@ async def _logout_quietly(host: str, api) -> None:
     # logout sends nothing to the camera. Baichuan's logout closes the socket only
     # if the login succeeded, and has no public way to close it otherwise, so a
     # test against the real Host pins the private attribute.
-    connection = getattr(api.baichuan, "_connection", None)
-    steps = [api.baichuan.logout, api.logout]
-    if connection is not None:
-        steps.append(connection.drop_connection)
-    for step in steps:
+    async def drop_connection() -> None:
+        connection = getattr(api.baichuan, "_connection", None)
+        if connection is not None:
+            await connection.drop_connection()
+
+    # Looked up inside the guard too: a renamed call must not replace the real outcome.
+    for step in (lambda: api.baichuan.logout(), lambda: api.logout(), drop_connection):
         try:
             await step()
         except _BAICHUAN_ERRORS as err:
