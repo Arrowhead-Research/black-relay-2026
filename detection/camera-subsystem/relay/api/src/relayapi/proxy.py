@@ -141,6 +141,10 @@ def frigate_target(request: Request) -> bytes:
     return b"/" + path + (b"?" + query if query else b"")
 
 
+def _declares_over(content_length: str, limit: int) -> bool:
+    return len(content_length) > 20 or (content_length.isdigit() and int(content_length) > limit)
+
+
 class _Scrubber:
     """Replaces the secret in a stream of chunks, including across a chunk boundary, with the
     same number of bytes, so a Content-Length from the node stays true."""
@@ -181,8 +185,7 @@ class FrigateProxy:
     async def read_body(self, request: Request) -> bytes:
         limit = self._settings.proxy_max_request_bytes
         too_large = HTTPException(status_code=413, detail="the request body is too large")
-        declared = request.headers.get("content-length", "0")
-        if len(declared) > 20 or (declared.isdigit() and int(declared) > limit):
+        if _declares_over(request.headers.get("content-length", "0"), limit):
             raise too_large
         body = bytearray()
         try:
@@ -291,8 +294,7 @@ class FrigateProxy:
             raise HTTPException(
                 status_code=502, detail=f"node {node_id} sent a compressed body against the request"
             )
-        declared = upstream.headers.get("content-length", "0")
-        if len(declared) > 20 or (declared.isdigit() and int(declared) > limit):
+        if _declares_over(upstream.headers.get("content-length", "0"), limit):
             raise HTTPException(status_code=502, detail=f"node {node_id}'s response is too large")
         kept = []
         for name, value in upstream.headers.multi_items():

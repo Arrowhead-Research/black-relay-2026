@@ -162,12 +162,10 @@ class Ingest:
             raise _Drop("future_heartbeat")
         attributes = message["attributes"]
         address = None
-        if "node_address" in attributes and attributes["node_address"] is not None:
+        if "node_address" in attributes:
             address = self._policy.check(attributes["node_address"])
             if address is None:
                 self._count("refused_address")
-        elif "node_address" in attributes:
-            self._count("refused_address")
         outcome = self._store.add_heartbeat(
             message["node_id"], stamped, now, address, text, self._settings.max_nodes
         )

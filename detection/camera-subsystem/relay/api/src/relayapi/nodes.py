@@ -101,11 +101,15 @@ def too_deep(message: Any, limit: int) -> bool:
     return False
 
 
-def attributes_of(message_text: str) -> dict:
-    attributes = json.loads(message_text)["attributes"]
+def _attributes(message: dict) -> dict:
+    attributes = message["attributes"]
     if not isinstance(attributes, dict):
         raise ValueError("attributes is not an object")
     return attributes
+
+
+def attributes_of(message_text: str) -> dict:
+    return _attributes(json.loads(message_text))
 
 
 def report(
@@ -120,7 +124,7 @@ def report(
     message = json.loads(row["message"])
     if too_deep(message, max_depth):
         raise ValueError("nested too deep")
-    attributes = attributes_of(row["message"])
+    attributes = _attributes(message)
     age = max(0.0, round(now - row["received_at"], 3))
     return {
         "node_id": row["node_id"],
