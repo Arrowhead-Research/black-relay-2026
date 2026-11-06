@@ -646,6 +646,25 @@ def test_a_boot_wipes_the_lease_before_it_is_trusted(node):
     assert not node.paths.lease_file.exists()
 
 
+def test_the_lease_is_wiped_while_dnsmasq_is_stopped(node):
+    """dnsmasq rewrites its file while it runs, so a wipe only counts between stop and start."""
+    node.set_lease()
+    seen = {}
+    real_stop, real_start = node.systemd.stop_and_wait, node.systemd.start
+
+    def stop_and_wait(unit):
+        seen["at_stop"] = node.paths.lease_file.exists()
+        real_stop(unit)
+
+    def start(unit):
+        seen["at_start"] = node.paths.lease_file.exists()
+        real_start(unit)
+
+    node.systemd.stop_and_wait, node.systemd.start = stop_and_wait, start
+    node.daemon.tick()
+    assert seen == {"at_stop": True, "at_start": False}
+
+
 def test_a_boot_with_no_carrier_waits_for_the_carrier_to_reset_dhcp(node):
     node.set_carrier(False)
     node.daemon.tick()
@@ -2365,11 +2384,49 @@ def test_the_error_is_given_time_before_a_restart(live, frigate_log):
     frigate_log.text = HAILO_LINE
     live.clock_epoch += LOG_SCAN_SECONDS
     live.daemon.tick()
-    live.systemd.calls.clear()
 
     run_for(live, DETECTOR_ERROR_RESTART_SECONDS - TICK_SECONDS)
+    assert frigate_restarts(live) == []
+
+    run_for(live, TICK_SECONDS)
+    assert len(frigate_restarts(live)) == 1
+
+
+def test_the_detector_restart_timing_rules_are_these_numbers():
+    """A ruling: restart after 120 s, at most once per 10 minutes. Tests above import these."""
+    assert DETECTOR_ERROR_RESTART_SECONDS == 120
+    assert DETECTOR_RESTART_LIMIT_SECONDS == 600
+
+
+def test_the_limit_is_on_disk_before_the_restart_is_asked_for(live, frigate_log):
+    healthy_frigate(live)
+    frigate_log.text = HAILO_LINE
+    live.clock_epoch += LOG_SCAN_SECONDS
+    live.daemon.tick()
+    saved_at_restart = []
+    real = live.systemd.restart
+
+    def restart(unit):
+        saved_at_restart.append(json.loads(live.paths.link_state.read_text())["detector_restart_at"])
+        real(unit)
+
+    live.systemd.restart = restart
+    run_for(live, DETECTOR_ERROR_RESTART_SECONDS)
+
+    assert saved_at_restart == [live.clock_epoch]
+
+
+def test_no_restart_for_a_detector_failure_on_an_unprovisioned_node(live, frigate_log):
+    healthy_frigate(live)
+    live.paths.bridge_config.unlink()
+    frigate_log.text = HAILO_LINE
+    live.clock_epoch += LOG_SCAN_SECONDS
+    live.daemon.tick()
+
+    run_for(live, 2 * DETECTOR_ERROR_RESTART_SECONDS)
 
     assert frigate_restarts(live) == []
+    assert live.state()["detector_error"] is True
 
 
 def test_one_transient_line_then_a_restart_recovers(live, frigate_log):
