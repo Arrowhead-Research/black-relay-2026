@@ -124,4 +124,7 @@ printf 'Setup WiFi:  BlackRelay-CAM-%s\n' "$serial"
 printf 'Passphrase:  %s\n' "$passphrase"
 printf 'Setup page:  http://10.42.0.1/\n'
 
+# On stderr, as stdout is the label. Before the reload, so that a failed reload still shows it.
+printf 'seed-kit: reboot now. The new machine ID takes full effect only at a reboot: until then journalctl shows nothing, and journald keeps writing under the old ID.\n' >&2
+
 nmcli connection reload

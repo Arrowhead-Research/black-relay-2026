@@ -28,6 +28,7 @@ case "$name" in
   systemd-machine-id-setup)
     if [[ -e $STUB_STATE/same-id ]]; then cat "$STUB_STATE/old-id" > "$MACHINE_ID_FILE"
     else printf '%032x\n' "$RANDOM$RANDOM" > "$MACHINE_ID_FILE"; fi ;;
+  nmcli) [[ $* == "connection reload" && -e $STUB_STATE/fail-reload ]] && exit 8 ;;
 esac
 exit 0
 """
@@ -152,6 +153,24 @@ def test_a_seed_prints_the_label_and_installs_the_profile(kit: Kit) -> None:
     assert f"Passphrase:  {PASSPHRASE}" in result.stdout
     assert stat.S_IMODE(kit.profile.stat().st_mode) == 0o600
     assert kit.marker.exists()
+
+
+def _reboot_notice(text: str) -> bool:
+    return "reboot now" in text.lower() and "machine id" in text.lower()
+
+
+def test_a_seed_says_to_reboot_now_and_why_and_the_label_stays_four_lines(kit: Kit) -> None:
+    result = kit.run()
+    assert result.returncode == 0, result.stderr
+    assert _reboot_notice(result.stderr)
+    assert len(result.stdout.splitlines()) == 4  # what goes on the label
+
+
+def test_the_reboot_notice_appears_even_if_the_reload_fails(kit: Kit) -> None:
+    (kit.state / "fail-reload").touch()
+    result = kit.run()
+    assert result.returncode != 0
+    assert _reboot_notice(result.stderr)
 
 
 @pytest.mark.parametrize(
