@@ -159,6 +159,20 @@ on systemctl start docker.service || printf '     nested dockerd did not start\n
 sleep 3
 on /opt/black-relay/src/cameralink/ops/reach-check.sh | sed 's/^/     /' || true
 
+printf '\n--- a real SSH session on an address of eth0 keeps the wired profile until a reboot\n'
+sh_on "printf '[connection]\nid=Wired connection 1\ntype=ethernet\ninterface-name=dummy0\n[ethernet]\n[ipv4]\nmethod=disabled\n[ipv6]\nmethod=disabled\n' > '/etc/NetworkManager/system-connections/Wired connection 1.nmconnection'; chmod 600 /etc/NetworkManager/system-connections/*"
+on nmcli connection reload
+sh_on 'mkdir -p -m 700 /root/.ssh; ssh-keygen -q -t ed25519 -N "" -f /root/.ssh/id_ed25519; cp /root/.ssh/id_ed25519.pub /root/.ssh/authorized_keys; systemctl start ssh.service'
+address=$(on sh -c "ip -o -4 addr show dev eth0 | awk '{print \$4}' | cut -d/ -f1")
+docker exec -d "$name" ssh -o StrictHostKeyChecking=no "root@$address" sleep 120
+sleep 3
+on ss -Htn state established '( sport = :22 )' | sed 's/^/     /'
+output=$(installer 2>&1 || true)
+check "the installer says it waits for the reboot" matches 'an SSH session is on eth0' "$output"
+check "the live profile was not deleted" sh_on "nmcli -t -f NAME connection show | grep -qx 'Wired connection 1'"
+check "its file is gone, so a reboot removes it" sh_on "! ls '/etc/NetworkManager/system-connections/Wired connection 1.nmconnection'"
+check "the session is still up" sh_on "ss -Htn state established '( sport = :22 )' | grep -q ."
+
 printf '\n--- --purge-tailscale removes a real package\n'
 sh_on 'set -e; d=/tmp/ts; mkdir -p $d/DEBIAN $d/usr/bin $d/usr/lib/systemd/system
 printf "Package: tailscale\nVersion: 1.0\nArchitecture: all\nMaintainer: t <t@t>\nDescription: stand-in\n" > $d/DEBIAN/control
