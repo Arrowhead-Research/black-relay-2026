@@ -341,6 +341,7 @@ class Daemon:
         self._link = self._load_link()
         self._published = None
         self._frigate_down_ticks = 0
+        self._frigate_up_ticks = 0
         self._frigate_log = frigate_log or FrigateLog()
         self._frigate_started = None
         self._detector_error = False
@@ -587,8 +588,13 @@ class Daemon:
         if state not in RUNNING_STATES:
             self._systemd.start(FRIGATE_UNIT)
         if state in RUNNING_STATES and state != "activating":
-            self._frigate_down_ticks = 0
+            # A real recovery has to last, or a Frigate crash-looping with short active spells
+            # would never be reported.
+            self._frigate_up_ticks += 1
+            if self._frigate_up_ticks >= FRIGATE_DOWN_TICKS:
+                self._frigate_down_ticks = 0
             return None
+        self._frigate_up_ticks = 0
         self._frigate_down_ticks += 1
         if self._frigate_down_ticks < FRIGATE_DOWN_TICKS:
             return None

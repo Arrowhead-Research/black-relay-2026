@@ -843,6 +843,32 @@ def test_a_frigate_wanted_and_down_is_reported_after_six_ticks(live):
     assert live.state()["reason"] is None
 
 
+def test_a_crash_loop_with_short_active_spells_is_reported(live):
+    live.daemon.tick()
+    reasons = []
+    for _ in range(FRIGATE_DOWN_TICKS):
+        live.systemd.states["frigate.service"] = "activating"
+        live.daemon.tick()
+        reasons.append(live.state()["reason"])
+        live.systemd.states["frigate.service"] = "active"
+        live.daemon.tick()
+    assert "Frigate is wanted but not running" in reasons[-1]
+    assert all(reason is None for reason in reasons[:-1])
+
+
+def test_a_recovery_that_lasts_starts_the_down_count_again(live):
+    live.daemon.tick()
+    live.systemd.states["frigate.service"] = "activating"
+    for _ in range(FRIGATE_DOWN_TICKS - 1):
+        live.daemon.tick()
+    live.systemd.states["frigate.service"] = "active"
+    for _ in range(FRIGATE_DOWN_TICKS):
+        live.daemon.tick()
+    live.systemd.states["frigate.service"] = "activating"
+    live.daemon.tick()
+    assert live.state()["reason"] is None
+
+
 def test_a_frigate_stuck_activating_is_reported_and_not_started_again(live):
     """A missing /dev/hailo0 never gets past activating."""
     live.daemon.tick()
