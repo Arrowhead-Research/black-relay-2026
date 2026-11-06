@@ -1,0 +1,117 @@
+# The central relay. Every image is a pinned version with linux/amd64 and linux/arm64, so this
+# runs unchanged on a Pi, a laptop or a server. See README.md.
+#
+#   ./setup-credentials.sh
+#   docker compose --profile broker up -d --build    # with the bundled broker
+#   docker compose up -d --build                     # with the shared compute node's broker
+
+name: camera-relay
+
+x-hardening: &hardening
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: "3"}
+
+services:
+  api:
+    <<: *hardening
+    build:
+      context: ./api
+      additional_contexts:
+        schemas: ../bridge/schemas
+    image: ${RELAY_IMAGE_PREFIX:-camera-relay}-api:0.1.0
+    environment:
+      RELAY_API_TOKEN: ${RELAY_API_TOKEN:?run ./setup-credentials.sh}
+      RELAY_BROKER_HOST: ${RELAY_BROKER_HOST:-mosquitto}
+      RELAY_BROKER_PORT: ${RELAY_BROKER_PORT:-1883}
+      RELAY_BROKER_USER: ${RELAY_BROKER_USER:?run ./setup-credentials.sh}
+      RELAY_BROKER_PASSWORD: ${RELAY_BROKER_PASSWORD:?run ./setup-credentials.sh}
+      RELAY_MEDIAMTX_API_URL: http://${RELAY_MEDIAMTX_CONTROL_IP:-172.31.250.2}:9997
+      RELAY_MEDIAMTX_API_USER: relay-api
+      RELAY_MEDIAMTX_API_PASSWORD: ${RELAY_MEDIAMTX_API_PASSWORD:?run ./setup-credentials.sh}
+    tmpfs: [/tmp]
+    volumes:
+      - api-data:/data
+    ports:
+      - ${RELAY_BIND_ADDRESS:-0.0.0.0}:${RELAY_API_PORT:-8080}:8080
+    networks:
+      edge: {}
+      control:
+        ipv4_address: ${RELAY_API_CONTROL_IP:-172.31.250.3}
+
+  mediamtx:
+    <<: *hardening
+    image: bluenviron/mediamtx:1.21.3
+    environment:
+      # Secrets and addresses that mediamtx.yml leaves to the environment. "0" is the reader's
+      # entry in authInternalUsers, and "1" the API's.
+      MTX_AUTHINTERNALUSERS_0_USER: ${RELAY_READ_USER:?run ./setup-credentials.sh}
+      MTX_AUTHINTERNALUSERS_0_PASS: ${RELAY_READ_PASSWORD:?run ./setup-credentials.sh}
+      MTX_AUTHINTERNALUSERS_1_PASS: ${RELAY_MEDIAMTX_API_PASSWORD:?run ./setup-credentials.sh}
+      MTX_AUTHINTERNALUSERS_1_IPS: ${RELAY_API_CONTROL_IP:-172.31.250.3}/32
+      # Only on the control network, which only the API shares.
+      MTX_APIADDRESS: ${RELAY_MEDIAMTX_CONTROL_IP:-172.31.250.2}:9997
+      # A browser must reach the same UDP port the server names, so both sides use this one.
+      MTX_WEBRTCLOCALUDPADDRESS: :${RELAY_WEBRTC_UDP_PORT:-8189}
+      MTX_WEBRTCADDITIONALHOSTS: ${RELAY_WEBRTC_HOSTS:-127.0.0.1}
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+    ports:
+      - ${RELAY_BIND_ADDRESS:-0.0.0.0}:${RELAY_RTSP_PORT:-8554}:8554
+      - ${RELAY_BIND_ADDRESS:-0.0.0.0}:${RELAY_WEBRTC_HTTP_PORT:-8889}:8889
+      - ${RELAY_BIND_ADDRESS:-0.0.0.0}:${RELAY_WEBRTC_UDP_PORT:-8189}:${RELAY_WEBRTC_UDP_PORT:-8189}/udp
+    networks:
+      edge: {}
+      control:
+        ipv4_address: ${RELAY_MEDIAMTX_CONTROL_IP:-172.31.250.2}
+
+  chrony:
+    <<: *hardening
+    build: ./chrony
+    image: ${RELAY_IMAGE_PREFIX:-camera-relay}-chrony:4.8
+    # No SYS_TIME: with -x, chronyd only reads the clock it shares with the host.
+    cap_add: [NET_BIND_SERVICE, SETUID, SETGID, CHOWN]
+    tmpfs: [/run/chrony, /var/lib/chrony]
+    ports:
+      - ${RELAY_NTP_BIND_ADDRESS:-${RELAY_BIND_ADDRESS:-0.0.0.0}}:${RELAY_NTP_PORT:-123}:123/udp
+    networks:
+      - edge
+
+  mosquitto:
+    <<: *hardening
+    profiles: [broker]
+    image: eclipse-mosquitto:2.1.2-alpine
+    entrypoint: ["/bin/sh", "/relay/entrypoint.sh"]
+    environment:
+      RELAY_BROKER_USER: ${RELAY_BROKER_USER:?run ./setup-credentials.sh}
+      RELAY_BROKER_PASSWORD: ${RELAY_BROKER_PASSWORD:?run ./setup-credentials.sh}
+    cap_add: [CHOWN, SETUID, SETGID]
+    tmpfs:
+      - /tmp
+      - /run/mosquitto-auth:mode=0700
+    volumes:
+      - ./mosquitto/mosquitto.conf:/relay/mosquitto.conf:ro
+      - ./mosquitto/aclfile:/relay/aclfile:ro
+      - ./mosquitto/entrypoint.sh:/relay/entrypoint.sh:ro
+      - mosquitto-data:/mosquitto/data
+    ports:
+      - ${RELAY_BROKER_BIND_ADDRESS:-${RELAY_BIND_ADDRESS:-0.0.0.0}}:${RELAY_BROKER_PUBLISH_PORT:-1883}:1883
+    networks:
+      - edge
+
+networks:
+  edge: {}
+  # MediaMTX's control API lives here. No gateway, and only the API and MediaMTX are on it.
+  control:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${RELAY_CONTROL_SUBNET:-172.31.250.0/29}
+
+volumes:
+  api-data: {}
+  mosquitto-data: {}

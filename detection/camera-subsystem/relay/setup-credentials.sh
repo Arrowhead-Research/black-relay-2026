@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Generates the bundle's secrets into .env, mode 0600. Prints no secret, and refuses to overwrite
+# an existing file without --force.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+output="$here/.env"
+force=0
+
+usage() {
+    echo "usage: $0 [--force] [--output PATH]"
+}
+
+while (($#)); do
+    case "$1" in
+    --force) force=1 ;;
+    --output)
+        [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+        output="$2"
+        shift
+        ;;
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+    esac
+    shift
+done
+
+if [[ -e "$output" && "$force" != 1 ]]; then
+    echo "$output already exists; not overwriting it. Use --force to make new secrets." >&2
+    exit 1
+fi
+
+random() {
+    local value
+    # Letters and digits only: nothing an env file, a URL or a node's portal treats specially.
+    value="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c "$1" || true)"
+    if ((${#value} != $1)); then
+        echo "could not read random bytes" >&2
+        exit 1
+    fi
+    printf '%s' "$value"
+}
+
+umask 077
+temporary="$(mktemp "$output.XXXXXX")"
+trap 'rm -f "$temporary"' EXIT
+while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+    RELAY_API_TOKEN=*) printf "RELAY_API_TOKEN='%s'\n" "$(random 48)" ;;
+    RELAY_BROKER_USER=*) printf "RELAY_BROKER_USER='relay'\n" ;;
+    RELAY_BROKER_PASSWORD=*) printf "RELAY_BROKER_PASSWORD='%s'\n" "$(random 40)" ;;
+    RELAY_READ_USER=*) printf "RELAY_READ_USER='viewer'\n" ;;
+    RELAY_READ_PASSWORD=*) printf "RELAY_READ_PASSWORD='%s'\n" "$(random 32)" ;;
+    RELAY_MEDIAMTX_API_PASSWORD=*) printf "RELAY_MEDIAMTX_API_PASSWORD='%s'\n" "$(random 32)" ;;
+    *) printf '%s\n' "$line" ;;
+    esac
+done <"$here/.env.example" >"$temporary"
+chmod 600 "$temporary"
+mv -f "$temporary" "$output"
+trap - EXIT
+
+echo "Wrote $output, mode 0600."
+if [[ "$force" == 1 ]]; then
+    echo "New broker password: change it on every node as well, or they stop reporting."
+fi
+echo "Next: set RELAY_WEBRTC_HOSTS in it, then see README.md."

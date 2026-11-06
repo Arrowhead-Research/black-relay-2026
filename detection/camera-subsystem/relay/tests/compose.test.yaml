@@ -1,0 +1,18 @@
+# Added on top of ../compose.yaml by test_relay.sh, and never used otherwise.
+services:
+  # go2rtc, the node's own restreamer, with a login, as a node would run it. The testsrc ffmpeg
+  # starts only for go2rtc's first consumer, as the camera's stream does on a node.
+  node-sim:
+    image: alexxit/go2rtc:1.9.14
+    volumes:
+      - ${RELAY_TEST_DIR}/go2rtc.yaml:/config/go2rtc.yaml:ro
+    networks:
+      - edge
+
+  frigate-sim:
+    image: ${RELAY_IMAGE_PREFIX}-api:0.1.0
+    command: ["python", "/sim/frigate_sim.py"]
+    volumes:
+      - ${RELAY_TEST_DIR}/sim:/sim:ro
+    networks:
+      - edge

@@ -1,0 +1,5 @@
+# "pattern" applies to every login, so this file need not know the username from .env. A plain
+# "topic" line here would apply to anonymous clients only, and they are refused. Nodes, the API
+# and RF share one login in v0, because each node's Frigate proxy secret derives from it.
+# Nothing outside detection/ can be read or written, and that includes $SYS.
+pattern readwrite detection/#
