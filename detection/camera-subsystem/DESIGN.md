@@ -249,9 +249,7 @@ One detection of one object by one camera, over its track lifecycle.
     "bbox": [120, 80, 64, 180],
     "area_px": 11520,
     "stationary": false,
-    "sub_label": null,
     "snapshot_url": null,
-    "clip_url": null,
     "rf_cue_id": null
   }
 }
@@ -288,7 +286,7 @@ Edge heartbeat, parallel to `rf.node-status.v0`.
     "camera_link_state": "adopted",
     "retry_after": null,
     "reason": null,
-    "node_address": "192.168.1.206"
+    "node_address": "192.0.2.206"
   }
 }
 ```
@@ -352,8 +350,8 @@ RF publishes a cue on a TPMS `first_heard` event to `detection/rf/cues/camera`.
 }
 ```
 
-- On a cue, the node grabs a snapshot and (if matched) tags the detection. It does
-  **no heavy work**.
+- On a cue, the node tags a matched detection and acknowledges. The cue-ack carries no
+  snapshot in v0. It does **no heavy work**.
 - **Volume (answer to RF's deferred question):** the camera can absorb
   every-TPMS volume (~400/day on the dev site ≈ 1 per 3.6 min) at negligible cost.
   For review-noise reasons, RF should `zones`-filter cues to near-building
@@ -376,10 +374,17 @@ holds only the durable kinds: `object_start`, `object_end`, `cue-ack`, and
 **Send window.** At most 20 entries are in flight (sent and unacked) at once, and
 acknowledgements release the next ones. A reconnect discards the MQTT client's own
 unacked copies and replays from the oldest entry, so the outbox is the one record of
-what is undelivered. Acknowledged lines are removed from the file at most once per 1 MiB, so a large replay
-cannot stall Frigate's event handling or wear the SD card. A crash during a replay can
-therefore re-send up to 1 MiB of acknowledged lines. Delivery is at-least-once, and central
+what is undelivered. In a large backlog, acknowledged lines stay in the file until they reach
+one eighth of the live bytes, within 16 KiB and 1 MiB, so a replay cannot stall Frigate's
+event handling or wear the SD card. A crash during a replay can therefore re-send up to
+1 MiB of acknowledged lines. Delivery is at-least-once, and central
 deduplicates by `event_id`.
+
+**Damaged file.** A power cut or a full disk can tear the last line, and a bad card can
+garble any line. Loading keeps every intact entry, logs a count of the bad lines without
+their content, moves them to `<outbox>.corrupt` (0600, 1 MiB at most), and repairs the
+file durably before any new append, so a new entry can never merge with a torn line. A
+corrupt line never stops the bridge from starting.
 
 **I/O failure.** If the outbox cannot write (a full disk, for example), or a network
 thread dies, the bridge exits nonzero so its service manager restarts it. The service
@@ -397,8 +402,8 @@ the bound is shed oldest-first rather than growing the queue without limit.
 
 ### 5.6 Snapshot / clip references
 
-`snapshot_url` and `clip_url` reference the **edge node's Frigate** (the footage
-owner), on port 8971. Local clients reach them over the site LAN; remote operators reach them over
+`snapshot_url` references the **edge node's Frigate** (the footage
+owner), on port 8971. Local clients reach it over the site LAN; remote operators reach it over
 Tailscale. Both go through the central API (4.2), which fetches the footage from the
 node. Only the central node's IP can reach port 8971. Frigate's own login is off, and a
 proxy secret shared with the central node protects it instead, so users log in once, to
@@ -435,8 +440,8 @@ The portal collects, and writes to node config:
 - Wi-Fi client SSID + password (scanned via `nmcli dev wifi`) → a NetworkManager
   profile.
 - Hostname. There is no VPN field: nodes do not run Tailscale (4.2).
-- **Central endpoints:** MQTT broker address + credentials/TLS, MediaMTX address. The
-  broker address must be an IP, because the node's firewall admits only that address
+- **Central endpoints:** MQTT broker address + credentials/TLS. Central pulls video, so
+  the node needs no MediaMTX address. The broker address must be an IP, because the node's firewall admits only that address
   for SSH and Frigate. An address in Tailscale's `100.64.0.0/10` is rejected, because
   fusion traffic must not depend on Tailscale (7.3).
 - **Time server** (`ntp_server`), on the full form only. Blank means the broker host.
