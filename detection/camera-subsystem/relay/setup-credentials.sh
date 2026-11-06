@@ -58,7 +58,21 @@ control_password="$(random 32)"
 umask 077
 temporary="$(mktemp "$output.XXXXXX")"
 trap 'rm -f "$temporary"' EXIT
+# With --force, every setting but the secrets stays as it was in the existing file.
+existing=""
+[[ -e "$output" ]] && existing="$(cat "$output")"
 while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+    RELAY_API_TOKEN=* | RELAY_BROKER_PASSWORD=* | RELAY_API_BROKER_PASSWORD=* | \
+        RELAY_MQTT_CLIENT_ID=* | RELAY_READ_PASSWORD=* | RELAY_MEDIAMTX_API_PASSWORD=*) ;;
+    *=*)
+        kept="$(grep -m1 "^${line%%=*}=" <<<"$existing" || true)"
+        if [[ -n "$kept" ]]; then
+            printf '%s\n' "$kept"
+            continue
+        fi
+        ;;
+    esac
     case "$line" in
     RELAY_API_TOKEN=*) printf "RELAY_API_TOKEN='%s'\n" "$api_token" ;;
     RELAY_BROKER_USER=*) printf "RELAY_BROKER_USER='relay'\n" ;;
@@ -78,6 +92,9 @@ trap - EXIT
 
 echo "Wrote $output, mode 0600."
 if [[ "$force" == 1 ]]; then
-    echo "New broker password: change it on every node as well, or they stop reporting."
+    echo "Secrets replaced, other settings kept. Change the new broker password on every node as"
+    echo "well, or they stop reporting."
 fi
-echo "Next: set RELAY_SITE_SUBNET and RELAY_WEBRTC_HOSTS in it, then see README.md."
+if ! grep -qE "^RELAY_SITE_SUBNET=.+" "$output"; then
+    echo "Next: set RELAY_SITE_SUBNET and RELAY_WEBRTC_HOSTS in it, then see README.md."
+fi

@@ -59,6 +59,7 @@ others() { # every container this test did not create
 }
 
 other_containers_before="$(others)"
+volumes_before="$(docker volume ls -q | sort)"
 pulled_images=()
 for image in bluenviron/mediamtx:1.21.3 eclipse-mosquitto:2.1.2-alpine alexxit/go2rtc:1.9.14 \
     alpine:3.23.8 python:3.13.13-slim-trixie; do
@@ -84,6 +85,8 @@ teardown() {
     left+="$(docker ps -a --format '{{.Names}}' | grep "^$project")"
     left+="$(docker network ls --format '{{.Name}}' | grep "^$project")"
     left+="$(docker volume ls --format '{{.Name}}' | grep "^$project")"
+    # Anonymous volumes carry no project in their name, so compare with the list from the start.
+    left+="$(comm -13 <(printf '%s\n' "$volumes_before") <(docker volume ls -q | sort) | tr '\n' ' ' | sed 's/ $//')"
     left+="$(docker image ls --format '{{.Repository}}' | grep "^$project")"
     if [[ -n "$left" ]]; then
         log "FAIL - left behind: $left"
@@ -155,6 +158,18 @@ for name in RELAY_API_BROKER_PASSWORD RELAY_MQTT_CLIENT_ID; do
     if grep -qE "^$name='.{20,}'$" "$credentials"; then ok "setup generates $name"; else not_ok "setup generates $name"; fi
 done
 check "the example file holds no secret" test -z "$(grep -E "^RELAY_[A-Z_]*(PASSWORD|TOKEN)=.+" "$relay/.env.example")"
+cp "$credentials" "$work/kept.env"
+sed -i -e "s|^RELAY_SITE_SUBNET=.*|RELAY_SITE_SUBNET=192.168.77.0/24|" -e "s|^RELAY_API_PORT=.*|RELAY_API_PORT=18080|" \
+    -e "s|^RELAY_BROKER_USER=.*|RELAY_BROKER_USER='someone'|" "$work/kept.env"
+kept_token="$(grep '^RELAY_API_TOKEN=' "$work/kept.env")"
+kept_password="$(grep '^RELAY_BROKER_PASSWORD=' "$work/kept.env")"
+"$relay/setup-credentials.sh" --force --output "$work/kept.env" >/dev/null
+check "--force keeps the site subnet" grep -qx 'RELAY_SITE_SUBNET=192.168.77.0/24' "$work/kept.env"
+check "--force keeps the ports" grep -qx 'RELAY_API_PORT=18080' "$work/kept.env"
+check "--force keeps a login's user name" grep -qx "RELAY_BROKER_USER='someone'" "$work/kept.env"
+refuted "--force replaces the token" grep -qxF "$kept_token" "$work/kept.env"
+refuted "--force replaces the broker password" grep -qxF "$kept_password" "$work/kept.env"
+check "--force leaves it 0600" test "$(stat -c %a "$work/kept.env")" = 600
 if grep -qE '(^|[^0-9])1935([^0-9]|$)|\blatest\b' "$relay/compose.yaml" "$relay/mediamtx.yml"; then
     not_ok "no port 1935 and no latest tag in the bundle"
 else
@@ -163,7 +178,7 @@ fi
 
 log "--- bringing the bundle up"
 uv venv -q "$work/venv" --python 3.13 2>/dev/null || uv venv -q "$work/venv"
-uv pip install -q --python "$work/venv/bin/python" 'paho-mqtt==2.2.0' || exit 2
+uv pip install -q --python "$work/venv/bin/python" 'paho-mqtt==2.2.0' 'aiortc>=1.9,<2' || exit 2
 py="$work/venv/bin/python"
 probe() { "$py" "$here/probe.py" "$@"; }
 
@@ -199,7 +214,11 @@ RELAY_API_PORT=$api_port
 RELAY_RTSP_PORT=$rtsp_port
 RELAY_WEBRTC_HTTP_PORT=$webrtc_port
 RELAY_WEBRTC_UDP_PORT=$media_port
-RELAY_WEBRTC_HOSTS=127.0.0.1
+RELAY_WEBRTC_HOSTS=$edge_prefix.200
+RELAY_TEST_CAPTURE_IP=$edge_prefix.201
+RELAY_TEST_REDIRECT_IP=$site.66
+RELAY_TEST_BROKER_IP=$edge_prefix.202
+RELAY_TEST_DIR_SIM_ROUTES=/sim/routes.json
 RELAY_BROKER_PUBLISH_PORT=$broker_port
 RELAY_NTP_PORT=$ntp_port
 COMPOSE_PROFILES=broker
@@ -223,6 +242,7 @@ ENV
 chmod 600 "$work/env"
 export PROBE_USER="$broker_user" PROBE_PASSWORD="$broker_password"
 export PROBE_API_USER="$api_broker_user" PROBE_API_PASSWORD="$api_broker_password"
+export PROBE_READ_USER="$read_user" PROBE_READ_PASSWORD="$read_password"
 
 cat >"$work/go2rtc.yaml" <<YAML
 api:
@@ -233,11 +253,20 @@ rtsp:
   password: "$broker_password"
 streams:
   cam-01:
-    - "exec:ffmpeg -hide_banner -loglevel error -re -f lavfi -i testsrc=size=320x240:rate=10 -c:v libx264 -preset ultrafast -tune zerolatency -g 10 -f rtsp {output}"
+    - "exec:ffmpeg -hide_banner -loglevel error -re -f lavfi -i testsrc=size=320x240:rate=10 -c:v libx264 -preset ultrafast -tune zerolatency -profile:v baseline -pix_fmt yuv420p -g 10 -f rtsp {output}"
 YAML
 chmod 644 "$work/go2rtc.yaml"
 mkdir -p "$work/sim"
-cp "$here/frigate_sim.py" "$work/sim/"
+cp "$here/frigate_sim.py" "$here/rtsp_stub.py" "$work/sim/"
+cat >"$work/sim/routes.json" <<ROUTES
+{
+  "/redir-edge": "rtsp://$edge_prefix.201:8554/x",
+  "/redir-broker": "rtsp://$edge_prefix.202:1883/x",
+  "/redir-control": "rtsp://$control_prefix.2:9997/x",
+  "/redir-public": "rtsp://198.51.100.1:8554/x",
+  "/redir-central": "rtsp://$site.250:8554/x"
+}
+ROUTES
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=frigate-sim" \
     -keyout "$work/sim/key.pem" -out "$work/sim/cert.pem" 2>/dev/null
 chmod 755 "$work/sim" "$work"
@@ -388,7 +417,7 @@ check "and back" test "$(path_source_host cam-01)" = "$node_ip:8554/cam-01"
 
 log "--- F1, F2, F3: addresses that must never reach the proxy or MediaMTX"
 broker_edge_ip="$(container_ip mosquitto edge)"
-mediamtx_edge_ip="$(container_ip mediamtx edge)"
+mediamtx_edge_ip="$(container_ip netguard edge)"
 attacks=(
     "::ffff:$broker_edge_ip%25x]:1883?"
     "::ffff:$control_prefix.2%25x]:9997?"
@@ -538,6 +567,97 @@ log "     measured: source connection closed ${closed_after} s after the last re
 check "it closes after the timeout, not at once" test "$closed_after" -ge 7 -a "$closed_after" -le 20
 check "after closing, zero source connections" test "$(source_connections)" = 0
 
+log "--- a WebRTC read, with media"
+whep_frames="$(probe whep "http://127.0.0.1:$webrtc_port/cam-01/whep" --frames 10 2>/dev/null)"
+log "     measured: frames decoded over WebRTC through the guard: ${whep_frames:-0}"
+check "a WebRTC read delivers real video" test "${whep_frames:-0}" -ge 10
+wait_equal 30 0 source_connections || true
+check "and its source closes afterwards" test "$(source_connections)" = 0
+
+log "--- the egress guard: an RTSP redirect cannot leave the site"
+netguard() { compose exec -T netguard "$@"; }
+check "the guard reports healthy" test "$(docker inspect "$(compose ps -q netguard)" --format '{{.State.Health.Status}}')" = healthy
+guard_ip="$(container_ip netguard edge)"
+capture_ip="$edge_prefix.201"
+redirect_ip="$site.66"
+frigate_site_ip="$(container_ip frigate-sim site)"
+broker_ip_now="$(container_ip mosquitto edge)"
+check "the API sees the guard as ready" test "$(nodes | probe top-field paths | python3 -c 'import json,sys;print(json.load(sys.stdin)["guard_ready"])')" = True
+check "the broker really is at the address the redirect names" test "$broker_ip_now" = "$edge_prefix.202"
+check "the off-site listener is really there, from the API" compose exec -T api python -c \
+    "import socket; socket.create_connection(('$capture_ip', 8554), timeout=3).close()"
+drop_count() {
+    netguard nft list chain inet netguard output | sed -n 's/.*counter packets \([0-9]*\) .*drop.*/\1/p'
+}
+rules_hash() { netguard nft list table inet netguard | sed 's/counter packets [0-9]* bytes [0-9]*//' | sha256sum; }
+captured() { # connections, then logins, from MediaMTX's address
+    compose logs --no-color capture-sim 2>/dev/null | grep -c "$1 from $guard_ip"
+}
+broker_seen() { compose logs --no-color mosquitto 2>/dev/null | grep -c "New connection from $guard_ip"; }
+for target in edge broker control public central; do
+    probe heartbeat --port "$broker_port" --node "redir-$target" --address "$redirect_ip"
+    wait_equal 10 200 path_status "redir-$target" || true
+done
+check "the redirecting node is accepted, as it is on the site" test "$(path_status redir-edge)" = 200
+broker_before="$(broker_seen)"
+drops_before="$(drop_count)"
+read_redirects() {
+    local pids=()
+    for target in edge broker control public central; do
+        ffprobe -v error -rtsp_transport tcp -timeout 14000000 \
+            "rtsp://$read_user:$read_password@127.0.0.1:$rtsp_port/redir-$target" >/dev/null 2>&1 &
+        pids+=($!)
+    done
+    wait "${pids[@]}"
+}
+read_redirects
+sleep 2
+drops_after="$(drop_count)"
+stub_redirects="$(compose logs --no-color redirect-sim 2>/dev/null | grep -c 'REDIRECT from')"
+connections="$(captured CONNECT)"
+logins="$(captured LOGIN)"
+broker_after="$(broker_seen)"
+control_eof="$(compose logs --no-color mediamtx 2>/dev/null | grep 'redir-control' | grep -c 'EOF')"
+log "     measured: the site host sent $stub_redirects redirects. The guard dropped $((drops_after - drops_before)) packets"
+log "     measured: off-site listener: $connections connections, $logins logins from MediaMTX"
+log "     measured: broker: $((broker_after - broker_before)) new connections from MediaMTX. Control port: $control_eof EOF"
+if ((stub_redirects < 5)); then
+    compose logs --no-color redirect-sim 2>&1 | tail -5 | cut -c1-160 | scrub_secrets
+    compose logs --no-color mediamtx 2>&1 | grep -E 'redir-|RTSP source' | tail -12 | cut -c1-200 | scrub_secrets
+    compose ps --format '{{.Service}} {{.Status}}' 2>&1
+fi
+check "the redirects really were sent" test "$stub_redirects" -ge 5
+check "the guard really dropped the attempts" test "$((drops_after - drops_before))" -ge 4
+check "0 connections reach the off-site listener" test "$connections" = 0
+check "0 logins reach the off-site listener" test "$logins" = 0
+check "0 connections reach the broker" test "$((broker_after - broker_before))" = 0
+check "the control port is not reached" test "$control_eof" = 0
+
+log "--- the egress guard: from inside the namespace"
+check "the site's 8554 is reachable" netguard nc -z -w 3 "$node_ip" 8554
+refuted "another port on a site host is not" netguard nc -z -w 3 "$frigate_site_ip" 8971
+refuted "the off-site listener is not" netguard nc -z -w 3 "$capture_ip" 8554
+refuted "the broker is not" netguard nc -z -w 3 "$broker_ip_now" 1883
+refuted "its own control port is not" netguard nc -z -w 3 "$control_prefix.2" 9997
+refuted "the API's control address is not" netguard nc -z -w 3 "$control_prefix.3" 8080
+check "the rules name the central host" sh -c "docker exec '$(compose ps -q netguard)' nft list chain inet netguard output | grep -q 'ip daddr $site.250 tcp dport 8554 .*drop'"
+check "the policy is drop" sh -c "docker exec '$(compose ps -q netguard)' nft list chain inet netguard output | grep -q 'policy drop'"
+
+log "--- the egress guard: a MediaMTX restart keeps the rules"
+rules_before="$(rules_hash)"
+compose restart -t 3 mediamtx >/dev/null 2>&1
+wait_equal 30 "$node_ip:8554/cam-01" path_source_host cam-01 || true
+check "the rules are unchanged" test "$(rules_hash)" = "$rules_before"
+ffprobe -v error -rtsp_transport tcp -timeout 14000000 \
+    "rtsp://$read_user:$read_password@127.0.0.1:$rtsp_port/redir-edge" >/dev/null 2>&1
+check "after the restart, still 0 connections off-site" test "$(captured CONNECT)" = 0
+check "after the restart, the control API still answers the API" test "$(path_status cam-01)" = 200
+wait_until 20 ffprobe -v error -rtsp_transport tcp -timeout 12000000 \
+    "rtsp://$read_user:$read_password@127.0.0.1:$rtsp_port/cam-01" || true
+check "after the restart, an RTSP read still works" ffprobe -v error -rtsp_transport tcp -timeout 12000000 \
+    "rtsp://$read_user:$read_password@127.0.0.1:$rtsp_port/cam-01"
+wait_equal 30 0 source_connections || true
+
 log "--- WebRTC signalling and what is not served"
 webrtc_url="http://127.0.0.1:$webrtc_port/cam-01/whep"
 check "WebRTC signalling answers with a login" test "$(status -u "$read_user:$read_password" -X OPTIONS "$webrtc_url")" = 204
@@ -551,11 +671,11 @@ done
 log "--- who can reach the control API"
 control_url="http://$control_prefix.2:9997/v3/config/global/get"
 check "the API container can" test "$(control_api /v3/config/global/get | wc -c)" -gt 10
-check "no published port for it" test -z "$(compose port mediamtx 9997 2>/dev/null)"
+check "no published port for it" test -z "$(compose port netguard 9997 2>/dev/null)"
 host_status="$(status -u "relay-api:$control_password" --max-time 5 "$control_url")"
 log "     measured: from this host, with the right password: HTTP $host_status (000 = no connection)"
 check "this host cannot, even with its password" test "$host_status" != 200
-mediamtx_ip="$(container_ip mediamtx edge)"
+mediamtx_ip="$(container_ip netguard edge)"
 refuted "a container on the edge network cannot, by the control address" \
     compose exec -T mosquitto wget -q -T 3 -O /dev/null \
     "http://relay-api:$control_password@$control_prefix.2:9997/v3/config/global/get"
@@ -795,6 +915,21 @@ else
         tail -5 "$clash_log" | scrub_secrets
     fi
 fi
+
+log "--- fail closed: rules that cannot load mean no MediaMTX"
+compose down --volumes --timeout 5 >/dev/null 2>&1
+printf 'services:\n  netguard:\n    cap_add: !reset []\n' >"$work/no-guard.yaml"
+no_guard_log="$work/no-guard.log"
+timeout 60 docker compose -p "$project" --project-directory "$relay" --env-file "$work/env" \
+    -f "$relay/compose.yaml" -f "$here/compose.test.yaml" -f "$work/no-guard.yaml" \
+    up -d --no-build mediamtx >"$no_guard_log" 2>&1
+up_status=$?
+guard_log="$(compose logs --no-color netguard 2>&1 | tail -3 | cut -c1-120)"
+mediamtx_running="$(docker ps --filter "label=com.docker.compose.project=$project" --filter 'label=com.docker.compose.service=mediamtx' --filter status=running -q | wc -l)"
+log "     measured: compose up exit $up_status; MediaMTX containers running: $mediamtx_running"
+log "     measured: guard: $guard_log"
+check "without the guard's rules, compose up does not succeed" test "$up_status" != 0
+check "and MediaMTX is not running" test "$mediamtx_running" = 0
 
 log "--- result: $failures failure(s)"
 ((failures == 0))

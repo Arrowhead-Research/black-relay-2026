@@ -17,13 +17,42 @@ services:
     networks:
       - site
 
+  # A host on the site that answers every DESCRIBE with a 302.
+  redirect-sim:
+    image: ${RELAY_IMAGE_PREFIX}-api:0.1.0
+    command: ["python", "-u", "/sim/rtsp_stub.py", "redirect", "${RELAY_TEST_DIR_SIM_ROUTES}"]
+    volumes:
+      - ${RELAY_TEST_DIR}/sim:/sim:ro
+    networks:
+      site:
+        ipv4_address: ${RELAY_TEST_REDIRECT_IP}
+
+  # A listener off the site subnet, challenging for a login as a thief would.
+  capture-sim:
+    image: ${RELAY_IMAGE_PREFIX}-api:0.1.0
+    command: ["python", "-u", "/sim/rtsp_stub.py", "capture"]
+    volumes:
+      - ${RELAY_TEST_DIR}/sim:/sim:ro
+    networks:
+      edge:
+        ipv4_address: ${RELAY_TEST_CAPTURE_IP}
+
+  # At a known address, for the redirect's Location.
+  mosquitto:
+    networks:
+      edge:
+        ipv4_address: ${RELAY_TEST_BROKER_IP}
+
   # On the site's network as well, as a real host reaches it through its own LAN.
   api:
     networks:
       site: {}
-  mediamtx:
+  # A fixed address, so that it can be named to WebRTC clients before it starts.
+  netguard:
     networks:
       site: {}
+      edge:
+        ipv4_address: ${RELAY_WEBRTC_HOSTS}
 
   # Docker unmounts a tmpfs volume with its last container, which would empty the API's data on
   # every restart. This keeps it mounted, as a real disk would stay.

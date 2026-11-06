@@ -6,7 +6,8 @@ laptop or a server. It assumes nothing else about the host. Design: `../DESIGN.m
 | Service | Does | Listens on (host) |
 |---|---|---|
 | `api` | The one way in for users: node status, events, and each node's Frigate | TCP 8080 |
-| `mediamtx` | One video endpoint for all cameras. Pulls a node's stream only while someone watches | TCP 8554 (RTSP), TCP 8889 and UDP 8189 (WebRTC) |
+| `netguard` | Holds MediaMTX's network and its published ports, and limits what it can reach | TCP 8554 (RTSP), TCP 8889 and UDP 8189 (WebRTC) |
+| `mediamtx` | One video endpoint for all cameras. Pulls a node's stream only while someone watches | Through `netguard` |
 | `chrony` | NTP for the site, from this host's clock, without touching it | UDP 123 |
 | `mosquitto` | The broker, under the `broker` profile, which `.env` turns on, until the shared compute node's broker exists | TCP 1883 |
 
@@ -14,7 +15,9 @@ TAK integration is out of scope.
 
 ## Install
 
-Needs Docker with Compose v2.17 or later, and this repository's `relay/` and `bridge/schemas/`.
+Needs Docker with Compose v2.17 or later, nf_tables in the host's kernel, and this repository's `relay/` and
+`bridge/schemas/`. Current Raspberry Pi OS, Debian and Ubuntu kernels have nf_tables. If it is missing,
+`netguard` exits, says so, and MediaMTX does not start.
 All images are pinned versions with `linux/amd64` and `linux/arm64`, so the steps are the same on a
 Pi, a laptop and a server.
 
@@ -29,8 +32,9 @@ Pi, a laptop and a server.
    ```
 
 3. In `.env`, set:
-   - `RELAY_SITE_SUBNET`, the site LAN, for example `192.168.8.0/24`. **Required.** The relay sends
-     logins and video requests only to node addresses inside it, and the API does not start without it.
+   - `RELAY_SITE_SUBNET`, the site LAN, for example `192.168.8.0/24`. **Required.** It must be a private range
+     (RFC 1918). The relay sends logins and video requests only to node addresses inside it, and the API does
+     not start without it.
    - `RELAY_CENTRAL_IP`, this host's LAN IP, which no node may then claim.
    - `RELAY_WEBRTC_HOSTS`, the addresses browsers reach this host on, for example
      `192.168.8.10,100.101.102.103`. Without them, WebRTC signalling answers but no media flows.
@@ -197,8 +201,9 @@ route returns a `502` saying the secret was refused, its video will not start, a
 3. Re-provision each node with the new password.
 
 With another broker, change it there first. The API's own login is separate, and is unaffected.
-`./setup-credentials.sh --force` replaces every secret at once. All API and video clients then need the new
-ones, and the new client id loses whatever the broker has queued for the API.
+`./setup-credentials.sh --force` replaces every secret at once, and keeps the site subnet, ports, user names and
+other settings. All API and video clients then need the new secrets, and the new client id loses whatever the
+broker has queued for the API.
 
 ## What is not encrypted
 
@@ -216,14 +221,29 @@ Protection against this rests on the site's WiFi security and on node firewalls 
 
 All nodes share one broker login in v0, which the WiFi list above exposes. Whoever holds it can report as any
 node, and can claim for it any address the rule above allows, so any host on the site LAN. That node's Frigate
-and video requests would go there, with the proxy secret and the broker login. Nothing can then reach other
-networks, this host or the bundle's containers.
+and video requests would go there, with the proxy secret and the broker login.
+
+MediaMTX follows an RTSP redirect from whatever answers on a node's address, and sends the broker login with it.
+Neither MediaMTX nor its RTSP library has a setting to stop that (gortsplib v5.6.7 `client.go:1524-1547`, MediaMTX
+1.21.3 `internal/staticsources/rtsp/source.go:180`). So `netguard` limits MediaMTX's network namespace. New
+connections out may go only to TCP 8554 on `RELAY_SITE_SUBNET`, except `RELAY_CENTRAL_IP`, and WebRTC media may
+leave from its own UDP port. Everything else is dropped, so a redirect cannot reach another network, the broker,
+the control API or the internet. **A redirect can still reach port 8554 on another host on the site LAN, and
+that host then gets the broker login**, which holds for anyone who already has the login. The WebRTC rule cannot
+narrow its destination, as browsers' addresses are not known ahead. The Frigate proxy follows no redirects.
+
+If `netguard`'s rules cannot load, `docker compose up` fails and MediaMTX does not start. Docker's own restart at
+boot does not wait for that check, so there the API also creates no video path until `netguard` has reported ready,
+and with no path MediaMTX has nothing to dial. `paths.guard_ready` in `GET /nodes` shows it. Restarting MediaMTX
+keeps the rules. If `netguard` itself is recreated, run `docker compose up -d` so that MediaMTX rejoins it: until
+then MediaMTX has no network.
 
 Mosquitto lets any login take over a session by connecting with its client id
 (`src/handle_connect.c:96-191` in 2.1.2), and has no setting to stop it. So the API's own login keeps nodes from
 reading or writing its session's topics through it, and its client id, generated into `.env`, is what keeps them
 from taking the session. With the bundled broker that id travels only on the Docker network, and appears in the
-broker's own container log, which needs the same Docker access on this host as `.env`. With another broker
+broker's own container log. Protect that log as you protect `.env`: reading it takes Docker access on this host,
+and anything shipping logs off this host carries the id with it. With another broker
 it crosses the LAN in the clear, and anyone capturing it could then push the API off repeatedly. If so,
 `reconnects` climbs in `GET /nodes`, the API backs off up to 30 s between tries, and events wait in nodes' outboxes
 or the broker until it is back.

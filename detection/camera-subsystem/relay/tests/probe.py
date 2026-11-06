@@ -4,12 +4,15 @@ Passwords come from the environment, not argv, and nothing here prints one.
 """
 
 import argparse
+import asyncio
+import base64
 import json
 import os
 import socket
 import struct
 import sys
 import time
+import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -265,6 +268,52 @@ def clock(args):
     print(f"{time.clock_gettime(time.CLOCK_REALTIME) - time.clock_gettime(time.CLOCK_MONOTONIC):.6f}")
 
 
+async def _whep(args):
+    import aiortc
+
+    # No ICE servers, as the default would reach out to a public STUN server.
+    peer = aiortc.RTCPeerConnection(aiortc.RTCConfiguration(iceServers=[]))
+    peer.addTransceiver("video", direction="recvonly")
+    frames = 0
+    track_arrived = asyncio.Event()
+    tracks = []
+
+    @peer.on("track")
+    def on_track(track):
+        tracks.append(track)
+        track_arrived.set()
+
+    await peer.setLocalDescription(await peer.createOffer())
+    login = f"{os.environ['PROBE_READ_USER']}:{os.environ['PROBE_READ_PASSWORD']}"
+    request = urllib.request.Request(
+        args.url,
+        data=peer.localDescription.sdp.encode(),
+        headers={
+            "Content-Type": "application/sdp",
+            "Authorization": "Basic " + base64.b64encode(login.encode()).decode(),
+        },
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    answer = await asyncio.to_thread(lambda: opener.open(request, timeout=20).read().decode())
+    await peer.setRemoteDescription(aiortc.RTCSessionDescription(answer, "answer"))
+    try:
+        async with asyncio.timeout(args.seconds):
+            await track_arrived.wait()
+            while frames < args.frames:
+                await tracks[0].recv()
+                frames += 1
+    except TimeoutError:
+        pass
+    await peer.close()
+    print(frames)
+    return 0 if frames >= args.frames else 1
+
+
+def whep(args):
+    """Read a stream over WebRTC, with media, and print how many frames were decoded."""
+    return asyncio.run(_whep(args))
+
+
 def hold_port(args):
     kind = socket.SOCK_DGRAM if args.udp else socket.SOCK_STREAM
     sock = socket.socket(socket.AF_INET, kind)
@@ -362,6 +411,13 @@ def main():
     command("acl", acl, mqtt=True)
     command("sntp", sntp, (["--host"], {"default": "127.0.0.1"}), (["--port"], {**number, "required": True}))
     command("clock", clock)
+    command(
+        "whep",
+        whep,
+        (["url"], {}),
+        (["--frames"], {**number, "default": 5}),
+        (["--seconds"], {"type": float, "default": 25}),
+    )
     command(
         "hold-port",
         hold_port,

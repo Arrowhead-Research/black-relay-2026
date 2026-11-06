@@ -33,6 +33,7 @@ services:
       RELAY_API_BROKER_PASSWORD: ${RELAY_API_BROKER_PASSWORD:?run ./setup-credentials.sh}
       RELAY_MQTT_CLIENT_ID: ${RELAY_MQTT_CLIENT_ID:?run ./setup-credentials.sh}
       RELAY_SITE_SUBNET: ${RELAY_SITE_SUBNET:?set it in .env, for example 192.168.1.0/24}
+      RELAY_GUARD_READY_FILE: /guard/ready
       RELAY_INTERNAL_SUBNETS: ${RELAY_EDGE_SUBNET:-172.31.251.0/24},${RELAY_CONTROL_SUBNET:-172.31.250.0/29}
       RELAY_CENTRAL_IP: ${RELAY_CENTRAL_IP:-}
       RELAY_MEDIAMTX_API_URL: http://${RELAY_MEDIAMTX_CONTROL_IP:-172.31.250.2}:9997
@@ -42,6 +43,7 @@ services:
     tmpfs: [/tmp]
     volumes:
       - api-data:/data
+      - guard-state:/guard:ro
     ports:
       - ${RELAY_BIND_ADDRESS:-0.0.0.0}:${RELAY_API_PORT:-8080}:8080
     networks:
@@ -49,9 +51,45 @@ services:
       control:
         ipv4_address: ${RELAY_API_CONTROL_IP:-172.31.250.3}
 
+  # Owns MediaMTX's network namespace and limits what it can reach. gortsplib follows an RTSP
+  # redirect with no way to turn that off, and any host on the site can send one. See README.md.
+  netguard:
+    <<: *hardening
+    build: ./netguard
+    image: ${RELAY_IMAGE_PREFIX:-camera-relay}-netguard:0.1.0
+    init: true
+    cap_add: [NET_ADMIN]
+    environment:
+      RELAY_SITE_SUBNET: ${RELAY_SITE_SUBNET:?set it in .env, for example 192.168.1.0/24}
+      RELAY_CENTRAL_IP: ${RELAY_CENTRAL_IP:-}
+      RELAY_WEBRTC_UDP_PORT: ${RELAY_WEBRTC_UDP_PORT:-8189}
+    healthcheck:
+      test: ["CMD", "/netguard/verify.sh"]
+      interval: 5s
+      timeout: 3s
+      retries: 1
+      start_period: 15s
+      start_interval: 1s
+    volumes:
+      - guard-state:/guard
+    ports:
+      - ${RELAY_BIND_ADDRESS:-0.0.0.0}:${RELAY_RTSP_PORT:-8554}:8554
+      - ${RELAY_BIND_ADDRESS:-0.0.0.0}:${RELAY_WEBRTC_HTTP_PORT:-8889}:8889
+      - ${RELAY_BIND_ADDRESS:-0.0.0.0}:${RELAY_WEBRTC_UDP_PORT:-8189}:${RELAY_WEBRTC_UDP_PORT:-8189}/udp
+    networks:
+      edge: {}
+      control:
+        ipv4_address: ${RELAY_MEDIAMTX_CONTROL_IP:-172.31.250.2}
+
   mediamtx:
     <<: *hardening
     image: bluenviron/mediamtx:1.21.3
+    # No guard, no MediaMTX: it never starts until the rules are verified as loaded.
+    network_mode: service:netguard
+    depends_on:
+      netguard:
+        condition: service_healthy
+        restart: true
     environment:
       # Secrets and addresses that mediamtx.yml leaves to the environment. "0" is the reader's
       # entry in authInternalUsers, and "1" the API's.
@@ -66,14 +104,6 @@ services:
       MTX_WEBRTCADDITIONALHOSTS: ${RELAY_WEBRTC_HOSTS:-127.0.0.1}
     volumes:
       - ./mediamtx.yml:/mediamtx.yml:ro
-    ports:
-      - ${RELAY_BIND_ADDRESS:-0.0.0.0}:${RELAY_RTSP_PORT:-8554}:8554
-      - ${RELAY_BIND_ADDRESS:-0.0.0.0}:${RELAY_WEBRTC_HTTP_PORT:-8889}:8889
-      - ${RELAY_BIND_ADDRESS:-0.0.0.0}:${RELAY_WEBRTC_UDP_PORT:-8189}:${RELAY_WEBRTC_UDP_PORT:-8189}/udp
-    networks:
-      edge: {}
-      control:
-        ipv4_address: ${RELAY_MEDIAMTX_CONTROL_IP:-172.31.250.2}
 
   chrony:
     <<: *hardening
@@ -103,6 +133,8 @@ services:
     tmpfs:
       - /tmp
       - /run/mosquitto-auth:mode=0700
+      # The image declares this as a volume. Logs go to stdout, so it would only be an orphan.
+      - /mosquitto/log
     volumes:
       - ./mosquitto/mosquitto.conf:/relay/mosquitto.conf:ro
       - ./mosquitto/aclfile:/relay/aclfile:ro
@@ -127,5 +159,11 @@ networks:
         - subnet: ${RELAY_CONTROL_SUBNET:-172.31.250.0/29}
 
 volumes:
+  # Empty after a reboot, so that "ready" can only mean this boot's rules.
+  guard-state:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=1m,mode=0755
   api-data: {}
   mosquitto-data: {}
