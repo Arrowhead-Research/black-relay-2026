@@ -376,8 +376,10 @@ holds only the durable kinds: `object_start`, `object_end`, `cue-ack`, and
 **Send window.** At most 20 entries are in flight (sent and unacked) at once, and
 acknowledgements release the next ones. A reconnect discards the MQTT client's own
 unacked copies and replays from the oldest entry, so the outbox is the one record of
-what is undelivered. Acknowledgements are applied in batches with one file rewrite per
-batch, so a large replay cannot stall Frigate's event handling.
+what is undelivered. Acknowledged lines are removed from the file at most once per 1 MiB, so a large replay
+cannot stall Frigate's event handling or wear the SD card. A crash during a replay can
+therefore re-send up to 1 MiB of acknowledged lines. Delivery is at-least-once, and central
+deduplicates by `event_id`.
 
 **I/O failure.** If the outbox cannot write (a full disk, for example), or a network
 thread dies, the bridge exits nonzero so its service manager restarts it. The service
