@@ -15,6 +15,8 @@ import logging
 import os
 import socket
 import stat
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -24,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from cameralink import adopt
+from cameralink import adopt, reolink
 from cameralink.adopt import STEPS, Lease, LinkState, step
 from cameralink.reolink import (
     ApiError,
@@ -1079,6 +1081,26 @@ def test_a_failed_logout_does_not_replace_a_store_failure(blank_http):
     bench.camera.script["logout"] = [ApiError("no")]
     with pytest.raises(StoreError, match="disk full"):
         bench.link_up()
+
+
+def test_a_daemon_import_does_not_load_reolink_aio():
+    """It costs 20 MB that a node with an adopted camera would keep for nothing."""
+    code = (
+        "import sys, cameralink.__main__;"
+        "print([m for m in ('reolink_aio', 'aiohttp', 'asyncio') if m in sys.modules])"
+    )
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert done.stdout.strip() == "[]"
+
+
+def test_a_broken_install_crashes_before_a_factory_camera_attempt_is_spent(factory, monkeypatch):
+    monkeypatch.setitem(sys.modules, "cameralink.reolink", None)
+    with pytest.raises(ImportError):
+        factory.link_up(enable=None)
+    record = factory.record()
+    assert record.attempted is None
+    assert record.signature_failures == ()
+    assert factory.enable_passwords == []
 
 
 def test_logout_failure_changes_nothing(adopted):
@@ -2268,8 +2290,18 @@ def test_fake_client_matches_the_real_signature(name):
     assert fake == real
 
 
-def test_default_enable_is_the_real_enable_services():
-    assert inspect.signature(step).parameters["enable"].default is enable_services
+def test_default_enable_is_the_real_enable_services(factory, monkeypatch):
+    # By what a tick calls, because the default can no longer name it: importing it is what the
+    # daemon now puts off.
+    used = []
+
+    async def recorded(host, password):
+        used.append((host, password))
+
+    monkeypatch.setattr(reolink, "enable_services", recorded)
+    factory.link_up(enable=None)
+    assert used == [(IP, "")]
+    assert inspect.signature(step).parameters["enable"].default is None
     assert list(inspect.signature(enable_services).parameters)[:2] == ["host", "password"]
 
 

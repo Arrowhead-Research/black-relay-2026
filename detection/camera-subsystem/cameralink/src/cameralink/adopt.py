@@ -23,7 +23,6 @@ is not.
 the record it works from is in memory: another writer must not change the file under it.
 """
 
-import asyncio
 import logging
 import secrets
 import socket
@@ -31,14 +30,13 @@ import time
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
-from cameralink.reolink import (
+from cameralink.camera_api import (
     ApiError,
     AuthFailed,
     CameraError,
     LockedOut,
     LoginOutcomeUnknown,
     Unreachable,
-    enable_services,
 )
 from cameralink.store import CameraRecord, CameraStore
 
@@ -108,7 +106,7 @@ def step(
     *,
     node_id: str | None = None,
     flipped: bool | None = None,
-    enable=enable_services,
+    enable=None,
     probe=None,
     enable_timeout: float = 120,
     monotonic=time.monotonic,
@@ -258,12 +256,15 @@ class _Adoption:
     def _factory_signature(self) -> LinkState:
         if len(self._recent(self.rec.signature_failures)) >= SIGNATURE_FAILURE_CAP:
             return LinkState.NEEDS_RESET
+        # Loaded only now and before anything is recorded: a broken install crashes the daemon
+        # into its restart with this camera's attempt unspent.
+        enable = self.enable or _real_enable_services()
         if self.rec.password != _BLANK:
             self._update(pending_password=self.rec.password, password=_BLANK)
         self._begin_attempt(signature=True)
         failure = None
         try:
-            _run_enable(self.enable, self.ip, _BLANK, self.enable_timeout)
+            _run_enable(enable, self.ip, _BLANK, self.enable_timeout)
         except Unreachable:
             self._undo_attempt()
             return LinkState.ADOPTING
@@ -458,12 +459,21 @@ def _wanted(node_id: str | None, flipped: bool | None) -> dict:
     return wanted
 
 
+def _real_enable_services():
+    """reolink_aio costs 20 MB (measured) that a node with an adopted camera would hold for nothing."""
+    from cameralink.reolink import enable_services
+
+    return enable_services
+
+
 def _run_enable(enable, host: str, password: str, timeout: float) -> None:
     """Run the async enable_services from this synchronous tick, bounded in time.
 
     asyncio.wait_for and asyncio.run both wait for a cancelled task to finish, and
     enable_services does network I/O in a ``finally``, so neither gives a bound.
     """
+    import asyncio
+
     loop = asyncio.new_event_loop()
     try:
         loop.run_until_complete(_bounded(enable(host, password), host, timeout))
@@ -472,6 +482,8 @@ def _run_enable(enable, host: str, password: str, timeout: float) -> None:
 
 
 async def _bounded(coroutine, host: str, timeout: float) -> None:
+    import asyncio
+
     task = asyncio.ensure_future(coroutine)
     done, _ = await asyncio.wait({task}, timeout=timeout)
     if not done:

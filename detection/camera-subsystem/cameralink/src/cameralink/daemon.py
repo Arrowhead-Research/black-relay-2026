@@ -59,6 +59,7 @@ from cameralink.adopt import (
     LinkState,
     step,
 )
+from cameralink.camera_api import CameraError, ReolinkClient
 from cameralink.frigate_config import (
     FrigateConfigError,
     env_content,
@@ -66,7 +67,6 @@ from cameralink.frigate_config import (
     render,
     write_env,
 )
-from cameralink.reolink import CameraError, ReolinkClient
 from cameralink.store import CameraRecord, CameraStore, StoreError
 
 _log = logging.getLogger(__name__)
