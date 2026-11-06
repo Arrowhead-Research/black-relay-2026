@@ -100,6 +100,7 @@ class _Entry:
     qos: int
     ts: float
     payload: bytes
+    size: int = 0  # bytes of this entry's line in the file
 
 
 class Outbox:
@@ -132,6 +133,8 @@ class Outbox:
         # flush does not re-send). Cleared on replay (new connection) and restart.
         self._sent: set[int] = set()
         self._next_mid = 1
+        # What the index occupies on disk, so that a size check does not measure the queue.
+        self._live_bytes = 0
         self._load()
 
     # --- construction / reconstruction --------------------------------------
@@ -162,6 +165,9 @@ class Outbox:
                     )
                 except (ValueError, KeyError, TypeError, AttributeError):
                     continue
+                self._forget_size(self._entries.get(entry.mid))
+                entry.size = len(self._line(entry))
+                self._live_bytes += entry.size
                 self._entries[entry.mid] = entry
                 max_seen = max(max_seen, entry.mid)
         self._next_mid = max_seen + 1
@@ -185,9 +191,7 @@ class Outbox:
     def enqueue_many(self, messages: list[tuple[str, dict]]) -> None:
         """Durably queue ``(topic, message)`` pairs, in order, as one batch.
 
-        One write + fsync and one overflow pass for the whole batch. Enqueueing a
-        large backlog one at a time is quadratic, because each overflow pass measures
-        the whole queue.
+        One write + fsync and one overflow pass for the whole batch.
         """
         if not messages:
             return
@@ -203,6 +207,8 @@ class Outbox:
                     payload=payload,
                 )
             )
+            entries[-1].size = len(self._line(entries[-1]))
+            self._live_bytes += entries[-1].size
             self._next_mid += 1
             self._entries[entries[-1].mid] = entries[-1]
         self._append(entries)
@@ -265,8 +271,10 @@ class Outbox:
         removed = False
         for mid in mids:
             entry_mid = self._inflight.pop(mid, None)
-            if entry_mid is None or self._entries.pop(entry_mid, None) is None:
+            entry = self._entries.pop(entry_mid, None) if entry_mid is not None else None
+            if entry is None:
                 continue
+            self._forget_size(entry)
             self._sent.discard(entry_mid)
             removed = True
         if removed:
@@ -288,18 +296,18 @@ class Outbox:
         if self._max_age_s is not None:
             for entry_mid in list(self._entries.keys()):
                 if now - self._entries[entry_mid].ts > self._max_age_s:
-                    del self._entries[entry_mid]
+                    self._forget_size(self._entries.pop(entry_mid))
                     self._discard_entry_state(entry_mid)
                     dropped += 1
 
-        while self._entries and self._serialized_size() > self._max_bytes:
+        while self._entries and self._live_bytes > self._max_bytes:
             oldest_mid = next(iter(self._entries))
             oldest = self._entries[oldest_mid]
             # A single entry whose own on-disk line already exceeds the whole cap
             # can never fit; it is still dropped (keeping the cap), but with a
             # DISTINCT warning so it is not hidden inside the normal FIFO-overflow
             # message — a lone oversized durable event is a signal worth seeing.
-            line_size = len(self._line(oldest).encode("utf-8"))
+            line_size = oldest.size
             if line_size > self._max_bytes:
                 logger.warning(
                     "outbox: dropping a single durable entry (mid=%s topic=%s) whose "
@@ -309,7 +317,7 @@ class Outbox:
                     line_size,
                     self._max_bytes,
                 )
-            del self._entries[oldest_mid]
+            self._forget_size(self._entries.pop(oldest_mid))
             self._discard_entry_state(oldest_mid)
             dropped += 1
 
@@ -334,7 +342,8 @@ class Outbox:
     # --- on-disk form -------------------------------------------------------
 
     def _line(self, entry: _Entry) -> str:
-        """Serialize one entry to its JSONL line (with trailing newline)."""
+        """Serialize one entry to its JSONL line (with trailing newline). All ASCII, so its
+        length is its size on disk."""
         record = {
             "mid": entry.mid,
             "topic": entry.topic,
@@ -344,9 +353,9 @@ class Outbox:
         }
         return json.dumps(record, separators=_SEP) + "\n"
 
-    def _serialized_size(self) -> int:
-        """Total on-disk byte size the current index would occupy."""
-        return sum(len(self._line(entry).encode("utf-8")) for entry in self._entries.values())
+    def _forget_size(self, entry: _Entry | None) -> None:
+        if entry is not None:
+            self._live_bytes -= entry.size
 
     def _append(self, entries: list[_Entry]) -> None:
         """Append entries' lines to the file and fsync once (durable before send)."""

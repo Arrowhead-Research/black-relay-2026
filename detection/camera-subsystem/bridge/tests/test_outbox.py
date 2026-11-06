@@ -356,6 +356,63 @@ def test_oversized_single_entry_logs_distinct_warning(tmp_path, caplog):
     assert any("single durable entry" in m and "exceeds max_bytes" in m for m in messages)
 
 
+# --- the size check: a running total that must stay exact ---------------------
+
+
+def _file_size(path) -> int:
+    return path.stat().st_size if path.exists() else 0
+
+
+def test_the_running_size_matches_the_file_through_every_operation(tmp_path):
+    path = tmp_path / "outbox.jsonl"
+    box = Outbox(str(path), max_bytes=10_000_000, max_age_s=1e9)
+    box.enqueue(formats.TOPIC_DETECTIONS, make_detection("object_start", 1), durable=True)
+    assert box._live_bytes == _file_size(path)
+    box.enqueue_many(
+        [(formats.TOPIC_DETECTIONS, make_detection("object_end", i)) for i in range(5)]
+    )
+    assert box._live_bytes == _file_size(path)
+    mids = box.flush(RecordingPublish())
+    box.ack_many(mids[:2])
+    assert box._live_bytes == _file_size(path)
+    reopened = Outbox(str(path), max_bytes=10_000_000, max_age_s=1e9)
+    assert reopened._live_bytes == box._live_bytes
+    box.ack_many(mids[2:])
+    assert box._live_bytes == 0
+
+
+def test_a_repeated_mid_in_the_file_is_not_counted_twice(tmp_path):
+    path = tmp_path / "outbox.jsonl"
+    box = Outbox(str(path), max_bytes=10_000_000, max_age_s=1e9)
+    box.enqueue(formats.TOPIC_DETECTIONS, make_detection("object_start", 1), durable=True)
+    line = path.read_text()
+    path.write_text(line + line)
+    reopened = Outbox(str(path), max_bytes=10_000_000, max_age_s=1e9)
+    assert reopened._live_bytes == len(line)
+
+
+def test_a_payload_outside_ascii_is_sized_as_it_is_written(tmp_path):
+    path = tmp_path / "outbox.jsonl"
+    box = Outbox(str(path), max_bytes=10_000_000, max_age_s=1e9)
+    message = make_detection("object_start", 1)
+    message["label"] = "caf\u00e9 \U0001f600"
+    box.enqueue(formats.TOPIC_DETECTIONS, message, durable=True)
+    assert box._live_bytes == _file_size(path)
+
+
+def test_enqueue_does_not_serialize_the_backlog_again(tmp_path, monkeypatch):
+    path = tmp_path / "outbox.jsonl"
+    box = Outbox(str(path), max_bytes=10_000_000, max_age_s=1e9)
+    box.enqueue_many(
+        [(formats.TOPIC_DETECTIONS, make_detection("object_start", i)) for i in range(200)]
+    )
+    calls = []
+    real = box._line
+    monkeypatch.setattr(box, "_line", lambda entry: (calls.append(1), real(entry))[1])
+    box.enqueue(formats.TOPIC_DETECTIONS, make_detection("object_end", 1), durable=True)
+    assert len(calls) <= 2
+
+
 # --- enqueue_many: one fsync and one overflow pass for a whole batch ---------
 
 
