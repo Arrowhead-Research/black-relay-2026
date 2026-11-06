@@ -183,7 +183,6 @@ def test_cue_ack_validates_matched():
         zone="perimeter-north",
         matched=True,
         object_id="trk-1",
-        snapshot_url="https://node.local/snap/1.jpg",
         clock=FakeClock(),
     )
     _validate("cue-ack.v0.schema.json", msg)
@@ -191,11 +190,24 @@ def test_cue_ack_validates_matched():
     assert msg["timestamp"] == FIXED_TS
     assert msg["matched"] is True
     assert msg["object_id"] == "trk-1"
-    assert msg["attributes"]["snapshot_url"] == "https://node.local/snap/1.jpg"
+    assert msg["attributes"] == {}
     assert _is_uuid4(msg["event_id"])
 
 
-def test_cue_ack_unmatched_has_null_object_id_and_no_snapshot():
+def test_cue_ack_takes_no_snapshot_url():
+    with pytest.raises(TypeError):
+        formats.cue_ack(
+            node_id="cam-01",
+            rf_cue_id="rf-cue-7",
+            zone="z",
+            matched=False,
+            object_id=None,
+            snapshot_url="https://node.local/snap/1.jpg",
+            clock=FakeClock(),
+        )
+
+
+def test_cue_ack_unmatched_has_null_object_id():
     msg = formats.cue_ack(
         node_id="cam-01",
         rf_cue_id="rf-cue-7",

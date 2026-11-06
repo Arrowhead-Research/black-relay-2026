@@ -43,8 +43,8 @@ class FrigateEvent:
 
     Fields mirror the ``camera.detection.v0`` payload the service wiring will
     build from it: ``event``/``object_id``/``label``/``confidence``/``zones`` are
-    top-level detection fields, while ``bbox``/``area_px``/``stationary``/
-    ``snapshot_url`` become the detection's ``attributes``.
+    top-level detection fields, while ``bbox``/``area_px``/``stationary`` become the
+    detection's ``attributes``. Frigate's event carries no snapshot URL: the bridge mints one.
     """
 
     event: str
@@ -55,7 +55,6 @@ class FrigateEvent:
     bbox: list[int]
     area_px: int
     stationary: bool
-    snapshot_url: str | None = None
 
 
 def parse_frigate_event(payload: dict) -> FrigateEvent | None:
@@ -89,10 +88,6 @@ def parse_frigate_event(payload: dict) -> FrigateEvent | None:
         bbox = list(after.get("box") or [])
         area_px = int(after.get("area") or 0)
         stationary = bool(after.get("stationary"))
-        # Frigate's MQTT event carries no URL (the edge service builds one from
-        # the Frigate host per DESIGN 5.6); pass through an enriched value if an
-        # upstream stage set one, else None.
-        snapshot_url = after.get("snapshot_url")
     except (KeyError, TypeError, AttributeError, ValueError):
         return None
 
@@ -105,5 +100,4 @@ def parse_frigate_event(payload: dict) -> FrigateEvent | None:
         bbox=bbox,
         area_px=area_px,
         stationary=stationary,
-        snapshot_url=snapshot_url,
     )

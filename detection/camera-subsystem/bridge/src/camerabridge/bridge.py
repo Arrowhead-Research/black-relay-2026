@@ -477,7 +477,7 @@ class Bridge:
             "bbox": list(event.bbox),
             "area_px": event.area_px,
             "stationary": event.stationary,
-            # snapshot_url is minted service-side (decision 3) — the parser leaves None.
+            # Minted here (decision 3): Frigate's event carries no URL.
             "snapshot_url": self._snapshot_url(event.object_id),
         }
         pending = self._pending_cue.get(event.object_id)

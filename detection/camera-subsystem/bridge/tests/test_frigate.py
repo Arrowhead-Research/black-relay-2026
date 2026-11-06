@@ -14,7 +14,7 @@ Covered here:
   ``stationary``);
 * ``update``→``object_update`` and ``end``→``object_end``;
 * Frigate reports current state in ``after`` (not ``before``);
-* ``snapshot_url`` passes through when present and defaults to ``None``;
+* ``snapshot_url`` is not the parser's: Frigate's event has none, and the bridge mints it;
 * malformed payloads (``{}``, non-dict, missing ``after``, ``after`` not a dict,
   missing ``label``/``id``, unknown ``type``) return ``None`` — never raise.
 """
@@ -51,8 +51,6 @@ def test_new_fixture_maps_to_object_start_and_passes_fields_through():
     assert result.bbox == [120, 80, 64, 180]
     assert result.area_px == 11520
     assert result.stationary is False
-    # A real Frigate "new" event has no snapshot yet.
-    assert result.snapshot_url is None
 
 
 def test_reads_current_state_from_after_not_before():
@@ -97,11 +95,10 @@ def test_missing_type_returns_none():
 # --- optional-field handling ------------------------------------------------
 
 
-def test_snapshot_url_passes_through_when_present():
+def test_snapshot_url_in_an_event_is_not_carried():
     payload = load_fixture()
     payload["after"]["snapshot_url"] = "https://node.local/api/events/x/snapshot.jpg"
-    result = parse_frigate_event(payload)
-    assert result.snapshot_url == "https://node.local/api/events/x/snapshot.jpg"
+    assert not hasattr(parse_frigate_event(payload), "snapshot_url")
 
 
 def test_missing_optional_fields_use_safe_defaults():
@@ -114,7 +111,6 @@ def test_missing_optional_fields_use_safe_defaults():
     assert result.bbox == []
     assert result.area_px == 0
     assert result.stationary is False
-    assert result.snapshot_url is None
 
 
 def test_null_current_zones_becomes_empty_list():

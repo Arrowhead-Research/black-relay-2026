@@ -10,12 +10,9 @@ wire shape (that invariant lives in ``formats.py``, the one module that knows th
 contract).
 
 The four health signals are first-class, required booleans on every heartbeat.
-Everything else a node might report (Frigate build, detection frame rate, free
-storage, uplink signal strength, the camera link's state, its own address, ...) is
-optional telemetry that rides in the
-open ``attributes`` sub-object. Mirroring ``formats.cue_ack``'s handling of
-``snapshot_url``, an optional field is folded into ``attributes`` only when it is
-set, so a bare :class:`NodeState` yields an empty ``attributes`` rather than a
+Everything else a node reports (the camera link's state, its own address, ...) is
+optional telemetry that rides in the open ``attributes`` sub-object. An optional
+field is folded into ``attributes`` only when it is set, so a bare :class:`NodeState` yields an empty ``attributes`` rather than a
 clutter of ``null`` keys.
 """
 
@@ -43,10 +40,6 @@ class NodeState:
     link_online: bool
     recording_ok: bool
     detector_ok: bool
-    frigate_version: str | None = None
-    detection_fps: float | None = None
-    storage_free_pct: float | None = None
-    uplink_rssi_dbm: int | None = None
     camera_link_state: str | None = None
     retry_after: float | None = None
     reason: str | None = None

@@ -12,13 +12,14 @@ This module checks that :func:`~camerabridge.status.build_status`:
   (same loader approach as ``test_cues.py`` / ``test_contract.py``);
 * carries the four health booleans from the :class:`NodeState` verbatim;
 * folds the optional attribute fields into the open ``attributes`` sub-object
-  only when they are set (mirroring ``formats.cue_ack``'s ``snapshot_url``), so a
+  only when they are set, so a
   bare state yields an empty ``attributes`` and omits the keys entirely.
 """
 
 from __future__ import annotations
 
 import json
+from dataclasses import fields
 from pathlib import Path
 
 from jsonschema.validators import Draft202012Validator
@@ -120,18 +121,18 @@ def test_build_status_folds_optional_attributes():
         link_online=True,
         recording_ok=True,
         detector_ok=True,
-        frigate_version="0.14.1",
-        detection_fps=5.0,
-        storage_free_pct=42.5,
-        uplink_rssi_dbm=-67,
+        camera_link_state="needs_reset",
+        retry_after=1730749200.0,
+        reason="the camera needs a factory reset",
+        node_address="192.168.1.206",
     )
     msg = build_status(state, "cam-01", FakeClock())
     validate_status(msg)
     assert msg["attributes"] == {
-        "frigate_version": "0.14.1",
-        "detection_fps": 5.0,
-        "storage_free_pct": 42.5,
-        "uplink_rssi_dbm": -67,
+        "camera_link_state": "needs_reset",
+        "retry_after": 1730749200.0,
+        "reason": "the camera needs a factory reset",
+        "node_address": "192.168.1.206",
     }
 
 
@@ -141,27 +142,24 @@ def test_build_status_omits_unset_optional_attributes():
         link_online=True,
         recording_ok=True,
         detector_ok=True,
-        frigate_version="0.14.1",
+        node_address="192.168.1.206",
     )
     msg = build_status(state, "cam-01", FakeClock())
     validate_status(msg)
-    assert msg["attributes"] == {"frigate_version": "0.14.1"}
-    assert "detection_fps" not in msg["attributes"]
-    assert "storage_free_pct" not in msg["attributes"]
-    assert "uplink_rssi_dbm" not in msg["attributes"]
+    assert msg["attributes"] == {"node_address": "192.168.1.206"}
 
 
-def test_build_status_defaults_are_none():
-    state = NodeState(
-        camera_online=True,
-        link_online=True,
-        recording_ok=True,
-        detector_ok=True,
-    )
-    assert state.frigate_version is None
-    assert state.detection_fps is None
-    assert state.storage_free_pct is None
-    assert state.uplink_rssi_dbm is None
+def test_node_state_holds_only_what_a_heartbeat_reports():
+    assert {field.name for field in fields(NodeState)} == {
+        "camera_online",
+        "link_online",
+        "recording_ok",
+        "detector_ok",
+        "camera_link_state",
+        "retry_after",
+        "reason",
+        "node_address",
+    }
 
 
 def test_build_status_mints_event_id():

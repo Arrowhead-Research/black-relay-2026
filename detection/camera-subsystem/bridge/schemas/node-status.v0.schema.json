@@ -48,7 +48,7 @@
     },
     "attributes": {
       "type": "object",
-      "description": "Open sub-object (frigate_version, detection_fps, storage_free_pct, uplink_rssi_dbm, ...)."
+      "description": "Open sub-object (camera_link_state, retry_after, reason, node_address, ...)."
     }
   }
 }

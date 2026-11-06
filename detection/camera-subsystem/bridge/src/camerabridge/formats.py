@@ -184,19 +184,14 @@ def cue_ack(
     zone: str,
     matched: bool,
     object_id: Optional[str],
-    snapshot_url: Optional[str] = None,
     clock: Clock,
     event_id: Optional[str] = None,
 ) -> dict:
     """Build a ``camera.cue-ack.v0`` envelope.
 
     ``object_id`` is the matched track's id, or ``None`` when the cue had no
-    visual match. ``snapshot_url`` is folded into the open ``attributes``
-    sub-object only when provided.
+    visual match.
     """
-    attributes: dict[str, Any] = {}
-    if snapshot_url is not None:
-        attributes["snapshot_url"] = snapshot_url
     return {
         "schema": _SCHEMA_CUE_ACK,
         "event_id": _event_id(event_id),
@@ -206,7 +201,7 @@ def cue_ack(
         "zone": zone,
         "matched": matched,
         "object_id": object_id,
-        "attributes": attributes,
+        "attributes": {},
     }
 
 

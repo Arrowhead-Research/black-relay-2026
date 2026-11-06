@@ -53,7 +53,7 @@
     },
     "attributes": {
       "type": "object",
-      "description": "Open sub-object (e.g. snapshot_url)."
+      "description": "Open sub-object. Empty in v0."
     }
   }
 }

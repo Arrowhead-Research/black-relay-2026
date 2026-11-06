@@ -348,7 +348,7 @@ RF publishes a cue on a TPMS `first_heard` event to `detection/rf/cues/camera`.
   "zone": "perimeter-north",
   "matched": true,
   "object_id": "1730749200.12-abc",
-  "attributes": { "snapshot_url": null }
+  "attributes": {}
 }
 ```
 

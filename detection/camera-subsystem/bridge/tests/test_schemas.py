@@ -66,10 +66,10 @@ NODE_STATUS_SAMPLE = {
     "recording_ok": True,
     "detector_ok": True,
     "attributes": {
-        "frigate_version": None,
-        "detection_fps": None,
-        "storage_free_pct": None,
-        "uplink_rssi_dbm": None,
+        "camera_link_state": "adopted",
+        "retry_after": None,
+        "reason": None,
+        "node_address": "192.168.1.206",
     },
 }
 
@@ -82,7 +82,7 @@ CUE_ACK_SAMPLE = {
     "zone": "perimeter-north",
     "matched": True,
     "object_id": "1730749200.12-abc",
-    "attributes": {"snapshot_url": None},
+    "attributes": {},
 }
 
 CASES = [
