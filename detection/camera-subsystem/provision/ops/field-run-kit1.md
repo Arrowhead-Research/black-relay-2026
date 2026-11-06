@@ -65,7 +65,7 @@ cat > field-run.local.env <<'LOCAL'
 SITE_WIFI='<site WiFi name>'
 NODE_ID='<node id: cam- and the last 6 of the Pi serial>'
 NODE='<node address. Its DHCP lease may move it: GET /nodes has node_address>'
-SITE_SUBNET='<site LAN, such as 192.0.2.0/24>'
+SITE_SUBNET='<site LAN in CIDR form. The relay requires a private range>'
 CENTRAL='<the laptop address read below>'
 LOCAL
 ```
