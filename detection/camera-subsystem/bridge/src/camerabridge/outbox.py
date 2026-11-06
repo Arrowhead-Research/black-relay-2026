@@ -61,6 +61,18 @@ those lines, which at-least-once delivery allows and fusion dedupes by ``event_i
 An unacked line is never removed, so nothing can be lost by this. An acked line was
 never durably gone anyway: a rewrite never synced its directory. For the same reason
 emptying the file needs no sync at all.
+
+Damaged files
+-------------
+A power cut or a full disk can leave a torn last line, and a bad card can garble any
+line. Loading keeps every intact entry and never raises for what a line holds. Bad lines
+are counted and logged without their content, and moved to ``<path>.corrupt`` (0600, at
+most :data:`_CORRUPT_KEEP_BYTES`), for diagnosis. The file is repaired durably before any
+new append, because a line appended after a torn one would merge with it and be lost at
+the next load. A last line that is whole and lacks only its newline is an intact entry,
+and is kept. A repair that fails is logged, not raised, and is retried before the next
+append: the bridge must stay up, and an append that cannot repair raises as any failed
+append does.
 """
 
 from __future__ import annotations
@@ -95,6 +107,12 @@ _SEND_WINDOW = 20
 _DEAD_SHARE_DIVISOR = 8
 _DEAD_MIN_BYTES = 16 * 1024
 _DEAD_MAX_BYTES = 1024 * 1024
+
+# The most that the aside file for corrupt lines may hold. Further bad bytes are only counted.
+_CORRUPT_KEEP_BYTES = 1024 * 1024
+
+# What a topic may not hold: paho refuses these at publish, which would stop a replay for good.
+_BAD_TOPIC_CHARS = frozenset("+#\0")
 
 # A publish callback: publish(topic, payload_bytes, qos) -> broker message id, or None
 # if the client did not accept the message (the entry stays unsent).
@@ -153,6 +171,9 @@ class Outbox:
         self._live_bytes = 0
         # What the file still holds for entries no longer in the index.
         self._dead_bytes = 0
+        # A repair still owed to the file's tail, retried before the next append.
+        self._truncate_to: int | None = None
+        self._missing_newline = False
         self._load()
 
     # --- construction / reconstruction --------------------------------------
@@ -160,35 +181,119 @@ class Outbox:
     def _load(self) -> None:
         """Rebuild the in-memory index from the file, in on-disk (FIFO) order.
 
-        Pure reconstruction: no overflow pruning here (overflow is enforced at
-        enqueue). Blank or malformed lines are skipped so a partially written
-        tail from a crash does not poison the whole queue.
+        No overflow pruning here (overflow is enforced at enqueue). Anything but an intact
+        entry is set aside and the file repaired. See "Damaged files" in the module docstring.
         """
         if not self._path.exists():
             return
         max_seen = 0
-        with self._path.open(encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
+        complete_end = 0  # where the last newline-terminated line ends
+        corrupt: list[bytes] = []
+        corrupt_lines = 0
+        corrupt_bytes = 0
+        corrupt_complete = False
+        torn = False
+        unterminated = False
+        with self._path.open("rb") as handle:
+            for raw in handle:
+                complete = raw.endswith(b"\n")
+                if complete:
+                    complete_end += len(raw)
+                    if not raw.strip():
+                        continue
+                entry = self._parse(raw)
+                if entry is None:
+                    corrupt_lines += 1
+                    corrupt_bytes += len(raw)
+                    if corrupt_bytes <= _CORRUPT_KEEP_BYTES:
+                        corrupt.append(raw if complete else raw + b"\n")
+                    corrupt_complete = corrupt_complete or complete
+                    torn = torn or not complete
                     continue
-                try:
-                    record = json.loads(line)
-                    entry = _Entry(
-                        mid=int(record["mid"]),
-                        topic=record["topic"],
-                        qos=int(record["qos"]),
-                        ts=float(record["ts"]),
-                        payload=record["bytes"].encode("utf-8"),
-                    )
-                except (ValueError, KeyError, TypeError, AttributeError):
-                    continue
+                unterminated = not complete
                 self._forget_size(self._entries.get(entry.mid))
                 entry.size = len(self._line(entry))
                 self._live_bytes += entry.size
                 self._entries[entry.mid] = entry
                 max_seen = max(max_seen, entry.mid)
         self._next_mid = max_seen + 1
+        if corrupt_lines:
+            logger.warning(
+                "outbox: %d corrupt line%s (%d bytes) in %s; kept %d intact entries",
+                corrupt_lines,
+                "" if corrupt_lines == 1 else "s",
+                corrupt_bytes,
+                self._path,
+                len(self._entries),
+            )
+            self._move_aside(corrupt)
+        self._repair(complete_end, torn, unterminated, corrupt_complete)
+
+    @staticmethod
+    def _parse(raw: bytes) -> _Entry | None:
+        """One file line as an entry, or None if it is not one that could ever be sent."""
+        try:
+            record = json.loads(raw.decode("utf-8"))
+            topic = record["topic"]
+            qos = int(record["qos"])
+            if not isinstance(topic, str) or not topic or _BAD_TOPIC_CHARS & set(topic):
+                return None
+            if qos != _DURABLE_QOS:
+                return None
+            topic.encode("utf-8")
+            return _Entry(
+                mid=int(record["mid"]),
+                topic=topic,
+                qos=qos,
+                ts=float(record["ts"]),
+                payload=record["bytes"].encode("utf-8"),
+            )
+        except (ValueError, KeyError, TypeError, AttributeError, OverflowError, RecursionError):
+            return None
+
+    def _move_aside(self, corrupt: list[bytes]) -> None:
+        """Keep corrupt lines for diagnosis, up to the cap. Failing here costs only that."""
+        aside = self._path.with_name(self._path.name + ".corrupt")
+        try:
+            fd = os.open(aside, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            with os.fdopen(fd, "ab") as handle:
+                room = _CORRUPT_KEEP_BYTES - handle.tell()
+                data = b"".join(corrupt)
+                if room > 0:
+                    handle.write(data[:room])
+                    handle.flush()
+                    os.fsync(handle.fileno())
+        except OSError as exc:
+            logger.warning("outbox: could not move corrupt lines to %s: %s", aside, exc.strerror)
+
+    def _repair(self, complete_end: int, torn: bool, unterminated: bool, corrupt: bool) -> None:
+        """Make the file safe to append to. On failure the tail's repair stays owed."""
+        self._truncate_to = complete_end if torn else None
+        self._missing_newline = unterminated and not torn
+        try:
+            self._settle_tail()
+            if self._missing_newline:
+                with self._path.open("ab") as handle:
+                    handle.write(b"\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                self._missing_newline = False
+            if corrupt and self._entries:
+                self._rewrite()
+            elif corrupt:
+                self._truncate_to = 0
+                self._settle_tail()
+        except OSError as exc:
+            logger.error("outbox: repairing %s failed, will retry: %s", self._path, exc.strerror)
+
+    def _settle_tail(self) -> None:
+        """Do any truncation still owed to the file, durably."""
+        if self._truncate_to is None:
+            return
+        with self._path.open("r+b") as handle:
+            handle.truncate(self._truncate_to)
+            os.fsync(handle.fileno())
+        self._truncate_to = None
 
     # --- enqueue ------------------------------------------------------------
 
@@ -388,29 +493,44 @@ class Outbox:
             self._rewrite()
 
     def _append(self, entries: list[_Entry]) -> None:
-        """Append entries' lines to the file and fsync once (durable before send)."""
+        """Append entries' lines to the file and fsync once (durable before send).
+
+        A failure partway leaves a torn tail, which is cut off before the next append.
+        """
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self._path.open("a", encoding="utf-8") as handle:
-            handle.write("".join(self._line(entry) for entry in entries))
-            handle.flush()
-            os.fsync(handle.fileno())
+        self._settle_tail()
+        data = "".join(self._line(entry) for entry in entries).encode("ascii")
+        if self._missing_newline:
+            data = b"\n" + data
+        start = None
+        try:
+            with self._path.open("ab") as handle:
+                start = handle.tell()
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError:
+            self._truncate_to = start
+            raise
+        self._missing_newline = False
 
     def _rewrite(self) -> None:
         """Atomically rewrite the file from the index (used by ack/overflow).
 
-        Writes a temp file, fsyncs it, then ``os.replace`` swaps it in so a crash
-        never leaves a half-written queue. An empty queue just truncates: this is the
-        usual case, once per message, and a crash can bring back only acked lines.
+        Writes a temp file, fsyncs it, then ``os.replace`` swaps it in, so a crash never leaves a half-written queue. An empty queue just truncates:
+        this is the usual case, once per message, and a crash can bring back only acked lines.
         """
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._dead_bytes = 0
         if not self._entries:
             self._path.open("w").close()
-            return
-        tmp = self._path.with_name(self._path.name + ".tmp")
-        with tmp.open("w", encoding="utf-8") as handle:
-            for entry in self._entries.values():
-                handle.write(self._line(entry))
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, self._path)
+        else:
+            tmp = self._path.with_name(self._path.name + ".tmp")
+            with tmp.open("wb") as handle:
+                for entry in self._entries.values():
+                    handle.write(self._line(entry).encode("ascii"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self._path)
+        self._dead_bytes = 0
+        self._truncate_to = None
+        self._missing_newline = False

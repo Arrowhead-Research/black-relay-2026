@@ -32,7 +32,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import stat
 from pathlib import Path
+
+import pytest
 
 from camerabridge import formats
 from camerabridge import outbox as outbox_module
@@ -711,3 +714,342 @@ def test_ack_many_with_only_unknown_mids_does_not_rewrite(tmp_path, monkeypatch)
     box.ack_many([999_999, 888_888])
     box.ack_many([])
     assert calls == []
+
+
+# --- torn tails and corrupt lines -------------------------------------------
+
+
+def _pending_ids(box: Outbox) -> list[str]:
+    return [json.loads(entry.payload)["event_id"] for entry in box._entries.values()]
+
+
+def _outbox_at(path: Path) -> Outbox:
+    return Outbox(str(path), max_bytes=64_000_000, max_age_s=1e9)
+
+
+def _seed(path: Path, count: int) -> list[str]:
+    box = _outbox_at(path)
+    ids = []
+    for i in range(count):
+        message = make_detection("object_start", i)
+        box.enqueue(formats.TOPIC_DETECTIONS, message, durable=True)
+        ids.append(message["event_id"])
+    return ids
+
+
+def _intact_ids(data: bytes, ids: list[str]) -> list[str]:
+    """The ids whose whole JSON line, newline aside, lies inside ``data``."""
+    complete, _, tail = data.rpartition(b"\n")
+    whole_lines = len(complete.splitlines()) if complete else 0
+    try:
+        json.loads(tail)
+    except ValueError:
+        return ids[:whole_lines]
+    return ids[: whole_lines + 1]
+
+
+def _enqueue_new(box: Outbox, i: int) -> str:
+    message = make_detection("object_end", i)
+    box.enqueue(formats.TOPIC_DETECTIONS, message, durable=True)
+    return message["event_id"]
+
+
+def test_no_cut_point_can_lose_an_intact_entry_across_two_crashes(tmp_path, monkeypatch):
+    """Every byte cut of an append, then a crash, then every byte cut of the next one.
+
+    The first crash leaves ``base[:cut]``. The node restarts and durably appends a new
+    entry, and a second crash tears the append after it at every byte. After each
+    restart every entry that was intact must still be there, in order. Short entries
+    keep the number of pairs testable. fsync is a no-op here only for speed: the next
+    test keeps it real, and another checks that a repair syncs.
+    """
+
+    def short_ids(box: Outbox) -> list[str]:
+        return [json.loads(entry.payload)["id"] for entry in box._entries.values()]
+
+    def put(box: Outbox, event_id: str) -> None:
+        box.enqueue("t", {"id": event_id}, durable=True)
+
+    monkeypatch.setattr(outbox_module.os, "fsync", lambda fd: None)
+    logging.disable(logging.CRITICAL)
+    try:
+        path = tmp_path / "cut.jsonl"
+        seed = _outbox_at(path)
+        put(seed, "a")
+        put(seed, "b")
+        base = path.read_bytes()
+
+        template = tmp_path / "template.jsonl"
+        template_box = _outbox_at(template)
+        template_box._next_mid = 1000  # the id it would have had, clear of the others'
+        put(template_box, "second")
+        second_line = template.read_bytes()
+
+        lost = []
+        checked = 0
+        for cut in range(len(base) + 1):
+            intact = _intact_ids(base[:cut], ["a", "b"])
+
+            path.write_bytes(base[:cut])
+            put(_outbox_at(path), "first")
+            after_first = path.read_bytes()
+
+            for second_cut in range(len(second_line) + 1):
+                torn_second = second_line[:second_cut]
+                path.write_bytes(after_first + torn_second)
+                box = _outbox_at(path)
+                survivors = [*intact, "first"]
+                if second_cut >= len(second_line) - 1:  # whole, with or without its newline
+                    survivors.append("second")
+                checked += 1
+                if short_ids(box) != survivors:
+                    lost.append((cut, second_cut))
+                    continue
+                put(box, "third")
+                if short_ids(_outbox_at(path)) != [*survivors, "third"]:
+                    lost.append((cut, second_cut))
+    finally:
+        logging.disable(logging.NOTSET)
+    assert checked == (len(base) + 1) * (len(second_line) + 1)
+    assert not lost, f"{len(lost)} of {checked} cut pairs lost an intact entry: {lost[:5]}"
+
+
+def test_every_single_cut_with_real_fsyncs_loses_nothing_after_a_second_crash(tmp_path):
+    path = tmp_path / "cut.jsonl"
+    ids = _seed(path, 3)
+    base = path.read_bytes()
+    lost = []
+    for cut in range(len(base) + 1):
+        path.write_bytes(base[:cut])
+        new_id = _enqueue_new(_outbox_at(path), 1)
+        expected = _intact_ids(base[:cut], ids) + [new_id]
+        if _pending_ids(_outbox_at(path)) != expected:
+            lost.append(cut)
+    assert not lost, f"{len(lost)} of {len(base) + 1} cuts lost the next entry: {lost[:5]}"
+
+
+def test_a_torn_tail_is_gone_from_the_file_durably_before_the_constructor_returns(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "torn.jsonl"
+    _seed(path, 2)
+    whole = path.read_bytes()
+    first_line_end = whole.index(b"\n") + 1
+    path.write_bytes(whole[:-5])
+
+    seen_at_fsync = []
+    real_fsync = os.fsync
+
+    def recording_fsync(fd):
+        seen_at_fsync.append(os.fstat(fd).st_size)
+        real_fsync(fd)
+
+    monkeypatch.setattr(outbox_module.os, "fsync", recording_fsync)
+    _outbox_at(path)
+    assert path.read_bytes() == whole[:first_line_end]
+    assert first_line_end in seen_at_fsync, "the truncation was not fsynced"
+
+
+def test_a_complete_entry_missing_only_its_newline_is_kept_and_terminated(tmp_path):
+    path = tmp_path / "newline.jsonl"
+    ids = _seed(path, 2)
+    whole = path.read_bytes()
+    path.write_bytes(whole[:-1])
+    box = _outbox_at(path)
+    assert _pending_ids(box) == ids
+    assert path.read_bytes() == whole
+    assert not path.with_name(path.name + ".corrupt").exists()
+
+
+def test_a_nul_filled_tail_does_not_swallow_the_next_entry(tmp_path):
+    path = tmp_path / "nul.jsonl"
+    ids = _seed(path, 2)
+    path.write_bytes(path.read_bytes() + b"\0" * 4096)
+    new_id = _enqueue_new(_outbox_at(path), 1)
+    assert _pending_ids(_outbox_at(path)) == ids + [new_id]
+
+
+def test_acked_lines_the_file_still_holds_behave_as_before_with_a_torn_tail(tmp_path):
+    """Compaction may keep acked lines. A repair must neither drop nor reorder them."""
+    path, box = _big_box(tmp_path, 2000)
+    publish = RecordingPublish()
+    box.replay(publish)
+    box.ack_many(list(box._inflight))
+    assert box._dead_bytes > 0
+    kept = path.read_bytes()
+
+    path.write_bytes(kept + b'{"mid":99999,"topic":"det')
+    reopened = _outbox_at(path)
+    assert path.read_bytes() == kept
+    assert len(reopened._entries) == 2000  # the acked lines replay, as after any crash
+
+
+def test_a_clean_file_is_not_touched_on_load(tmp_path, monkeypatch):
+    path = tmp_path / "clean.jsonl"
+    ids = _seed(path, 3)
+    before = path.stat()
+    fsyncs = []
+    monkeypatch.setattr(outbox_module.os, "fsync", fsyncs.append)
+    box = _outbox_at(path)
+    assert _pending_ids(box) == ids
+    assert fsyncs == []
+    assert path.stat().st_mtime_ns == before.st_mtime_ns
+    assert not path.with_name(path.name + ".corrupt").exists()
+
+
+def test_a_failed_repair_does_not_stop_the_bridge_and_is_retried_before_the_next_append(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "retry.jsonl"
+    ids = _seed(path, 2)
+    path.write_bytes(path.read_bytes() + b'{"mid":3,"top')
+
+    real_fsync = os.fsync
+    failing = [True]
+
+    def flaky_fsync(fd):
+        if failing[0]:
+            raise OSError(5, "Input/output error")
+        real_fsync(fd)
+
+    monkeypatch.setattr(outbox_module.os, "fsync", flaky_fsync)
+    box = _outbox_at(path)
+    assert _pending_ids(box) == ids
+
+    failing[0] = False
+    new_id = _enqueue_new(box, 1)
+    assert _pending_ids(_outbox_at(path)) == ids + [new_id]
+
+
+def test_an_append_that_fails_partway_cannot_merge_with_the_next_one(tmp_path, monkeypatch):
+    """A full disk tears an append in a running bridge as well as across a restart."""
+    path = tmp_path / "enospc.jsonl"
+    ids = _seed(path, 1)
+    box = _outbox_at(path)
+    real_fsync = os.fsync
+    failing = [True]
+
+    def flaky_fsync(fd):
+        if failing[0]:
+            raise OSError(28, "No space left on device")
+        real_fsync(fd)
+
+    monkeypatch.setattr(outbox_module.os, "fsync", flaky_fsync)
+    try:
+        _enqueue_new(box, 1)
+    except OSError:
+        pass
+    else:
+        raise AssertionError("the append should have failed")
+    failing[0] = False
+    after = _enqueue_new(box, 2)
+
+    reloaded = _pending_ids(_outbox_at(path))
+    assert reloaded[0] == ids[0]
+    assert reloaded[-1] == after
+
+
+def _bad_bytes_at(where: str, lines: list[bytes], bad: bytes) -> bytes:
+    if where == "start":
+        return bad + b"\n" + b"".join(lines)
+    if where == "middle":
+        return lines[0] + bad + b"\n" + b"".join(lines[1:])
+    if where == "end":
+        return b"".join(lines) + bad + b"\n"
+    return b"".join(lines) + bad  # torn: the bad bytes have no newline
+
+
+@pytest.mark.parametrize("where", ["start", "middle", "end", "torn"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        b"\xff\xfe\x80garbage",
+        b"\x80",
+        b'{"mid":7,"topic":"t\xff","qos":1,"ts":1.0,"bytes":"{}"}',
+        b"not json",
+        b"null",
+        b"[1,2]",
+        b'{"mid":1e999,"topic":"t","qos":1,"ts":1.0,"bytes":"{}"}',
+        b'{"mid":7,"topic":"t","qos":1,"ts":1.0,"bytes":5}',
+        b'{"mid":7,"topic":5,"qos":1,"ts":1.0,"bytes":"{}"}',
+        b'{"mid":7,"topic":"","qos":1,"ts":1.0,"bytes":"{}"}',
+        b'{"mid":7,"topic":"a/#","qos":1,"ts":1.0,"bytes":"{}"}',
+        b'{"mid":7,"topic":"t","qos":7,"ts":1.0,"bytes":"{}"}',
+        b'{"mid":7,"topic":"t","qos":1,"ts":1.0,"bytes":"\\ud800"}',
+        b"[" * 200_000,
+        b"\0" * 64,
+    ],
+    ids=lambda value: value[:12].decode("latin-1") if isinstance(value, bytes) else value,
+)
+def test_corrupt_lines_keep_every_intact_entry_and_move_aside(tmp_path, where, bad):
+    path = tmp_path / "bad.jsonl"
+    ids = _seed(path, 3)
+    whole = path.read_bytes()
+    lines = whole.splitlines(keepends=True)
+    path.write_bytes(_bad_bytes_at(where, lines, bad))
+
+    box = _outbox_at(path)
+
+    assert _pending_ids(box) == ids
+    assert path.read_bytes() == whole
+    assert bad in path.with_name(path.name + ".corrupt").read_bytes()
+    new_id = _enqueue_new(box, 1)
+    assert _pending_ids(_outbox_at(path)) == ids + [new_id]
+
+
+def test_corrupt_lines_are_counted_in_the_log_without_their_content(tmp_path, caplog):
+    path = tmp_path / "log.jsonl"
+    ids = _seed(path, 2)
+    lines = path.read_bytes().splitlines(keepends=True)
+    secret = b"SECRET-PAYLOAD"
+    path.write_bytes(
+        b'{"mid":9,"bytes":"SECRET-PAYLOAD"\n' + lines[0] + secret + b"\xff\n" + lines[1] + secret
+    )
+    with caplog.at_level(logging.WARNING, logger="camerabridge.outbox"):
+        box = _outbox_at(path)
+    assert _pending_ids(box) == ids
+    assert "SECRET" not in caplog.text
+    assert any("3 corrupt" in record.getMessage() for record in caplog.records)
+    corrupt = path.with_name(path.name + ".corrupt")
+    assert corrupt.read_bytes().count(b"SECRET-PAYLOAD") == 3
+    assert stat.S_IMODE(corrupt.stat().st_mode) == 0o600
+
+
+def test_a_file_of_nothing_but_corruption_ends_empty_and_durable(tmp_path, monkeypatch):
+    path = tmp_path / "all-bad.jsonl"
+    path.write_bytes(b"\xff\xfe\n\x80\n")
+    synced = []
+    real_fsync = os.fsync
+
+    def recording_fsync(fd):
+        synced.append(os.fstat(fd).st_size)
+        real_fsync(fd)
+
+    monkeypatch.setattr(outbox_module.os, "fsync", recording_fsync)
+    box = _outbox_at(path)
+    assert box._entries == {}
+    assert path.read_bytes() == b""
+    assert 0 in synced
+
+
+def test_a_full_disk_while_moving_aside_still_repairs_the_outbox(tmp_path, caplog):
+    path = tmp_path / "aside.jsonl"
+    ids = _seed(path, 2)
+    whole = path.read_bytes()
+    path.write_bytes(whole + b"\xff\xfe")
+    path.with_name(path.name + ".corrupt").mkdir()  # any write to it fails
+    with caplog.at_level(logging.WARNING, logger="camerabridge.outbox"):
+        box = _outbox_at(path)
+    assert _pending_ids(box) == ids
+    assert path.read_bytes() == whole
+    assert "could not" in caplog.text
+
+
+def test_the_aside_file_is_capped(tmp_path, monkeypatch):
+    monkeypatch.setattr(outbox_module, "_CORRUPT_KEEP_BYTES", 100)
+    path = tmp_path / "cap.jsonl"
+    corrupt = path.with_name(path.name + ".corrupt")
+    for _ in range(5):
+        path.write_bytes(b"\xff" * 60 + b"\n")
+        _outbox_at(path)
+    assert corrupt.stat().st_size <= 100
