@@ -58,9 +58,9 @@ A rewrite is proportional to the backlog, and this file lives on an SD card, so 
 does not always rewrite. Past a small backlog the file may keep lines already acked,
 up to a share of its size (:data:`_DEAD_MAX_BYTES` at most). A crash then re-sends
 those lines, which at-least-once delivery allows and fusion dedupes by ``event_id``.
-An unacked line is never removed, so nothing can be lost by this. An acked line was
-never durably gone anyway: a rewrite never synced its directory. For the same reason
-emptying the file needs no sync at all.
+An unacked line is never removed, so nothing can be lost by this. A rewrite syncs its
+directory, so entries appended after it live in the file the next boot will see, on any
+filesystem. Emptying the file needs no sync: a crash can bring back only acked lines.
 
 Damaged files
 -------------
@@ -517,7 +517,8 @@ class Outbox:
     def _rewrite(self) -> None:
         """Atomically rewrite the file from the index (used by ack/overflow).
 
-        Writes a temp file, fsyncs it, then ``os.replace`` swaps it in, so a crash never leaves a half-written queue. An empty queue just truncates:
+        Writes a temp file, fsyncs it, then ``os.replace`` swaps it in and the directory is
+        fsynced, so a crash never leaves a half-written queue. An empty queue just truncates:
         this is the usual case, once per message, and a crash can bring back only acked lines.
         """
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -531,6 +532,11 @@ class Outbox:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(tmp, self._path)
+            directory = os.open(self._path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         self._dead_bytes = 0
         self._truncate_to = None
         self._missing_newline = False

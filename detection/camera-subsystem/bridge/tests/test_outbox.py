@@ -475,7 +475,7 @@ def test_a_rewrite_of_a_real_backlog_still_syncs_before_it_replaces(tmp_path, mo
         outbox_module.os, "replace", lambda a, b: (events.append("replace"), real_replace(a, b))[1]
     )
     box.ack_many(mids)
-    assert events == ["fsync", "replace"]
+    assert events == ["fsync", "replace", "fsync"]  # the file, the swap, the directory
 
 
 def test_a_large_replay_writes_a_small_multiple_of_the_backlog(tmp_path, monkeypatch):
@@ -1053,3 +1053,24 @@ def test_the_aside_file_is_capped(tmp_path, monkeypatch):
         path.write_bytes(b"\xff" * 60 + b"\n")
         _outbox_at(path)
     assert corrupt.stat().st_size <= 100
+
+
+def test_the_rename_of_a_rewrite_is_durable_before_it_returns(tmp_path, monkeypatch):
+    path = tmp_path / "rename.jsonl"
+    _seed(path, 3)
+    box = _outbox_at(path)
+    calls = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def recording_fsync(fd):
+        calls.append(("fsync-dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "fsync-file"))
+        real_fsync(fd)
+
+    def recording_replace(src, dst):
+        calls.append("replace")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(outbox_module.os, "fsync", recording_fsync)
+    monkeypatch.setattr(outbox_module.os, "replace", recording_replace)
+    box._rewrite()
+    assert calls == ["fsync-file", "replace", "fsync-dir"]
