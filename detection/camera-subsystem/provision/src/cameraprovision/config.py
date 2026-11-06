@@ -4,8 +4,7 @@
 its defaults are that file's values (a test holds them equal). It also carries the
 fields only provisioning uses: WiFi credentials, hostname, the picture flip, and the
 anonymous-broker choice. Those never reach the bridge YAML; ``_bridge_mapping`` is the
-one place that decides what does. ``mediamtx_address`` is in that file for go2rtc,
-and the bridge ignores it.
+one place that decides what does.
 
 Secrets stay out of every rendering: their fields are excluded from ``repr``, and
 ``validate`` names the offending field without quoting any value.
@@ -53,7 +52,6 @@ _WPA_PSK_RE = re.compile(r"[\x20-\x7e]{8,63}|[0-9a-fA-F]{64}")
 _SSID_FORBIDDEN_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\ud800-\udfff]")
 _SSID_MAX_BYTES = 32
 # ASCII and bounded: int() accepts other scripts' digits and raises on very long strings.
-_PORT_DIGITS_RE = re.compile(r"[0-9]{1,5}")
 # Where Tailscale numbers its nodes. Fusion traffic must stay on the site LAN (DESIGN 7.3).
 _TAILSCALE_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 _BROKER_HOST_RULE = "broker.host must be a plain hostname or IP address"
@@ -133,7 +131,6 @@ class NodeConfig:
     outbox: OutboxConfig = field(default_factory=OutboxConfig)
     cue_window_s: float = 5.0
     status_interval_s: float = 30
-    mediamtx_address: str
 
     # Provisioning only: never written to the bridge config.
     hostname: str
@@ -205,18 +202,6 @@ def _is_tailscale_address(value: Any) -> bool:
 
 def _is_port(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 65535
-
-
-def _is_host_port(value: Any) -> bool:
-    """``host:port``, with the host as :func:`_is_host` takes it, and IPv6 in brackets."""
-    if not isinstance(value, str):
-        return False
-    host, separator, port = value.rpartition(":")
-    if not separator or not _PORT_DIGITS_RE.fullmatch(port) or not _is_port(int(port)):
-        return False
-    if host.startswith("[") and host.endswith("]"):
-        return ":" in host and _is_host(host[1:-1])
-    return ":" not in host and _is_host(host)
 
 
 def _is_positive_number(value: Any) -> bool:
@@ -385,7 +370,6 @@ def validate_saved(cfg: NodeConfig) -> list[str]:
             "and must not start or end with a hyphen",
         ),
         *_wifi_checks(cfg.wifi_ssid, cfg.wifi_psk),
-        (_is_host_port(cfg.mediamtx_address), "mediamtx_address must be host:port"),
         (isinstance(cfg.camera_upside_down, bool), "camera_upside_down must be true or false"),
     ]
     return [message for ok, message in checks if not ok]
@@ -433,7 +417,6 @@ def _bridge_mapping(cfg: NodeConfig) -> dict[str, Any]:
             "mqtt_host": cfg.frigate.mqtt_host,
             "mqtt_port": cfg.frigate.mqtt_port,
         },
-        "mediamtx_address": cfg.mediamtx_address,
     }
 
 

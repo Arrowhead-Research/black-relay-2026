@@ -80,7 +80,6 @@ _FULL_ONLY_REDISPLAYED_FIELDS = (
     "broker_host",
     "broker_port",
     "broker_username",
-    "mediamtx_address",
     "ntp_server",
     "frigate_base_url",
     "covered_zones",
@@ -93,7 +92,6 @@ _FORM_LABELS = {
     "broker.password": "Broker password",
     "covered_zones": "Covered zones",
     "frigate.base_url": "Frigate address",
-    "mediamtx_address": "MediaMTX address",
     "node_id": "Node ID",
     "ntp_server": "Time server",
 }
@@ -131,7 +129,6 @@ def saved_values(cfg: NodeConfig) -> dict[str, str]:
         "broker_host": broker.host,
         "broker_port": str(broker.port),
         "broker_username": broker.username,
-        "mediamtx_address": cfg.mediamtx_address,
         "ntp_server": effective_ntp_server(cfg),
         "frigate_base_url": cfg.frigate.base_url,
         "covered_zones": ", ".join(cfg.covered_zones),
@@ -295,7 +292,6 @@ def _build_config(form: Mapping[str, str], previous_broker: str | None = None) -
         wifi_ssid=raw("wifi_ssid"),
         wifi_psk=raw("wifi_psk"),
         camera_upside_down="camera_upside_down" in form,
-        mediamtx_address=trimmed("mediamtx_address"),
         ntp_server=_ntp_server(form, previous_broker),
         covered_zones=[z.strip() for z in raw("covered_zones").split(",") if z.strip()],
         broker=BrokerConfig(

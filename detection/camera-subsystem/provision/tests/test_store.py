@@ -27,7 +27,6 @@ def config(**overrides: Any) -> NodeConfig:
         "hostname": "edge-7",
         "wifi_ssid": "Site WiFi; 2.4",
         "wifi_psk": WIFI_PSK,
-        "mediamtx_address": "10.0.0.2:8554",
         "covered_zones": ["perimeter-north", "driveway"],
         "broker": BrokerConfig(
             host="10.0.0.2", port=8883, username="camera-cam-01", password=BROKER_PASSWORD, tls=True
@@ -46,7 +45,6 @@ class SimulatedPowerCut(BaseException):
 def paths(tmp_path: Path) -> Paths:
     return Paths(
         bridge_config=tmp_path / "etc/camerabridge/bridge.yaml",
-        mediamtx_env=tmp_path / "etc/camerabridge/mediamtx.env",
         nm_connections_dir=tmp_path / "etc/NetworkManager/system-connections",
         state_dir=tmp_path / "var/lib/camera-provision",
         ntp_dropin=tmp_path / "etc/systemd/timesyncd.conf.d/black-relay.conf",
@@ -90,7 +88,7 @@ def fail_nth_replace(monkeypatch: pytest.MonkeyPatch, n: int, error: BaseExcepti
     monkeypatch.setattr(store_module.os, "replace", replace)
 
 
-COMMIT_STEPS = [1, 2, 3, 4, 5, 6]
+COMMIT_STEPS = [1, 2, 3, 4, 5]
 
 
 def test_save_writes_every_file_with_the_right_mode(store: NodeStore, paths: Paths) -> None:
@@ -99,9 +97,7 @@ def test_save_writes_every_file_with_the_right_mode(store: NodeStore, paths: Pat
     assert paths.nm_keyfile == paths.nm_connections_dir / "black-relay-uplink.nmconnection"
     for path in (paths.bridge_config, paths.nm_keyfile, paths.node_file):
         assert stat.S_IMODE(path.stat().st_mode) == 0o600, path
-    assert stat.S_IMODE(paths.mediamtx_env.stat().st_mode) == 0o644
     assert stat.S_IMODE(paths.central_hosts.stat().st_mode) == 0o644
-    assert paths.mediamtx_env.read_text() == "MEDIAMTX_ADDRESS=10.0.0.2:8554\n"
 
 
 def test_save_leaves_no_working_files(store: NodeStore, paths: Paths) -> None:
@@ -111,12 +107,31 @@ def test_save_leaves_no_working_files(store: NodeStore, paths: Paths) -> None:
     names = {Path(name).name for name in snapshot(paths)}
     assert names == {
         "bridge.yaml",
-        "mediamtx.env",
         "black-relay-uplink.nmconnection",
         "node.json",
         "central-hosts.nft",
         "black-relay.conf",
     }
+
+
+def test_a_config_saved_with_the_old_mediamtx_address_still_loads(
+    store: NodeStore, paths: Paths
+) -> None:
+    """Nothing reads the field any more. A node saved before its removal keeps working."""
+    store.save(config())
+    old = yaml.safe_load(paths.bridge_config.read_text())
+    old["mediamtx_address"] = "10.0.0.2:8554"
+    paths.bridge_config.write_text(yaml.safe_dump(old))
+    old_env = paths.bridge_config.with_name("mediamtx.env")
+    old_env.write_text("MEDIAMTX_ADDRESS=10.0.0.2:8554\n")
+
+    saved = store.load()
+
+    assert saved is not None and saved.node_id == "cam-01"
+    assert not hasattr(saved, "mediamtx_address")
+    store.save(config(hostname="resaved"))
+    assert "mediamtx_address" not in yaml.safe_load(paths.bridge_config.read_text())
+    assert old_env.exists()  # harmless, and left for step 10 of the image build
 
 
 def test_load_round_trips_everything_but_the_psk(store: NodeStore) -> None:
@@ -131,7 +146,6 @@ def test_load_round_trips_everything_but_the_psk(store: NodeStore) -> None:
     assert saved.wifi_psk == ""
     assert saved.broker == config().broker
     assert list(saved.covered_zones) == ["perimeter-north", "driveway"]
-    assert saved.mediamtx_address == "10.0.0.2:8554"
     assert saved.frigate.base_url == "http://cam-01.local:5000"
     assert saved.frigate.camera == "cam-01"
     assert saved.camera_upside_down is False
@@ -366,7 +380,7 @@ def test_power_cut_during_rollback_finishes_the_rollback_on_recovery(
         patch.setattr(store_module.os, "replace", replace)
         with pytest.raises(SimulatedPowerCut):
             # Differs in the first files committed, which the rollback restores last.
-            store.save(config(node_id="cam-02", mediamtx_address="10.0.0.9:8554"))
+            store.save(config(node_id="cam-02"))
 
     store.recover()
 
@@ -480,11 +494,7 @@ def test_save_wifi_changes_only_the_keyfile_and_the_saved_ssid(
     store: NodeStore, paths: Paths
 ) -> None:
     store.save(config(hostname="kept-name"))
-    bridge, central, mediamtx = (
-        paths.bridge_config.read_bytes(),
-        paths.central_hosts.read_bytes(),
-        paths.mediamtx_env.read_bytes(),
-    )
+    bridge, central = paths.bridge_config.read_bytes(), paths.central_hosts.read_bytes()
 
     store.save_wifi("Fixed-WiFi", "new-wifi-psk")
 
@@ -495,7 +505,6 @@ def test_save_wifi_changes_only_the_keyfile_and_the_saved_ssid(
     assert stat.S_IMODE(paths.node_file.stat().st_mode) == 0o600
     assert paths.bridge_config.read_bytes() == bridge
     assert paths.central_hosts.read_bytes() == central
-    assert paths.mediamtx_env.read_bytes() == mediamtx
     saved = store.load()
     assert saved is not None and saved.wifi_ssid == "Fixed-WiFi"
     assert "new-wifi-psk" not in paths.node_file.read_text()
@@ -601,7 +610,6 @@ def test_c1_has_config_needs_only_the_keyfile_and_a_hostname(
     assert store.load() is None
 
     paths.bridge_config.unlink()
-    paths.mediamtx_env.unlink()
     assert store.has_config() is True
 
     data = paths.nm_keyfile.read_bytes()
@@ -930,7 +938,7 @@ def test_a_failed_save_keeps_the_old_ntp_dropin(
     assert paths.ntp_dropin.read_text() == "[Time]\nNTP=old.site.local\n"
 
 
-@pytest.mark.parametrize("step", range(1, 7))
+@pytest.mark.parametrize("step", COMMIT_STEPS)
 def test_a_power_cut_during_commit_finishes_the_ntp_dropin_on_recovery(
     store: NodeStore, paths: Paths, monkeypatch: pytest.MonkeyPatch, step: int
 ) -> None:

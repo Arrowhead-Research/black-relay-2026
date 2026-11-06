@@ -64,7 +64,6 @@ REDISPLAYED_FIELDS = (
     "broker_host",
     "broker_port",
     "broker_username",
-    "mediamtx_address",
     "ntp_server",
     "frigate_base_url",
     "covered_zones",
@@ -90,7 +89,6 @@ def valid_form(**overrides: str) -> dict[str, str]:
         "broker_port": "1883",
         "broker_username": "camera-cam-01",
         "broker_password": BROKER_PASSWORD,
-        "mediamtx_address": "10.0.0.2:8554",
         "frigate_base_url": "http://cam-01.local:5000",
         "covered_zones": "perimeter-north, driveway",
     }
@@ -319,7 +317,6 @@ def test_valid_form_applies_the_parsed_config_once() -> None:
             hostname="edge-7",
             wifi_ssid="Site-WiFi",
             wifi_psk=WIFI_PSK,
-            mediamtx_address="10.0.0.2:8554",
             ntp_server="10.0.0.2",
             covered_zones=["perimeter-north", "driveway"],
             broker=BrokerConfig(
@@ -393,7 +390,6 @@ def test_phone_keyboard_spaces_are_trimmed_from_endpoints() -> None:
     form = valid_form(
         broker_host=" 10.0.0.2 ",
         broker_username="camera-cam-01 ",
-        mediamtx_address="10.0.0.2:8554 ",
         frigate_base_url="http://cam-01.local:5000 ",
     )
 
@@ -402,7 +398,6 @@ def test_phone_keyboard_spaces_are_trimmed_from_endpoints() -> None:
     cfg = apply.call_args.args[0]
     assert cfg.broker.host == "10.0.0.2"
     assert cfg.broker.username == "camera-cam-01"
-    assert cfg.mediamtx_address == "10.0.0.2:8554"
     assert cfg.frigate.base_url == "http://cam-01.local:5000"
 
 
@@ -470,7 +465,6 @@ def test_portal_only_fields_stay_out_of_the_bridge_yaml(tmp_path: Path) -> None:
         ("broker.port", valid_form(broker_port=" 1883")),
         ("broker.port", valid_form(broker_port="١٨٨٣")),
         ("broker.port", valid_form(broker_port="9" * 5000)),  # int() raises past 4300 digits
-        ("mediamtx_address", form_without("mediamtx_address")),
         ("frigate.base_url", form_without("frigate_base_url")),
         ("frigate.base_url", valid_form(frigate_base_url="cam-01.local:5000")),
         ("covered_zones", form_without("covered_zones")),
@@ -625,7 +619,6 @@ def test_wifi_change_merges_into_a_saved_config_by_field_name() -> None:
         hostname="edge-7",
         wifi_ssid="Old-WiFi",
         wifi_psk="old-password",
-        mediamtx_address="10.0.0.2:8554",
         covered_zones=["driveway"],
         broker=BrokerConfig(host="10.0.0.2", username="cam", password=BROKER_PASSWORD),
         frigate=FrigateConfig(base_url="http://cam-01.local:5000"),
@@ -1515,7 +1508,6 @@ def saved_config(**overrides: Any) -> NodeConfig:
         "hostname": "edge-7",
         "wifi_ssid": "Site-WiFi",
         "wifi_psk": WIFI_PSK,
-        "mediamtx_address": "10.0.0.2:8554",
         "covered_zones": ["perimeter-north", "driveway"],
         "broker": BrokerConfig(
             host="10.0.0.2", port=8883, username="camera-cam-07", password=BROKER_PASSWORD, tls=True
@@ -1573,7 +1565,6 @@ def test_m5_saved_values_fill_every_non_secret_field() -> None:
     assert controls["broker_host"]["value"] == "10.0.0.2"
     assert controls["broker_port"]["value"] == "8883"
     assert controls["broker_username"]["value"] == "camera-cam-07"
-    assert controls["mediamtx_address"]["value"] == "10.0.0.2:8554"
     assert "checked" in controls["broker_tls"]
     assert "checked" not in controls["broker_anonymous"]
 
@@ -1850,3 +1841,10 @@ def test_a_wifi_repair_page_makes_no_such_claim() -> None:
 
     assert "Settings saved" in page
     assert "only from" not in page
+
+
+def test_the_form_has_no_mediamtx_field_and_an_old_page_can_still_submit() -> None:
+    assert "mediamtx" not in render_form([]).lower()
+    apply = Mock()
+    assert handle_submit(valid_form(mediamtx_address="10.0.0.2:8554"), apply=apply).ok
+    assert not hasattr(apply.call_args.args[0], "mediamtx_address")

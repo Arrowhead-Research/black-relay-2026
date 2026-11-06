@@ -83,11 +83,11 @@ roles, told apart by address: anything from `10.42.0.0/24` or to `10.42.0.1` is 
 | `wlan0`, AP client | Portal (TCP 80), DNS (TCP/UDP 53), and DHCP (UDP 67), to `10.42.0.1` only |
 | `wlan0`, the central node (`ip saddr @central_hosts`) | SSH (22), Frigate (8971), go2rtc RTSP (8554) |
 | `wlan0`, site LAN | DHCP replies, mDNS (so `<host>.local` in `snapshot_url` resolves), ping, IPv6 neighbor discovery. Link-local IPv6 cannot reach SSH, Frigate or RTSP, and only addresses held on `wlan0` itself are reachable |
-| `eth0` | Nothing |
+| `eth0` | DHCP requests from the camera (UDP 67), and nothing else |
 | Forwarding | Nothing. Explicit drops to and from `eth0`, and a default drop for everything else |
 
-- **Camera link:** the camera is statically addressed (DESIGN 11), so `eth0` needs no DHCP. The node
-  opens RTSP to the camera, so the reply is accepted. RTSP must use TCP: UDP RTP from the camera
+- **Camera link:** the node serves the camera one DHCP address on `eth0` (DESIGN 4.1), which is the one thing
+  `eth0` may start. The node opens RTSP to the camera, so the reply is accepted. RTSP must use TCP: UDP RTP from the camera
   starts a new flow and is dropped.
 - **Only the central node reaches the node (owner decision, DESIGN 4.2).** `central_hosts` is declared in
   `black-relay.nft` and holds one address, the broker's, added by `/etc/black-relay/central-hosts.nft`
@@ -209,8 +209,7 @@ central outage, if the server is the default. Until `timedatectl show -p NTPSync
    log after a restart finishes inside its 20 s timeout. `cameralink/ops/daemon.json` is the file.
 4. `eth0` has a static NetworkManager profile with `ipv4.method=manual`, `ipv4.never-default=yes`,
    `ipv6.method=disabled`, never `shared`. Delete the automatic `Wired connection 1` profile.
-5. go2rtc reads `MEDIAMTX_ADDRESS` from `EnvironmentFile=/etc/camerabridge/mediamtx.env`, never
-   `bridge.yaml`.
+5. Central pulls live view from go2rtc on the node (DESIGN 4.1), so the node holds no address for MediaMTX.
 6. Opening another port from outside the node means editing `black-relay.nft`.
 7. The Frigate container is not privileged, and gets only the devices it needs.
 8. The unit that starts Frigate has `Requires=nftables.service` and `After=nftables.service`, so
@@ -369,7 +368,7 @@ old build, so it starts from [`field-run-kit1.md`](field-run-kit1.md) instead, a
     sudo rm -f /etc/NetworkManager/system-connections/black-relay-uplink.nmconnection \
       /etc/NetworkManager/system-connections/black-relay-setup-ap.nmconnection \
       /etc/systemd/timesyncd.conf.d/black-relay.conf
-    # The kit's bridge.yaml, mediamtx.env and frigate.env, its provisioning state and its outbox.
+    # The kit's bridge.yaml and frigate.env, its provisioning state and its outbox.
     sudo rm -rf /var/lib/camera-provision /var/lib/camerabridge /etc/camerabridge
     # The camera's password, link.json, the proxy secret and the camera leases.
     sudo rm -rf /var/lib/camera-link
@@ -746,7 +745,7 @@ sudo reboot
 
 Expect: the phone shows the saved page before the AP drops; `ap_up + config_received -> joining`,
 then `portal closed`, then `joining + uplink_up -> provisioned`. `bridge.yaml` is 0600 and owned
-by `camerabridge`, `mediamtx.env` is 0644, the keyfile is 0600, the bridge is `active`, and both
+by `camerabridge`, the keyfile is 0600, the bridge is `active`, and both
 `NRestarts` values are `0`, since this counts only automatic restarts: an `active` unit may be crash
 looping. The heartbeat arrives under the typed credentials. After the reboot: `joining` then
 `provisioned`, with no `ap_up`, no setup SSID visible at any point (watch from a phone during boot),
@@ -773,7 +772,7 @@ sudo ls -la /etc/camerabridge /var/lib/camera-provision /etc/NetworkManager/syst
 ```bash
 # On the laptop. Each must end in HTTP 400, with an errors block naming the field:
 post() { curl -s -w '\nHTTP %{http_code}\n' -d "$1" http://10.42.0.1/; }
-GOOD='wifi_psk=password123&node_id=cam-01&hostname=cam-01&covered_zones=driveway&frigate_base_url=https://cam-01.local:8971&broker_host=10.0.0.2&broker_port=1883&broker_username=u&broker_password=p&mediamtx_address=10.0.0.2:8554'
+GOOD='wifi_psk=password123&node_id=cam-01&hostname=cam-01&covered_zones=driveway&frigate_base_url=https://cam-01.local:8971&broker_host=10.0.0.2&broker_port=1883&broker_username=u&broker_password=p'
 post "$GOOD"                                                   # missing SSID
 post "wifi_ssid=site&${GOOD/broker_host=10.0.0.2/broker_host=broker.lan}"
 post "wifi_ssid=site&${GOOD/node_id=cam-01/node_id=-bad}"
@@ -912,8 +911,8 @@ journalctl -b -u camera-provision --no-pager -g ' -> |portal'
 ```
 
 Expect, for step 3: `boot -> joining`, `joining + reprovision_button -> ap_up`, and
-`portal listening in full mode`. The form shows the saved WiFi name, node, zone, Frigate, broker, and
-MediaMTX values, and the upside-down box as it was saved. Every password field is blank, and submitting
+`portal listening in full mode`. The form shows the saved WiFi name, node, zone, Frigate and broker
+values, and the upside-down box as it was saved. Every password field is blank, and submitting
 those blank is refused. Submit a changed `broker_host`: the node joins, and
 `systemctl show -p ActiveEnterTimestamp camerabridge` shows the bridge restarted. Then repeat
 step 3 and submit nothing: after 300 s the node rejoins by itself with its old config.

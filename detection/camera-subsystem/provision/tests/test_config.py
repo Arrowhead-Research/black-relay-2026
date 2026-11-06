@@ -42,7 +42,6 @@ SECRETS = (BROKER_PASSWORD, WIFI_PSK)
 # Distinct from every bridge value, so a raw-text search can only match a leak.
 HOSTNAME = "edge-host-7"
 WIFI_SSID = "Site-WiFi-XYZ"
-MEDIAMTX_ADDRESS = "10.9.9.9:8554"
 PROVISION_ONLY_KEYS = (
     "hostname",
     "camera_upside_down",
@@ -58,7 +57,6 @@ def make_config(**overrides: Any) -> NodeConfig:
         "hostname": HOSTNAME,
         "wifi_ssid": WIFI_SSID,
         "wifi_psk": WIFI_PSK,
-        "mediamtx_address": MEDIAMTX_ADDRESS,
         "covered_zones": ["perimeter-north", "driveway"],
         "broker": BrokerConfig(host="10.0.0.2", username="camera-cam-01", password=BROKER_PASSWORD),
         "frigate": FrigateConfig(base_url="http://cam-01.local:5000"),
@@ -202,24 +200,6 @@ def test_the_bridge_config_is_not_written_for_a_node_id_the_relay_refuses(
         ("status_interval_s", {"status_interval_s": float("nan")}),
         ("status_interval_s", {"status_interval_s": float("inf")}),
         ("cue_window_s", {"cue_window_s": "5"}),
-        ("mediamtx_address", {"mediamtx_address": ""}),
-        ("mediamtx_address", {"mediamtx_address": " 10.0.0.2:8554"}),
-        ("mediamtx_address", {"mediamtx_address": "10.0.0.2:8554\n"}),
-        ("mediamtx_address", {"mediamtx_address": "10.0.0.2"}),
-        ("mediamtx_address", {"mediamtx_address": "relay.site.local"}),
-        ("mediamtx_address", {"mediamtx_address": ":8554"}),
-        ("mediamtx_address", {"mediamtx_address": "10.0.0.2:"}),
-        ("mediamtx_address", {"mediamtx_address": "10.0.0.2:abc"}),
-        ("mediamtx_address", {"mediamtx_address": "10.0.0.2:0"}),
-        ("mediamtx_address", {"mediamtx_address": "10.0.0.2:65536"}),
-        ("mediamtx_address", {"mediamtx_address": "10.0.0.2:٨٥٥٤"}),
-        ("mediamtx_address", {"mediamtx_address": "10.0.0.2:" + "9" * 5000}),
-        ("mediamtx_address", {"mediamtx_address": "rtsp://10.0.0.2:8554"}),
-        ("mediamtx_address", {"mediamtx_address": "10.0.0.2:8554/stream"}),
-        ("mediamtx_address", {"mediamtx_address": "bad host:8554"}),
-        ("mediamtx_address", {"mediamtx_address": "::1:8554"}),  # IPv6 needs brackets
-        ("mediamtx_address", {"mediamtx_address": "[relay.local]:8554"}),
-        ("mediamtx_address", {"mediamtx_address": None}),
         ("covered_zones", {"covered_zones": []}),
         ("covered_zones", {"covered_zones": [""]}),
         ("covered_zones", {"covered_zones": ["driveway", "  "]}),
@@ -272,14 +252,6 @@ def test_bad_field_is_rejected_by_name(field: str, overrides: dict) -> None:
 )
 def test_boundary_values_are_accepted(overrides: dict) -> None:
     assert validate(make_config(**overrides)) == []
-
-
-@pytest.mark.parametrize(
-    "address",
-    ["10.0.0.2:8554", "relay.site.local:8554", "relay:1", "relay:65535", "[fd7a::1]:8554"],
-)
-def test_mediamtx_host_port_forms_are_accepted(address: str) -> None:
-    assert validate(make_config(mediamtx_address=address)) == []
 
 
 @pytest.mark.parametrize(
@@ -428,7 +400,6 @@ def test_every_key_writes_its_own_value(tmp_path: Path) -> None:
             mqtt_host="192.168.77.1",
             mqtt_port=11883,
         ),
-        mediamtx_address="relay.site.local:8554",
     )
 
     assert yaml.safe_load(written(tmp_path, cfg).read_text(encoding="utf-8")) == {
@@ -451,17 +422,13 @@ def test_every_key_writes_its_own_value(tmp_path: Path) -> None:
             "mqtt_host": "192.168.77.1",
             "mqtt_port": 11883,
         },
-        "mediamtx_address": "relay.site.local:8554",
     }
 
 
-def test_mediamtx_address_is_in_the_file_and_the_bridge_still_loads(tmp_path: Path) -> None:
-    """go2rtc reads it from this file; the bridge reads named keys and ignores it."""
+def test_the_bridge_loads_what_is_written(tmp_path: Path) -> None:
     cfg = make_config(outbox=outbox(path=str(tmp_path / "outbox.jsonl")))
     loaded = bridge_cli.load_config(str(written(tmp_path, cfg)))
 
-    assert loaded["mediamtx_address"] == MEDIAMTX_ADDRESS
-    assert example()["mediamtx_address"]
     assert isinstance(
         bridge_cli.make_bridge(loaded, central_client=Mock(), local_client=Mock()), Bridge
     )
@@ -746,7 +713,7 @@ def test_ntp_server_never_reaches_the_bridge_config(tmp_path: Path) -> None:
 
     write_bridge_config(make_config(ntp_server="time.site.local"), path)
 
-    assert "ntp" not in path.read_text().lower().replace("mediamtx", "")
+    assert "ntp" not in path.read_text().lower()
     assert "time.site.local" not in path.read_text()
 
 
@@ -755,10 +722,9 @@ def test_ntp_server_never_reaches_the_bridge_config(tmp_path: Path) -> None:
     ["fe80::1%x\nFallbackNTP=evil.example", "fe80::1%x", "fe80::1%eth0"],
 )
 def test_scoped_ipv6_is_not_a_plain_host(value: str) -> None:
-    from cameraprovision.config import _is_host, _is_host_port
+    from cameraprovision.config import _is_host
 
     assert not _is_host(value)
-    assert not _is_host_port(f"[{value}]:8554")
 
 
 # --- central-only access: the broker address is what the firewall admits -----------

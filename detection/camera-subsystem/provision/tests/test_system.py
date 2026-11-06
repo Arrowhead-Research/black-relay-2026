@@ -450,7 +450,6 @@ def test_real_system_drives_the_daemon_through_recorded_output(
     boot_id.write_text("boot-1\n")
     paths = Paths(
         bridge_config=tmp_path / "etc/camerabridge/bridge.yaml",
-        mediamtx_env=tmp_path / "etc/camerabridge/mediamtx.env",
         nm_connections_dir=tmp_path / "etc/NetworkManager/system-connections",
         state_dir=tmp_path / "var/lib/camera-provision",
         ntp_dropin=tmp_path / "etc/systemd/timesyncd.conf.d/black-relay.conf",

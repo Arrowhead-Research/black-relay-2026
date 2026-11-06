@@ -88,7 +88,6 @@ def test_a_node_id_the_portal_saves_renders(node_id):
         hostname="edge-7",
         wifi_ssid="Site-WiFi",
         wifi_psk="wifi-password",
-        mediamtx_address="10.0.0.2:8554",
         covered_zones=["driveway"],
         broker=BrokerConfig(host="10.0.0.2", username="kit1", password="pw"),
         frigate=FrigateConfig(base_url="https://cam-01.local:8971"),
@@ -116,7 +115,6 @@ def test_a_config_the_portal_saves_renders(tmp_path):
         wifi_ssid="Site-WiFi",
         wifi_psk="wifi-password",
         camera_upside_down=True,
-        mediamtx_address="10.0.0.2:8554",
         covered_zones=["perimeter-north", "driveway"],
         broker=BrokerConfig(host="10.0.0.2", username="camera-cam-01", password="p@ss:#{}"),
         frigate=FrigateConfig(base_url="https://cam-01.local:8971"),
@@ -130,7 +128,6 @@ def test_a_config_the_portal_saves_renders(tmp_path):
 def test_the_daemon_reads_the_flip_where_the_portal_saves_it(tmp_path):
     paths = StorePaths(
         bridge_config=tmp_path / "bridge.yaml",
-        mediamtx_env=tmp_path / "mediamtx.env",
         nm_connections_dir=tmp_path / "nm",
         state_dir=tmp_path / "state",
         ntp_dropin=tmp_path / "ntp.conf",
@@ -144,7 +141,6 @@ def test_the_daemon_reads_the_flip_where_the_portal_saves_it(tmp_path):
         wifi_ssid="Site-WiFi",
         wifi_psk="wifi-password",
         camera_upside_down=True,
-        mediamtx_address="10.0.0.2:8554",
         covered_zones=["driveway"],
         broker=BrokerConfig(host="10.0.0.2", username="kit1", password="pw"),
         frigate=FrigateConfig(base_url="https://cam-01.local:8971"),

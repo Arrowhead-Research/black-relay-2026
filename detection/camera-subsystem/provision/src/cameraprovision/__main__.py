@@ -44,7 +44,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
         paths=Paths(
             bridge_config=args.bridge_config,
-            mediamtx_env=args.bridge_config.with_name(Paths.mediamtx_env.name),
             state_dir=args.state_dir,
         ),
         settings=Settings(

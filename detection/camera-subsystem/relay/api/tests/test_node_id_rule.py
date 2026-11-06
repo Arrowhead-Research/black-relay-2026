@@ -33,7 +33,6 @@ def config(node_id: Any = "cam-01", camera: str | None = None) -> NodeConfig:
         hostname="edge-7",
         wifi_ssid="Site-WiFi",
         wifi_psk="wifi-password",
-        mediamtx_address="10.0.0.2:8554",
         covered_zones=["driveway"],
         broker=BrokerConfig(host="10.0.0.2", username="kit1", password="pw"),
         frigate=FrigateConfig(base_url="https://cam-01.local:8971", camera=camera),

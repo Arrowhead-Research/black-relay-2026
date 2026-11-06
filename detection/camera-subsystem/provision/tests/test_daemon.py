@@ -58,7 +58,6 @@ def valid_form(**overrides: str) -> dict[str, str]:
         "broker_port": "1883",
         "broker_username": "camera-cam-01",
         "broker_password": BROKER_PASSWORD,
-        "mediamtx_address": "10.0.0.2:8554",
         "frigate_base_url": "http://cam-01.local:5000",
         "covered_zones": "perimeter-north, driveway",
     }
@@ -72,7 +71,6 @@ def node_config(**overrides: Any) -> NodeConfig:
         "hostname": "edge-7",
         "wifi_ssid": "Site-WiFi",
         "wifi_psk": WIFI_PSK,
-        "mediamtx_address": "10.0.0.2:8554",
         "covered_zones": ["perimeter-north"],
         "broker": BrokerConfig(host="10.0.0.2", username="camera-cam-01", password=BROKER_PASSWORD),
         "frigate": FrigateConfig(base_url="http://cam-01.local:5000"),
@@ -229,7 +227,6 @@ class Node:
         self.system = FakeSystem(self.calls)
         self.paths = Paths(
             bridge_config=root / "etc/camerabridge/bridge.yaml",
-            mediamtx_env=root / "etc/camerabridge/mediamtx.env",
             nm_connections_dir=root / "etc/NetworkManager/system-connections",
             state_dir=root / "var/lib/camera-provision",
             ntp_dropin=root / "etc/systemd/timesyncd.conf.d/black-relay.conf",
@@ -340,7 +337,6 @@ class Node:
         """Every file the store owns, to prove a failure changed nothing."""
         files = [
             self.paths.bridge_config,
-            self.paths.mediamtx_env,
             self.paths.nm_keyfile,
             self.paths.node_file,
             self.paths.central_hosts,
@@ -1263,7 +1259,7 @@ def test_secrets_stay_out_of_logs_and_of_files_that_do_not_need_them(
 
     for secret in SECRETS:
         assert secret not in caplog.text
-        for path in (node.paths.state_file, node.paths.node_file, node.paths.mediamtx_env):
+        for path in (node.paths.state_file, node.paths.node_file):
             assert secret not in path.read_text()
 
 
@@ -1313,8 +1309,6 @@ def test_end_to_end_blank_boot_to_provisioned(node: Node) -> None:
     assert f"psk={NEW_WIFI_PSK}" in node.paths.nm_keyfile.read_text()
     assert node.bridge_yaml()["broker"]["password"] == BROKER_PASSWORD
     assert bridge_cli.load_config(str(node.paths.bridge_config))["node_id"] == "cam-01"
-    assert node.paths.mediamtx_env.read_text() == "MEDIAMTX_ADDRESS=10.0.0.2:8554\n"
-    assert node.paths.mediamtx_env.stat().st_mode & 0o777 == 0o644
     assert node.paths.bridge_config.stat().st_mode & 0o777 == 0o600
 
     # Daemon restart, then a reboot with the router down: it rejoins alone.
@@ -2121,7 +2115,6 @@ def test_m5_the_button_form_shows_the_saved_settings_and_no_secret(node: Node) -
     assert field_value(body, "broker_host") == "10.0.0.2"
     assert field_value(body, "broker_username") == "camera-cam-01"
     assert field_value(body, "covered_zones") == "perimeter-north"
-    assert field_value(body, "mediamtx_address") == "10.0.0.2:8554"
     assert all(secret not in body for secret in SECRETS)
     assert "read_serial" not in node.calls
 

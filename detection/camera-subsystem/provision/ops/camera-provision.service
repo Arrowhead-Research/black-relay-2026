@@ -30,7 +30,7 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 StateDirectory=camera-provision
 StateDirectoryMode=0700
-# 0755 so the bridge user can reach its own 0600 file, go2rtc can read mediamtx.env, and
+# 0755 so the bridge user can reach its own 0600 file, and
 # timesyncd, which does not run as root, can read its drop-in despite UMask=0077 above.
 ConfigurationDirectory=camerabridge systemd/timesyncd.conf.d black-relay
 ConfigurationDirectoryMode=0755

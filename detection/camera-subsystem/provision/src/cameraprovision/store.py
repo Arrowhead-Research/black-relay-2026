@@ -4,7 +4,6 @@ What lives where:
 
 * ``bridge.yaml`` (0600, service user): everything the bridge reads, including the
   broker password. The source of truth for those fields.
-* ``mediamtx.env`` (0644): the one value go2rtc needs, so it need not read the above.
 * the NetworkManager keyfile (0600): the WiFi PSK, and the only copy of it.
 * ``node.json`` (0600): provisioning-only fields the bridge YAML does not hold. A WiFi
   repair needs the hostname from here.
@@ -63,7 +62,6 @@ _LEGACY_NODE_KEYS = ("vpn_requested",)
 @dataclass(frozen=True, kw_only=True)
 class Paths:
     bridge_config: Path = Path("/etc/camerabridge/bridge.yaml")
-    mediamtx_env: Path = Path("/etc/camerabridge/mediamtx.env")
     nm_connections_dir: Path = Path("/etc/NetworkManager/system-connections")
     state_dir: Path = Path("/var/lib/camera-provision")
     ntp_dropin: Path = Path("/etc/systemd/timesyncd.conf.d/black-relay.conf")
@@ -89,7 +87,6 @@ class Paths:
         """Every file a save can change. The node file is last: it completes a config."""
         return (
             self.bridge_config,
-            self.mediamtx_env,
             self.central_hosts,
             self.ntp_dropin,
             self.nm_keyfile,
@@ -204,7 +201,6 @@ class NodeStore:
             outbox=OutboxConfig(**bridge["outbox"]),
             status_interval_s=bridge["status_interval_s"],
             frigate=FrigateConfig(**bridge["frigate"]),
-            mediamtx_address=bridge["mediamtx_address"],
             hostname=node["hostname"],
             wifi_ssid=node["wifi_ssid"],
             wifi_psk="",
@@ -234,10 +230,6 @@ class NodeStore:
             write_bridge_config(cfg, staged)
             self._chown(staged)
 
-        def stage_mediamtx(staged: Path) -> None:
-            _write_private_atomic(staged, f"MEDIAMTX_ADDRESS={cfg.mediamtx_address}\n")
-            staged.chmod(0o644)
-
         def stage_ntp(staged: Path) -> None:
             _write_private_atomic(staged, f"[Time]\nNTP={ntp_server}\n")
             staged.chmod(0o644)
@@ -249,7 +241,6 @@ class NodeStore:
         self._transact(
             [
                 (paths.bridge_config, stage_bridge),
-                (paths.mediamtx_env, stage_mediamtx),
                 (paths.central_hosts, stage_central_hosts),
                 (paths.ntp_dropin, stage_ntp),
                 (
