@@ -778,6 +778,69 @@ def test_a_steady_tick_syncs_and_replaces_nothing_on_the_card(live, monkeypatch)
     assert before == {path: path.stat().st_mtime_ns for path in on_card}
 
 
+def counted_parses(monkeypatch):
+    calls = []
+    real_load, real_render = yaml.safe_load, daemon_module.render
+    monkeypatch.setattr(yaml, "safe_load", lambda text: (calls.append("yaml"), real_load(text))[1])
+    monkeypatch.setattr(
+        daemon_module, "render", lambda *args: (calls.append("render"), real_render(*args))[1]
+    )
+    return calls
+
+
+def test_a_steady_tick_parses_no_yaml_and_renders_nothing(live, monkeypatch):
+    live.daemon.tick()
+    live.daemon.tick()
+    calls = counted_parses(monkeypatch)
+    live.daemon.tick()
+    live.daemon.tick()
+    assert calls == []
+
+
+def test_an_edited_bridge_yaml_is_read_at_the_next_tick(live, monkeypatch):
+    live.daemon.tick()
+    live.daemon.tick()
+    calls = counted_parses(monkeypatch)
+    live.provision(covered_zones=["driveway", "gate", "orchard"])
+    live.daemon.tick()
+    assert "orchard" in live.paths.frigate_config.read_text()
+    assert "yaml" in calls and "render" in calls
+
+
+def test_a_frigate_ui_edit_of_a_zone_is_kept_and_restarts_once(live):
+    live.daemon.tick()
+    live.daemon.tick()
+    edited = yaml.safe_load(live.paths.frigate_config.read_text())
+    drawn = "0.1,0.1,0.9,0.1,0.9,0.9"
+    edited["cameras"]["cam-8da040"]["zones"]["gate"]["coordinates"] = drawn
+    live.paths.frigate_config.write_text(yaml.safe_dump(edited))
+    live.systemd.calls.clear()
+    live.daemon.tick()
+    live.daemon.tick()
+    assert drawn in live.paths.frigate_config.read_text()
+    assert live.systemd.frigate_calls() == ["restart"]
+
+
+def test_a_fault_in_a_file_is_reported_again_on_every_tick(live):
+    live.daemon.tick()
+    live.paths.bridge_config.write_text("{ not yaml")
+    for _ in range(2):
+        live.daemon.tick()
+        assert live.state()["reason"] == "bridge.yaml is not valid YAML"
+    live.provision()
+    live.paths.frigate_config.write_text("{ not yaml")
+    for _ in range(2):
+        live.daemon.tick()
+        assert "saved Frigate config cannot be parsed" in live.state()["reason"]
+
+
+def test_a_bridge_yaml_in_a_bad_encoding_is_not_valid_yaml(live):
+    live.daemon.tick()
+    live.paths.bridge_config.write_bytes(b"node_id: \xff\xfe")
+    live.daemon.tick()
+    assert live.state()["reason"] == "bridge.yaml is not valid YAML"
+
+
 def test_a_changed_password_still_rewrites_the_env_and_restarts(live):
     live.daemon.tick()
     live.daemon.tick()

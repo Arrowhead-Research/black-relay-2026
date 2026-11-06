@@ -356,6 +356,8 @@ class Daemon:
         self._log_checked_at = None
         self._log_read_at = None
         self._camera = None  # the Frigate camera whose segments count
+        self._parse_bridge_yaml = _LastResult(_parse_bridge_yaml)
+        self._render_config = _LastResult(_render_config)
 
     def run(self, stop) -> None:
         while not stop.is_set():
@@ -373,7 +375,7 @@ class Daemon:
 
         provisioning = None
         try:
-            provisioning = _read_provisioning(self._paths)
+            provisioning = _read_provisioning(self._paths, self._parse_bridge_yaml)
             self._camera = provisioning.node_id if provisioning else None
         except ProvisioningError as err:
             problems.append(str(err))
@@ -556,22 +558,20 @@ class Daemon:
     ) -> str | None:
         paths = self._paths
         secret = self._proxy_secret(provisioning.relay_password)
-        config = render(
+        saved_config = _read_or_none(paths.frigate_config)
+        config = self._render_config(
             provisioning.node_id,
             provisioning.covered_zones,
             provisioning.relay_user,
-            _load_existing(paths.frigate_config),
+            saved_config,
             secret,
-        ).encode()
+        )
         # Compared in memory, because this runs every tick and the card would pay for a write.
         # A value it refuses changes nothing.
         env = env_content(record.password, provisioning.relay_password, secret).encode()
         staged = paths.frigate_env.with_name(paths.frigate_env.name + ".new")
         try:
-            changed = (
-                _read_or_none(paths.frigate_config) != config
-                or _read_or_none(paths.frigate_env) != env
-            )
+            changed = saved_config != config or _read_or_none(paths.frigate_env) != env
             if changed or self._link.frigate_mac != mac:
                 # Staged first, so that a failed write changes nothing.
                 write_env(staged, record.password, provisioning.relay_password, secret)
@@ -739,10 +739,35 @@ def _media_has_room(media: Path) -> bool:
     return disk.f_blocks > 0 and disk.f_bavail / disk.f_blocks >= MEDIA_MIN_FREE_FRACTION
 
 
-def _read_provisioning(paths: Paths) -> _Provisioning | None:
+class _LastResult:
+    """A function's latest answer, so that a tick works again only on what has changed. Files are
+    still read every tick, since reading is cheap and an edit must show at once. An exception is
+    not remembered, so a fault is found again every tick."""
+
+    def __init__(self, function):
+        self._function = function
+        self._arguments = None
+        self._result = None
+
+    def __call__(self, *arguments):
+        if arguments != self._arguments:
+            self._result = self._function(*arguments)
+            self._arguments = arguments
+        return self._result
+
+
+def _parse_bridge_yaml(content: bytes):
+    return yaml.safe_load(content.decode("utf-8"))
+
+
+def _render_config(node_id, covered_zones, relay_user, saved_config, secret) -> bytes:
+    return render(node_id, covered_zones, relay_user, _parse_saved_config(saved_config), secret).encode()
+
+
+def _read_provisioning(paths: Paths, parse=_parse_bridge_yaml) -> _Provisioning | None:
     failure = None
     try:
-        config = yaml.safe_load(paths.bridge_config.read_text(encoding="utf-8"))
+        config = parse(paths.bridge_config.read_bytes())
     except FileNotFoundError:
         return None
     except OSError as err:
@@ -779,10 +804,9 @@ def _read_flipped(node_file: Path) -> bool:
     return isinstance(node, dict) and node.get("camera_upside_down") is True
 
 
-def _load_existing(path: Path):
+def _parse_saved_config(content: bytes | None):
     """The saved config, for its drawn zones. One that cannot be parsed is an error and not
     "no config", because rendering over it would lose the drawings."""
-    content = _read_or_none(path)
     if content is None:
         return None
     failure = None
