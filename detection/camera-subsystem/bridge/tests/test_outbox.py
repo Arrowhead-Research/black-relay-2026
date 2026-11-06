@@ -29,6 +29,7 @@ actual ``camera.*`` contract payloads.
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -1074,3 +1075,128 @@ def test_the_rename_of_a_rewrite_is_durable_before_it_returns(tmp_path, monkeypa
     monkeypatch.setattr(outbox_module.os, "replace", recording_replace)
     box._rewrite()
     assert calls == ["fsync-file", "replace", "fsync-dir"]
+
+
+# --- faults during a rewrite ------------------------------------------------
+
+
+def _fail_fsync_when(monkeypatch, should_fail, error: int = errno.EIO):
+    real_fsync = os.fsync
+
+    def fsync(fd):
+        if should_fail(fd):
+            raise OSError(error, os.strerror(error))
+        real_fsync(fd)
+
+    monkeypatch.setattr(outbox_module.os, "fsync", fsync)
+
+
+def _is_dir(fd: int) -> bool:
+    return stat.S_ISDIR(os.fstat(fd).st_mode)
+
+
+def test_a_failed_directory_sync_cannot_apply_an_old_truncate_to_the_new_file(
+    tmp_path, monkeypatch
+):
+    """The double fault: an append fails, then a rewrite's rename works and its dir sync fails."""
+    path = tmp_path / "double.jsonl"
+    _seed(path, 3)
+    box = _outbox_at(path)
+
+    failing = [True]
+    _fail_fsync_when(monkeypatch, lambda fd: failing[0])
+    with pytest.raises(OSError):
+        _enqueue_new(box, 1)
+    assert box._truncate_to is not None
+
+    failing[0] = False
+    _fail_fsync_when(monkeypatch, _is_dir)
+    with pytest.raises(OSError):
+        box._rewrite()
+    assert box._truncate_to is None
+
+    monkeypatch.undo()
+    _enqueue_new(box, 2)
+    assert _pending_ids(_outbox_at(path)) == _pending_ids(box)
+    assert len(box._entries) == 5
+
+
+def test_a_failed_directory_sync_cannot_extend_a_shorter_new_file_with_nuls(tmp_path, monkeypatch):
+    path = tmp_path / "shorter.jsonl"
+    _seed(path, 4)
+    box = _outbox_at(path)
+    mids = box.flush(RecordingPublish())
+
+    failing = [True]
+    _fail_fsync_when(monkeypatch, lambda fd: failing[0])
+    with pytest.raises(OSError):
+        _enqueue_new(box, 1)
+
+    failing[0] = False
+    _fail_fsync_when(monkeypatch, _is_dir)
+    with pytest.raises(OSError):
+        box.ack_many(mids[:3])  # the new file is shorter than the offset that was owed
+
+    monkeypatch.undo()
+    _enqueue_new(box, 2)
+    assert b"\0" not in path.read_bytes()
+    assert _pending_ids(_outbox_at(path)) == _pending_ids(box)
+
+
+def _disk_of(tmp_path: Path, capacity: int):
+    """An fsync that fails as a full disk would, once the directory holds over ``capacity``."""
+
+    def full(_fd: int) -> bool:
+        return sum(p.stat().st_size for p in tmp_path.iterdir()) > capacity
+
+    return full
+
+
+def test_a_rewrite_that_fills_the_disk_gives_the_space_back(tmp_path, monkeypatch):
+    path = tmp_path / "full.jsonl"
+    _seed(path, 40)
+    box = _outbox_at(path)
+    size = path.stat().st_size
+    tmp = path.with_name(path.name + ".tmp")
+
+    # Room for the backlog and two more lines, with the backlog taking all but those: free
+    # space is below the backlog, so a rewrite cannot fit and nothing else frees any.
+    _fail_fsync_when(monkeypatch, _disk_of(tmp_path, size + 2000), errno.ENOSPC)
+    with pytest.raises(OSError) as raised:
+        box._rewrite()
+    assert raised.value.errno == errno.ENOSPC
+    assert not tmp.exists()
+    assert path.stat().st_size == size
+
+    new_id = _enqueue_new(box, 1)  # would fail with the temp file still there
+    assert _pending_ids(_outbox_at(path))[-1] == new_id
+
+
+def test_a_load_removes_a_leftover_temp_file_and_keeps_the_queue(tmp_path, monkeypatch):
+    path = tmp_path / "left.jsonl"
+    ids = _seed(path, 40)
+    size = path.stat().st_size
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(b"x" * size)  # as a crash during a rewrite would leave it, at zero free bytes
+
+    _fail_fsync_when(monkeypatch, _disk_of(tmp_path, size + 2000), errno.ENOSPC)
+    box = _outbox_at(path)
+    assert not tmp.exists()
+    assert _pending_ids(box) == ids
+    new_id = _enqueue_new(box, 1)
+    assert _pending_ids(_outbox_at(path)) == [*ids, new_id]
+
+
+def test_a_load_removes_a_leftover_temp_file_even_with_no_queue_file(tmp_path):
+    path = tmp_path / "only-tmp.jsonl"
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(b"x" * 100)
+    _outbox_at(path)
+    assert not tmp.exists()
+
+
+def test_a_temp_file_that_cannot_be_removed_does_not_stop_a_load(tmp_path):
+    path = tmp_path / "stuck.jsonl"
+    ids = _seed(path, 2)
+    path.with_name(path.name + ".tmp").mkdir()  # unlink fails on a directory
+    assert _pending_ids(_outbox_at(path)) == ids

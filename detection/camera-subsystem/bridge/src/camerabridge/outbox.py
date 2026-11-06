@@ -184,6 +184,7 @@ class Outbox:
         No overflow pruning here (overflow is enforced at enqueue). Anything but an intact
         entry is set aside and the file repaired. See "Damaged files" in the module docstring.
         """
+        self._remove_tmp()  # left by a crash or a failed removal. Only the file itself counts
         if not self._path.exists():
             return
         max_seen = 0
@@ -524,19 +525,38 @@ class Outbox:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         if not self._entries:
             self._path.open("w").close()
-        else:
-            tmp = self._path.with_name(self._path.name + ".tmp")
+            self._forget_old_file()
+            return
+        tmp = self._tmp_path()
+        try:
             with tmp.open("wb") as handle:
                 for entry in self._entries.values():
                     handle.write(self._line(entry).encode("ascii"))
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(tmp, self._path)
-            directory = os.open(self._path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+        except OSError:
+            self._remove_tmp()  # on a full disk, this is the space the next heartbeat needs
+            raise
+        self._forget_old_file()  # at once: an offset still owed to the old file would cut the new one
+        directory = os.open(self._path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+    def _forget_old_file(self) -> None:
+        """The file was just replaced, so nothing owed to the old one applies."""
         self._dead_bytes = 0
         self._truncate_to = None
         self._missing_newline = False
+
+    def _tmp_path(self) -> Path:
+        return self._path.with_name(self._path.name + ".tmp")
+
+    def _remove_tmp(self) -> None:
+        """Drop a rewrite's temp file. The queue is never in it until the rename."""
+        try:
+            self._tmp_path().unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("outbox: could not remove %s: %s", self._tmp_path(), exc.strerror)
