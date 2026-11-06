@@ -127,6 +127,60 @@ def test_identity_no_longer_depends_on_typed_commands() -> None:
         assert typed not in code
 
 
+def _c52_block() -> str:
+    section = RUNBOOK[RUNBOOK.index("## C52.") : RUNBOOK.index("## C53.")]
+    return re.findall(r"```bash\n(.*?)```", section, flags=re.S)[0]
+
+
+SUDO_STUB = r"""#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_LOG"
+case "$1" in
+  ls) [[ -e $STUB_STATE/no-profile ]] && exit 2 ;;
+  nmcli) [[ -e $STUB_STATE/no-nmcli ]] && exit 10 ;;
+esac
+exit 0
+"""
+
+
+def _run_c52(tmp_path: Path, *flags: str) -> tuple[subprocess.CompletedProcess, list[str]]:
+    stub = tmp_path / "sudo"
+    stub.write_text(SUDO_STUB)
+    stub.chmod(0o755)
+    log = tmp_path / "calls.log"
+    log.touch()
+    for flag in flags:
+        (tmp_path / flag).touch()
+    result = subprocess.run(
+        ["bash", "-c", _c52_block()],
+        env={"PATH": f"{tmp_path}:/usr/bin:/bin", "STUB_LOG": str(log), "STUB_STATE": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, log.read_text().splitlines()
+
+
+@pytest.mark.parametrize("flag", ["no-profile", "no-nmcli"])
+def test_c52_stops_without_moving_the_uplink_if_the_ap_profile_is_missing(
+    tmp_path: Path, flag: str
+) -> None:
+    result, calls = _run_c52(tmp_path, flag)
+    assert "STOP" in result.stdout
+    assert not [call for call in calls if call.startswith(("mv", "install", "reboot"))]
+
+
+def test_c52_moves_the_uplink_and_reboots_when_the_ap_profile_is_there(tmp_path: Path) -> None:
+    result, calls = _run_c52(tmp_path)
+    assert "STOP" not in result.stdout
+    assert [call.split()[0] for call in calls][-3:] == ["install", "mv", "reboot"]
+    assert calls[0].startswith("ls")
+
+
+def test_c52_gives_its_advice_for_a_missing_profile_before_the_block() -> None:
+    section = RUNBOOK[RUNBOOK.index("## C52.") : RUNBOOK.index("## C53.")]
+    assert section.index("If the AP profile is missing") < section.index("```bash")
+
+
 def test_no_document_tells_anyone_to_add_a_second_laptop_address() -> None:
     assert "ip addr add" not in RUNBOOK
     assert "alias ssh" not in RUNBOOK

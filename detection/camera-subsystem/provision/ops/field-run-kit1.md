@@ -271,22 +271,23 @@ address the form saves, so no part of this hand-applies the set, as the plan req
 *Owner:* **unplug the camera from `eth0`** and leave it unplugged. The camera-link daemon starts at this reboot, and
 must not spend a login before C53 and C54 pass.
 
-*Agent, in the open session:*
+*Agent, in the open session.* If the AP profile is missing, the block below stops and moves nothing. Then run
+`sudo /opt/black-relay/ops/seed-kit.sh` at the console, which prints the label. It also asks for a new console password
+and replaces the host keys, so afterwards run `ssh-keygen -R "$NODE"` on the laptop, and run the block again.
 
 ```bash
-sudo ls -l /etc/NetworkManager/system-connections/black-relay-setup-ap.nmconnection \
-  /etc/NetworkManager/system-connections/black-relay-uplink.nmconnection
-# Read these out to the owner, once. They are the kit's label.
-sudo nmcli --get-values 802-11-wireless.ssid connection show black-relay-setup-ap
-sudo nmcli --show-secrets --get-values 802-11-wireless-security.psk connection show black-relay-setup-ap
-sudo install -d -m 0700 /root/kit1-uplink-saved
-sudo mv /etc/NetworkManager/system-connections/black-relay-uplink.nmconnection /root/kit1-uplink-saved/
-sudo reboot
+# Read the last two out to the owner, once. They are the kit's label.
+if sudo ls -l /etc/NetworkManager/system-connections/black-relay-setup-ap.nmconnection \
+     /etc/NetworkManager/system-connections/black-relay-uplink.nmconnection &&
+   sudo nmcli --get-values 802-11-wireless.ssid connection show black-relay-setup-ap &&
+   sudo nmcli --show-secrets --get-values 802-11-wireless-security.psk connection show black-relay-setup-ap; then
+  sudo install -d -m 0700 /root/kit1-uplink-saved
+  sudo mv /etc/NetworkManager/system-connections/black-relay-uplink.nmconnection /root/kit1-uplink-saved/
+  sudo reboot
+else
+  echo 'STOP: a profile is missing or unreadable. Nothing was moved, and the node was not rebooted.'
+fi
 ```
-
-If the AP profile is missing, run `sudo /opt/black-relay/ops/seed-kit.sh` first, at the console, which prints the label.
-It also asks for a new console password and replaces the host keys, so afterwards run `ssh-keygen -R "$NODE"` on the
-laptop.
 
 *Owner, within a minute or two of the reboot:* the screen shows the login prompt, and the SSID appears on the phone.
 Join it with the passphrase, open `http://10.42.0.1/`, and fill in the form. Check every field, as old values may show.
