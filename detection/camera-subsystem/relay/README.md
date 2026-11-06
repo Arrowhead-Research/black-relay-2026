@@ -44,6 +44,14 @@ Pi, a laptop and a server.
    docker compose up -d --build
    ```
 
+   The chrony image pins an exact package revision, and Alpine keeps only its newest. If the build stops at
+   `apk add` naming `chrony=4.8-r2`, read the current one, and set it in `.env` after checking it is what you want:
+
+   ```bash
+   docker run --rm alpine:3.23.8 sh -c 'apk update >/dev/null; apk policy chrony'
+   # then, in .env: RELAY_CHRONY_VERSION=<that revision>
+   ```
+
 5. In each node's portal, set the broker address to this host's LAN IP, the broker login to
    `RELAY_BROKER_USER` and `RELAY_BROKER_PASSWORD` from `.env`, and leave the time server on its
    default, which follows the broker address. A `node_id` must be at most 63 lowercase letters, digits
