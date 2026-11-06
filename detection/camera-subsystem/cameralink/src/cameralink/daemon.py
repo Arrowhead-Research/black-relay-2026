@@ -859,11 +859,17 @@ def _limit_end(stamps: tuple[float, ...], cap: int, now: float) -> float | None:
 def _without_secrets(reason: str, record, provisioning: _Provisioning) -> str:
     """render quotes zone names and node ids it refuses, and a password can be pasted into the
     wrong field. Only these messages quote a setting, so only they go through this. A very short
-    password can hide one for nothing, and the text then still says what failed."""
+    password can hide one for nothing, and the text then still says what failed. render quotes
+    with repr, which escapes backslashes and quotes, so those escapes are compared away."""
     hidden = [record.password, record.pending_password, provisioning.relay_password]
     if provisioning.relay_password:
         hidden.append(proxy_secret(provisioning.relay_password))
-    return _HIDDEN_REASON if any(value and value in reason for value in hidden) else reason
+    unescaped = reason.replace("\\", "")
+    shown = any(
+        value and (value in reason or repr(value)[1:-1].replace("\\", "") in unescaped)
+        for value in hidden
+    )
+    return _HIDDEN_REASON if shown else reason
 
 
 def _is_ipv4(text: str) -> bool:

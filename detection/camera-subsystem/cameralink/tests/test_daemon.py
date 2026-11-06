@@ -979,6 +979,47 @@ def test_the_camera_password_in_a_rejected_zone_name_is_not_reported(live):
     assert "Frigate's config" in reason
 
 
+@pytest.mark.parametrize(
+    "password",
+    ["pa\\ss-word-1", "pa'ss\\word-1", 'pa"ss\\word-1', "pa'ss\"word\\1", "pa\nss-word-1"],
+    ids=repr,
+)
+@pytest.mark.parametrize("field", ["zone", "node_id"])
+def test_a_password_escaped_by_the_quoting_is_still_not_reported(live, password, field):
+    pasted = {"covered_zones": [password]} if field == "zone" else {"node_id": password}
+    live.provision(broker={"username": "kit1", "password": password}, **pasted)
+    live.daemon.tick()
+    text = live.paths.state_file.read_text()
+    assert "word" not in text and "ss-" not in text
+    assert "Frigate's config" in live.state()["reason"]
+
+
+def test_a_pending_camera_password_in_a_rejected_zone_name_is_not_reported(live):
+    live.step.passwords[MAC] = ""
+    live.provision(covered_zones=["a b pending-S3cret-1"])
+    real_step = live.daemon._step
+
+    def keep_pending(lease, generation, store, *args, **kwargs):
+        state = real_step(lease, generation, store, *args, **kwargs)
+        with store.lock():
+            store.save(replace(store.load(lease.mac), pending_password="pending-S3cret-1"))
+        return state
+
+    live.daemon._step = keep_pending
+    live.daemon.tick()
+    reason = live.state()["reason"]
+    assert "pending-S3cret-1" not in live.paths.state_file.read_text()
+    assert "Frigate's config" in reason
+
+
+def test_the_derived_proxy_secret_in_a_rejected_zone_name_is_not_reported(live):
+    derived = proxy_secret(RELAY_PASSWORD)
+    live.provision(covered_zones=[f"a b {derived}"])
+    live.daemon.tick()
+    assert derived not in live.paths.state_file.read_text()
+    assert "Frigate's config" in live.state()["reason"]
+
+
 def test_a_very_short_password_hides_a_quoted_reason_but_says_what_failed(live):
     live.provision(
         covered_zones=["bad zone!"], broker={"username": "kit1", "password": "a"}
