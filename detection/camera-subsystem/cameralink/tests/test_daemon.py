@@ -865,8 +865,8 @@ def test_a_write_that_fails_changes_neither_file_and_is_reported(live, monkeypat
     env = live.paths.frigate_env.read_bytes()
     live.provision(node_id="cam-renamed")
     monkeypatch.setattr(
-        "cameralink.frigate_config._replace_file",
-        lambda path, body: (_ for _ in ()).throw(OSError(28, "No space left on device")),
+        "cameralink.frigate_config.write_file",
+        lambda path, body, mode: (_ for _ in ()).throw(OSError(28, "No space left on device")),
     )
     live.daemon.tick()
     assert live.paths.frigate_config.read_bytes() == config

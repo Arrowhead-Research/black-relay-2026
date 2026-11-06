@@ -22,6 +22,8 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 
+from cameralink.files import fsync_directory, write_file
+
 PHASES = frozenset({"adopted", "needs_reset", "failed", "http_follow_up", "try_blank"})
 
 
@@ -82,7 +84,7 @@ class CameraStore:
         data["cameras"][record.mac] = fields_to_write
         failure = None
         try:
-            self._replace(json.dumps(data).encode())
+            write_file(self._path, json.dumps(data).encode(), 0o600)
         except OSError as err:
             failure = StoreError(f"{self._path} cannot be written: {type(err).__name__}")
         if failure is not None:
@@ -130,7 +132,7 @@ class CameraStore:
         self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         # A new directory is only as durable as its entry in its parent.
         for created in reversed(missing):
-            _fsync_directory(created.parent)
+            fsync_directory(created.parent)
 
     def _read(self) -> dict | None:
         failure = None
@@ -152,25 +154,6 @@ class CameraStore:
         for record in data["cameras"].values():
             _record(record)
         return data
-
-    def _replace(self, content: bytes) -> None:
-        temporary = self._path.with_name(self._path.name + ".tmp")
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "wb") as file:
-            os.fchmod(fd, 0o600)  # a leftover temporary file may have any mode
-            file.write(content)
-            file.flush()
-            os.fsync(fd)
-        os.replace(temporary, self._path)
-        _fsync_directory(self._path.parent)
-
-
-def _fsync_directory(directory: Path) -> None:
-    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
 
 
 def _is_text(value) -> bool:

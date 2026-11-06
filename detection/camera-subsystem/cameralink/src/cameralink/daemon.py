@@ -60,6 +60,7 @@ from cameralink.adopt import (
     step,
 )
 from cameralink.camera_api import CameraError, ReolinkClient
+from cameralink.files import fsync_directory, write_file
 from cameralink.frigate_config import (
     FrigateConfigError,
     env_content,
@@ -512,7 +513,7 @@ class Daemon:
     def _save_link(self, **changes) -> None:
         link = replace(self._link, **changes)
         try:
-            _write_file(self._paths.link_state, json.dumps(asdict(link)).encode(), 0o600)
+            write_file(self._paths.link_state, json.dumps(asdict(link)).encode(), 0o600)
         except OSError as err:
             raise LinkStateError(
                 f"the link state cannot be saved: {type(err).__name__}"
@@ -577,9 +578,9 @@ class Daemon:
                 write_env(staged, record.password, provisioning.relay_password, secret)
                 # Saved first: both files could match by the next tick with Frigate still old.
                 self._save_link(frigate_mac=mac, restart_owed=True)
-                _write_file(paths.frigate_config, config, 0o644)
+                write_file(paths.frigate_config, config, 0o644)
                 os.replace(staged, paths.frigate_env)
-                _fsync_directory(paths.frigate_env.parent)
+                fsync_directory(paths.frigate_env.parent)
         finally:
             staged.unlink(missing_ok=True)
 
@@ -622,7 +623,7 @@ class Daemon:
         if saved is not None and _LOCAL_SECRET_RE.fullmatch(saved):
             return saved.decode("ascii").strip()
         secret = secrets.token_hex(32)
-        _write_file(path, f"{secret}\n".encode(), 0o600)
+        write_file(path, f"{secret}\n".encode(), 0o600)
         return secret
 
     # Frigate's log
@@ -707,7 +708,7 @@ class Daemon:
             _log.info("link: %s, camera %s, reason: %s", state.value, mac, reason)
             self._published = (state, mac, reason)
         try:
-            _write_file(self._paths.state_file, json.dumps(content).encode(), 0o644)
+            write_file(self._paths.state_file, json.dumps(content).encode(), 0o644)
         except OSError as err:
             _log.warning("state file cannot be written: %s", type(err).__name__)
 
@@ -924,31 +925,6 @@ def _read_or_none(path: Path) -> bytes | None:
         return path.read_bytes()
     except FileNotFoundError:
         return None
-
-
-def _write_file(path: Path, content: bytes, mode: int) -> None:
-    """Replace ``path`` whole, with exactly ``mode`` whatever the umask."""
-    temporary = path.with_name(f".{path.name}.tmp")
-    try:
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "wb") as file:
-            os.fchmod(fd, mode)
-            file.write(content)
-            file.flush()
-            os.fsync(fd)
-        os.replace(temporary, path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    _fsync_directory(path.parent)
-
-
-def _fsync_directory(directory: Path) -> None:
-    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
 
 
 def _say(line: str) -> None:

@@ -21,9 +21,7 @@ secret changes only the env file.
 """
 
 import hashlib
-import os
 import re
-import tempfile
 from collections.abc import Iterator, Mapping, Sequence
 from importlib import resources
 from pathlib import Path
@@ -31,6 +29,8 @@ from string import Template
 from typing import Any
 
 import yaml
+
+from cameralink.files import write_file
 
 CAMERA_PASSWORD_ENV = "FRIGATE_CAMERA_PASSWORD"
 RELAY_PASSWORD_ENV = "FRIGATE_RELAY_PASSWORD"
@@ -129,7 +129,7 @@ def write_env(path: Path, camera_password: str, relay_password: str, proxy_secre
     """Atomically replace the env file, mode 0600, refusing what ``env_content`` refuses."""
     body = env_content(camera_password, relay_password, proxy_secret)
     try:
-        _replace_file(Path(path), body)
+        write_file(Path(path), body.encode("ascii"), 0o600)
     except OSError as err:
         raise FrigateConfigError(f"cannot write {path}: {err.strerror}") from None
 
@@ -232,25 +232,3 @@ def _indented_yaml(section: Mapping, indent: int) -> str:
         dict(section), sort_keys=True, default_flow_style=False, default_style='"', width=2**16
     )
     return "".join(" " * indent + f"{line}\n" for line in text.splitlines()).rstrip("\n")
-
-
-def _replace_file(path: Path, body: str) -> None:
-    # mkstemp creates 0600, so the secrets are never readable in the temporary name.
-    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    try:
-        with os.fdopen(fd, "w", encoding="ascii") as handle:
-            handle.write(body)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
-        raise
-    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
