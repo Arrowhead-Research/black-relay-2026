@@ -30,6 +30,7 @@ check() {
     if "$@" >/dev/null 2>&1; then ok "$what"; else bad "$what"; fi
 }
 matches() { grep -q -- "$1" <<<"$2"; }
+not_matches() { ! grep -q -- "$1" <<<"$2"; }
 installer() {
     docker exec -e BLACK_RELAY_HEF_SHA256="$good_sha" "$name" \
         /opt/black-relay/src/cameralink/ops/install-node.sh "$@"
@@ -91,6 +92,35 @@ check "camerabridge runs from its venv" on /opt/black-relay/bridge/bin/camerabri
 check "the Frigate template is in the package" on /opt/black-relay/cameralink/bin/python -c \
     'from cameralink.frigate_config import _template; assert "go2rtc" in _template().template'
 check "the camera library imports" on /opt/black-relay/cameralink/bin/python -c 'import cameralink.reolink'
+
+printf '\n--- seeding gives a clone its own identity, on real ssh-keygen, chpasswd and systemd\n'
+on useradd -m -p '!' seed-test
+sh_on 'printf 00000000abcdef01 > /tmp/serial; cat /etc/machine-id > /tmp/old-id
+  sha256sum /etc/ssh/ssh_host_ed25519_key.pub > /tmp/old-key'
+seed() {
+    docker exec -i -e SERIAL_FILE=/tmp/serial -e CONSOLE_USER=seed-test "$name" \
+        /opt/black-relay/ops/seed-kit.sh "$@"
+}
+on systemctl start NetworkManager # seed-kit.sh ends by reloading its connections
+if output=$(printf 'seed test password\nseed test password\n' | seed 2>&1); then ok "seed-kit.sh ran"; else
+    bad "seed-kit.sh ran: $output"
+fi
+check "it printed the label" matches 'Setup WiFi:  BlackRelay-CAM-00000000abcdef01' "$output"
+check "the password is not in its output" not_matches 'seed test password' "$output"
+check "the machine ID changed" sh_on '! cmp -s /tmp/old-id /etc/machine-id'
+check "the machine ID is world readable" sh_on '[ "$(stat -c %a /etc/machine-id)" = 444 ]'
+check "the SSH host key changed" sh_on '! sha256sum -c /tmp/old-key'
+check "the private host key is 0600" sh_on '[ "$(stat -c %a /etc/ssh/ssh_host_ed25519_key)" = 600 ]'
+check "sshd accepts the new keys" on sshd -t
+check "the console password took" sh_on 'passwd -S seed-test | grep -q " P "'
+check "the AP profile is 0600" sh_on \
+    '[ "$(stat -c %a /etc/NetworkManager/system-connections/black-relay-setup-ap.nmconnection)" = 600 ]'
+if printf 'seed test password\nseed test password\n' | seed >/dev/null 2>&1; then
+    bad "a second seed must refuse"
+else
+    ok "a second seed refuses"
+fi
+on systemctl stop NetworkManager
 
 printf '\n--- nothing started, frigate not enabled\n'
 for unit in camera-link camera-link-dhcp camera-provision frigate camerabridge; do
