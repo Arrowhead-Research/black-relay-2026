@@ -66,6 +66,11 @@ login nodes hold there, and `RELAY_API_BROKER_USER` and `RELAY_API_BROKER_PASSWO
 own. That login needs read access to the three `detection/camera/` topics at QoS 1, and a broker that keeps
 a persistent session, or events published during an API restart are not replayed to it.
 
+**In v0 the relay must run on the broker's host for video and the Frigate proxy to work.** The node's firewall admits
+only the broker address, and has no other setting for it. With an external broker on another host, events and heartbeats
+still flow, but the node refuses live view (RTSP 8554), snapshots and the Frigate proxy (8971) and SSH from this relay
+host. A host with more than one address must also send from the broker address: Docker leaves through the primary one.
+
 ## Ports
 
 Every published port is set in `.env`. A port a host service already holds is a clear failure:
