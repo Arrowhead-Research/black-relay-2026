@@ -44,13 +44,9 @@ Pi, a laptop and a server.
    docker compose up -d --build
    ```
 
-   The chrony image pins an exact package revision, and Alpine keeps only its newest. If the build stops at
-   `apk add` naming `chrony=4.8-r2`, read the current one, and set it in `.env` after checking it is what you want:
-
-   ```bash
-   docker run --rm alpine:3.23.8 sh -c 'apk update >/dev/null; apk policy chrony'
-   # then, in .env: RELAY_CHRONY_VERSION=<that revision>
-   ```
+   The chrony and netguard images pin Alpine packages to a minor release (`chrony~4.8`, `nftables~1.1.5`),
+   not an exact revision, because Alpine drops old revisions and an exact pin would stop a fresh build in the
+   field. So two builds a while apart can differ in the package's `-rN` revision.
 
 5. In each node's portal, set the broker address to this host's LAN IP, the broker login to
    `RELAY_BROKER_USER` and `RELAY_BROKER_PASSWORD` from `.env`, and leave the time server on its
