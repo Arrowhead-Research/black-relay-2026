@@ -503,8 +503,8 @@ class Bridge:
             self._hold(formats.TOPIC_DETECTIONS, message)
             return
 
-        self._outbox.enqueue(formats.TOPIC_DETECTIONS, message, durable=durable)
         if durable:
+            self._outbox.enqueue(formats.TOPIC_DETECTIONS, message, durable=True)
             self._flush()
         else:
             # object_update: best-effort QoS 0, published directly (never persisted).
