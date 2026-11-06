@@ -182,6 +182,18 @@ def test_a_store_reopened_at_the_limit_keeps_its_byte_total(make_relay):
     assert store._bytes == store.stored_bytes() <= 3000
 
 
+def test_the_unused_time_index_is_gone_from_an_older_database(tmp_path):
+    # ORDER BY seq LIMIT makes SQLite walk the table in seq order, so nothing ever read this index.
+    store = Store(tmp_path / "relay.sqlite3", 10, 10, 10, 10_000)
+    store._db.execute("CREATE INDEX events_by_time ON events (timestamp_us, seq)")
+    store.close()
+    store = Store(tmp_path / "relay.sqlite3", 10, 10, 10, 10_000)
+    names = [row[0] for row in store._db.execute("SELECT name FROM sqlite_master")]
+    store.close()
+    assert "events_by_time" not in names
+    assert "events_by_class" in names
+
+
 def test_stream_batches_are_capped_by_bytes(relay):
     store = relay.app.state.store
     for _ in range(5):

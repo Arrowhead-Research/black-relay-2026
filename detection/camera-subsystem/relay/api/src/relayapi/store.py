@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS events (
     message TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_by_class ON events (durable, seq);
-CREATE INDEX IF NOT EXISTS events_by_time ON events (timestamp_us, seq);
+DROP INDEX IF EXISTS events_by_time;
 """
 
 NEW = "new"
