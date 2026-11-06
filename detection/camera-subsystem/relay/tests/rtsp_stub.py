@@ -12,6 +12,13 @@ import sys
 from urllib.parse import urlsplit
 
 
+def record(line):
+    # One write. print() writes the newline separately, so threads could join two lines into one,
+    # and the smoke test counts lines.
+    sys.stdout.write(f"{line}\n")
+    sys.stdout.flush()
+
+
 def respond(status, cseq, extra=""):
     return f"RTSP/1.0 {status}\r\nCSeq: {cseq}\r\n{extra}\r\n".encode()
 
@@ -20,7 +27,7 @@ class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         peer = self.client_address[0]
         if MODE == "capture":
-            print(f"CONNECT from {peer}", flush=True)
+            record(f"CONNECT from {peer}")
         while True:
             request = self.rfile.readline().decode("latin-1").split()
             if not request:
@@ -35,10 +42,10 @@ class Handler(socketserver.StreamRequestHandler):
                 self.wfile.write(respond("200 OK", cseq, "Public: DESCRIBE\r\n"))
             elif MODE == "redirect":
                 location = ROUTES.get(urlsplit(url).path, "rtsp://192.0.2.1:8554/x")
-                print(f"REDIRECT from {peer}", flush=True)
+                record(f"REDIRECT from {peer}")
                 self.wfile.write(respond("302 Found", cseq, f"Location: {location}\r\n"))
             elif "authorization" in headers:
-                print(f"LOGIN from {peer}", flush=True)
+                record(f"LOGIN from {peer}")
                 self.wfile.write(respond("404 Not Found", cseq))
             else:
                 challenge = 'WWW-Authenticate: Basic realm="x"\r\n'
