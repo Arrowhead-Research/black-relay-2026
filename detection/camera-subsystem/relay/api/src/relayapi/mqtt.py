@@ -5,7 +5,8 @@ runs these callbacks on its network thread, and an exception there ends it.
 
 A QoS 1 message is acknowledged only once it is on disk, or once it is certain it never will be
 (a bad message, which being sent again cannot improve). The node deletes it from its outbox on
-that acknowledgement, so a full disk must not produce one.
+that acknowledgement, so a full disk must not produce one. A QoS 0 message has no acknowledgement
+and no second delivery, so it can share a later commit (see ``store``).
 """
 
 import json
@@ -41,6 +42,8 @@ _JSON_FAILURES = (ValueError, TypeError, OverflowError, RecursionError)
 # A connection shorter than this counts as flapping.
 _STABLE_S = 60.0
 _MAX_RECONNECT_DELAY_S = 30
+# How long a QoS 0 row can wait for a commit that nothing else has caused.
+_SETTLE_S = 0.25
 
 
 class _Drop(Exception):
@@ -81,21 +84,25 @@ class Ingest:
             return dict(self._dropped)
 
     def store_failures(self) -> dict[str, int]:
+        lost = self._store.lost_rows()
         with self._lock:
             return {
-                "store_full": self._store_failures["full"],
-                "store_errors": self._store_failures["other"],
+                "store_full": self._store_failures["full"] + lost.get("full", 0),
+                "store_errors": self._store_failures["other"] + lost.get("other", 0),
             }
+
+    def settle(self) -> None:
+        self._store.settle()
 
     def _count(self, reason: str) -> None:
         with self._lock:
             self._dropped[reason] += 1
 
-    def handle(self, topic: str, payload: bytes) -> bool:
+    def handle(self, topic: str, payload: bytes, qos: int = 1) -> bool:
         """Never raises. True means finished with, so acknowledge it. False means it could not
         be stored, so do not. The reason for a drop is counted, and the content never logged."""
         try:
-            self._handle(topic, payload)
+            self._handle(topic, payload, qos)
         except _Drop as drop:
             self._count(drop.reason)
         except sqlite3.Error as error:
@@ -109,7 +116,7 @@ class Ingest:
             logger.exception("a message on %s could not be kept", topic)
         return True
 
-    def _handle(self, topic: str, payload: bytes) -> None:
+    def _handle(self, topic: str, payload: bytes, qos: int) -> None:
         validator = self._validators.get(topic)
         if validator is None:
             raise _Drop("unknown_topic")
@@ -139,7 +146,7 @@ class Ingest:
         if topic == TOPIC_STATUS:
             self._heartbeat(message, stamped, text)
         else:
-            self._event(topic, message, stamped, text)
+            self._event(topic, message, stamped, text, sync=qos > 0)
 
     def _decode(self, payload: bytes) -> Any:
         if len(payload) > self._settings.max_payload_bytes:
@@ -171,7 +178,7 @@ class Ingest:
         if address is not None:
             self.on_address()
 
-    def _event(self, topic: str, message: dict, stamped: int, text: str) -> None:
+    def _event(self, topic: str, message: dict, stamped: int, text: str, *, sync: bool) -> None:
         if topic == TOPIC_DETECTIONS:
             kind = "detection"
             durable = message["event"] != "object_update"
@@ -187,6 +194,7 @@ class Ingest:
             stamped,
             self._clock(),
             text,
+            sync=sync,
         )
         if not added:
             raise _Drop("duplicate_event")
@@ -255,9 +263,13 @@ class Consumer:
                     self._pending.append(item)
 
     def _retry_loop(self) -> None:
-        while not self._stopping.wait(self._settings.store_retry_s):
+        next_retry = time.monotonic() + self._settings.store_retry_s
+        while not self._stopping.wait(_SETTLE_S):
             try:
-                self.retry_pending()
+                self._ingest.settle()
+                if time.monotonic() >= next_retry:
+                    next_retry = time.monotonic() + self._settings.store_retry_s
+                    self.retry_pending()
             except Exception:
                 logger.exception("retrying unstored messages failed")
 
@@ -289,7 +301,7 @@ class Consumer:
         logger.warning("disconnected from the broker; retrying in %d s", self._delay)
 
     def _on_message(self, client, userdata, message) -> None:
-        if self._ingest.handle(message.topic, message.payload):
+        if self._ingest.handle(message.topic, message.payload, message.qos):
             client.ack(message.mid, message.qos)
         elif message.qos > 0:
             with self._lock:

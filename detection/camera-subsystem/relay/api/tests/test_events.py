@@ -1,10 +1,12 @@
 import asyncio
+import sqlite3
+import time
 
 import pytest
 from conftest import CUE_ACKS, DETECTIONS, cue_ack, detection
 
 from relayapi.app import event_stream
-from relayapi.store import Store, StoreLocked
+from relayapi.store import _MAX_DEFERRED, Store, StoreLocked
 
 
 def events(relay, **params):
@@ -192,6 +194,149 @@ def test_the_unused_time_index_is_gone_from_an_older_database(tmp_path):
     store.close()
     assert "events_by_time" not in names
     assert "events_by_class" in names
+
+
+def on_disk(path):
+    """What another connection sees, which is what a commit has made durable."""
+    other = sqlite3.connect(path)
+    try:
+        return [row[0] for row in other.execute("SELECT event_id FROM events ORDER BY seq")]
+    finally:
+        other.close()
+
+
+@pytest.fixture
+def bare_store(tmp_path):
+    # With no consumer running, so that no timer settles anything during a test.
+    store = Store(tmp_path / "relay.sqlite3", 1000, 1000, 1000, 10**9)
+    yield store
+    store.close()
+
+
+def add(store, event_id, sync, message="{}"):
+    return store.add_event(
+        event_id, "detection", not sync, "cam-01", None, 1, 1.0, message, sync=sync
+    )
+
+
+def test_a_qos_0_row_waits_and_a_synced_row_commits_it_too(bare_store, tmp_path):
+    db = tmp_path / "relay.sqlite3"
+    add(bare_store, "update", False)
+    assert on_disk(db) == []
+    add(bare_store, "start", True)
+    assert on_disk(db) == ["update", "start"]
+
+
+def test_a_redelivery_of_a_row_still_held_back_commits_it(bare_store, tmp_path):
+    # Its acknowledgement says it is on disk.
+    add(bare_store, "same", False)
+    assert add(bare_store, "same", True) is False
+    assert on_disk(tmp_path / "relay.sqlite3") == ["same"]
+
+
+def test_a_heartbeat_commits_rows_held_back(bare_store, tmp_path):
+    add(bare_store, "update", False)
+    bare_store.add_heartbeat("cam-01", 1, 1.0, None, "{}", 10)
+    assert on_disk(tmp_path / "relay.sqlite3") == ["update"]
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        lambda store: store.events_after(0, 10),
+        lambda store: store.events_latest(10),
+        lambda store: store.events_from_time(0, 10),
+        lambda store: store.latest_seq(),
+        lambda store: store.track_of_event("cam-01", "update"),
+        lambda store: store.stored_bytes(),
+    ],
+)
+def test_no_read_of_events_can_see_a_row_that_is_not_on_disk(bare_store, tmp_path, read):
+    add(bare_store, "update", False)
+    read(bare_store)
+    assert on_disk(tmp_path / "relay.sqlite3") == ["update"]
+
+
+def test_rows_held_back_are_limited(bare_store, tmp_path):
+    for index in range(_MAX_DEFERRED - 1):
+        add(bare_store, f"update-{index}", False)
+    assert on_disk(tmp_path / "relay.sqlite3") == []
+    add(bare_store, "last", False)
+    assert len(on_disk(tmp_path / "relay.sqlite3")) == _MAX_DEFERRED
+
+
+def test_closing_commits_rows_held_back(tmp_path):
+    store = Store(tmp_path / "relay.sqlite3", 1000, 1000, 1000, 10**9)
+    add(store, "update", False)
+    store.close()
+    assert on_disk(tmp_path / "relay.sqlite3") == ["update"]
+
+
+def test_the_consumer_settles_a_qos_0_row_on_its_own(relay, tmp_path):
+    message = detection("object_update")
+    relay.mqtt.deliver(DETECTIONS, message, qos=0)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not on_disk(tmp_path / "relay.sqlite3"):
+        time.sleep(0.01)
+    assert on_disk(tmp_path / "relay.sqlite3") == [message["event_id"]]
+
+
+def test_a_qos_1_update_is_on_disk_when_acknowledged(relay, tmp_path):
+    seen = []
+    real = relay.mqtt.ack
+
+    def ack(mid, qos):
+        seen.append(on_disk(tmp_path / "relay.sqlite3"))
+        real(mid, qos)
+
+    relay.mqtt.ack = ack
+    message = detection("object_update")
+    relay.mqtt.deliver(DETECTIONS, message, qos=1)
+    assert seen == [[message["event_id"]]]
+
+
+class FailingCommits:
+    """A connection whose commits fail as they do on a full disk."""
+
+    def __init__(self, db):
+        self.db = db
+
+    def __getattr__(self, name):
+        return getattr(self.db, name)
+
+    def execute(self, sql, *args):
+        if sql == "COMMIT":
+            raise sqlite3.OperationalError("database or disk is full")
+        return self.db.execute(sql, *args)
+
+
+def test_a_failed_commit_undoes_the_batch_counts_it_and_leaves_reads_working(bare_store, tmp_path):
+    add(bare_store, "kept", True, "{}")
+    before = bare_store.stored_bytes()
+    add(bare_store, "update-1", False, "xxxx")
+    add(bare_store, "update-2", False, "xxxx")
+    real = bare_store._db
+    bare_store._db = FailingCommits(real)
+    try:
+        # A read carries on with what is on disk.
+        assert [row["event_id"] for row in bare_store.events_after(0, 10)] == ["kept"]
+        assert bare_store.lost_rows() == {"full": 2}
+        with pytest.raises(sqlite3.OperationalError):
+            add(bare_store, "start", True)
+        # That one the broker sends again, so it is not counted as lost.
+        assert bare_store.lost_rows() == {"full": 2}
+    finally:
+        bare_store._db = real
+    assert bare_store._bytes == before == bare_store.stored_bytes()
+    assert add(bare_store, "start", True) is True
+    assert on_disk(tmp_path / "relay.sqlite3") == ["kept", "start"]
+
+
+def test_rows_lost_to_a_failed_commit_show_in_the_store_counts(relay, monkeypatch):
+    store = relay.app.state.store
+    monkeypatch.setattr(store, "lost_rows", lambda: {"full": 2, "other": 1})
+    broker = relay.http.get("/nodes").json()["broker"]
+    assert (broker["store_full"], broker["store_errors"]) == (2, 1)
 
 
 def test_stream_batches_are_capped_by_bytes(relay):

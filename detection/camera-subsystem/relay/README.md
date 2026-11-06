@@ -143,7 +143,10 @@ cue-ack events last longer (200,000), and all of them together are held under 25
 updates going first. At most 8 event streams can be open (`RELAY_MAX_STREAMS`).
 
 **What is lost when.** A QoS 1 message is acknowledged only after SQLite has it on disk, so a power cut on this
-host loses no acknowledged event from the API's store. If the disk is full, nothing is acknowledged: the API
+host loses no acknowledged event from the API's store. An `object_update` is QoS 0, best effort and never
+acknowledged, so it shares the next commit instead of costing a disk flush of its own, and a kill or power cut of
+the API can lose the last 250 ms of them, at most 127. No client has seen those, as a read of events commits first.
+If the disk is full, nothing is acknowledged: the API
 counts `store_full`, retries every 5 s, and the broker sends the message again after a reconnect. While the API
 is down, the bundled broker holds its messages up to 100,000 or 64 MiB, and past that it drops new ones, though
 nodes already hold their PUBACK. A clean stop of the broker loses nothing. **A kill or power cut of the broker

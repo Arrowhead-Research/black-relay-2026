@@ -6,13 +6,24 @@ back to an old address.
 
 ``synchronous=FULL``: a commit is on disk when it returns, because a message is acknowledged to
 the broker only after that, and the node then deletes it from its outbox.
+
+One thing is held back. A QoS 0 ``object_update`` is never acknowledged, and it arrives far more
+often than anything else, so its row can wait in an open transaction for the next commit, which
+saves that fsync. Any other write commits it too, before it is acknowledged, and any read of events
+commits it first, so that no client ever sees a row which is not on disk.
 """
 
 import fcntl
+import logging
 import os
 import sqlite3
 import threading
+from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS nodes (
@@ -41,6 +52,8 @@ DROP INDEX IF EXISTS events_by_time;
 NEW = "new"
 NEW_EVICTED = "new_evicted"
 OLD = "old"
+# QoS 0 rows held back at most, and the caller settles them on a timer as well.
+_MAX_DEFERRED = 128
 
 
 class StoreLocked(Exception):
@@ -70,6 +83,8 @@ class Store:
         self._retain_bytes = retain_bytes
         self._check_every = check_every
         self._since_check = 0
+        self._deferred = 0
+        self._lost: Counter[str] = Counter()
         with self._lock:
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.execute("PRAGMA synchronous=FULL")
@@ -78,8 +93,60 @@ class Store:
 
     def close(self) -> None:
         with self._lock:
+            self._settle()
             self._db.close()
         os.close(self._lock_fd)
+
+    @contextmanager
+    def _writing(self, sync: bool = True) -> Iterator[None]:
+        """One transaction, joining any rows held back. With ``sync`` it is on disk at the end.
+        On a failure everything in it is undone, so the caller's message counts as not stored."""
+        with self._lock:
+            try:
+                if not self._db.in_transaction:
+                    self._db.execute("BEGIN IMMEDIATE")
+                yield
+                if sync or self._deferred + 1 >= _MAX_DEFERRED:
+                    self._db.execute("COMMIT")
+                    self._deferred = 0
+                else:
+                    self._deferred += 1
+            except sqlite3.Error as error:
+                self._abandon(error)
+                raise
+
+    @contextmanager
+    def _reading_events(self) -> Iterator[None]:
+        with self._lock:
+            self._settle()
+            yield
+
+    def _settle(self) -> None:
+        """Never raises, as a full disk must not stop reads."""
+        if self._db.in_transaction:
+            try:
+                self._db.execute("COMMIT")
+                self._deferred = 0
+            except sqlite3.Error as error:
+                self._abandon(error)
+
+    def _abandon(self, error: sqlite3.Error) -> None:
+        """Rows held back are QoS 0, so nothing will send them again. They are lost, and counted."""
+        if self._deferred:
+            self._lost["full" if "full" in str(error) else "other"] += self._deferred
+            logger.warning("lost %d object updates: %s", self._deferred, type(error).__name__)
+            self._deferred = 0
+        if self._db.in_transaction:
+            self._db.execute("ROLLBACK")
+        self._bytes = self._total_bytes()
+
+    def settle(self) -> None:
+        with self._lock:
+            self._settle()
+
+    def lost_rows(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self._lost)
 
     def add_heartbeat(
         self,
@@ -97,7 +164,7 @@ class Store:
         clock cannot make the truth from the same node look old. When the table is full, the
         node silent longest makes room, as a real node must always get in.
         """
-        with self._lock:
+        with self._writing():
             known = self._db.execute(
                 "SELECT min(timestamp_us, CAST(received_at * 1000000 AS INTEGER)) AS newest "
                 "FROM nodes WHERE node_id = ?",
@@ -127,7 +194,7 @@ class Store:
             return NEW
 
     def prune_nodes(self, unseen_since: float) -> int:
-        with self._lock:
+        with self._writing():
             return self._db.execute(
                 "DELETE FROM nodes WHERE received_at < ?", (unseen_since,)
             ).rowcount
@@ -157,9 +224,12 @@ class Store:
         timestamp_us: int,
         received_at: float,
         message: str,
+        *,
+        sync: bool = True,
     ) -> bool:
-        """False if this ``event_id`` is already held: delivery is at-least-once."""
-        with self._lock:
+        """False if this ``event_id`` is already held: delivery is at-least-once. With ``sync``,
+        which the default keeps, the row and any held back are on disk when this returns."""
+        with self._writing(sync):
             cursor = self._db.execute(
                 "INSERT OR IGNORE INTO events (event_id, kind, durable, node_id, object_id, "
                 "timestamp_us, received_at, message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -186,7 +256,7 @@ class Store:
             return True
 
     def stored_bytes(self) -> int:
-        with self._lock:
+        with self._reading_events():
             return self._total_bytes()
 
     def _total_bytes(self) -> int:
@@ -208,9 +278,7 @@ class Store:
                 "SELECT sum(length(message)) FROM events WHERE durable = ? AND seq <= ?",
                 (durable, cut[0]),
             ).fetchone()[0]
-            self._db.execute(
-                "DELETE FROM events WHERE durable = ? AND seq <= ?", (durable, cut[0])
-            )
+            self._db.execute("DELETE FROM events WHERE durable = ? AND seq <= ?", (durable, cut[0]))
             self._bytes -= freed
 
     def _prune_by_bytes(self) -> None:
@@ -240,7 +308,7 @@ class Store:
         returns at least one row if there is one, or a large row could never be sent."""
         rows = []
         size = 0
-        with self._lock:
+        with self._reading_events():
             for row in self._db.execute(
                 "SELECT * FROM events WHERE seq > ? ORDER BY seq LIMIT ?", (seq, limit)
             ):
@@ -251,25 +319,25 @@ class Store:
         return rows
 
     def events_from_time(self, timestamp_us: int, limit: int) -> list[sqlite3.Row]:
-        with self._lock:
+        with self._reading_events():
             return self._db.execute(
                 "SELECT * FROM events WHERE timestamp_us >= ? ORDER BY seq LIMIT ?",
                 (timestamp_us, limit),
             ).fetchall()
 
     def events_latest(self, limit: int) -> list[sqlite3.Row]:
-        with self._lock:
+        with self._reading_events():
             rows = self._db.execute(
                 "SELECT * FROM events ORDER BY seq DESC LIMIT ?", (limit,)
             ).fetchall()
         return rows[::-1]
 
     def latest_seq(self) -> int:
-        with self._lock:
+        with self._reading_events():
             return self._db.execute("SELECT coalesce(max(seq), 0) FROM events").fetchone()[0]
 
     def track_of_event(self, node_id: str, event_id: str) -> str | None:
-        with self._lock:
+        with self._reading_events():
             row = self._db.execute(
                 "SELECT object_id FROM events WHERE node_id = ? AND event_id = ?",
                 (node_id, event_id),
