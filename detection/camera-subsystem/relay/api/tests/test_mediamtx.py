@@ -163,6 +163,48 @@ def test_a_quick_pass_makes_no_call_for_a_path_already_right(relay):
     assert relay.mediamtx.calls == []
 
 
+def test_a_full_pass_with_nothing_changed_is_one_listing_for_any_number_of_nodes(relay):
+    for index in range(1, 5):
+        relay.mqtt.deliver(
+            STATUS, heartbeat(node_id=f"cam-0{index}", address=f"192.168.8.2{index}")
+        )
+    relay.sync_paths(full=True)
+    relay.mediamtx.calls.clear()
+    relay.sync_paths(full=True)
+    assert [(call.method, call.url.path) for call in relay.mediamtx.calls] == [
+        ("GET", "/v3/config/paths/list")
+    ]
+
+
+def test_a_path_changed_behind_the_api_is_put_right_by_a_full_pass(relay):
+    relay.mqtt.deliver(STATUS, heartbeat())
+    relay.sync_paths(full=True)
+    right = dict(relay.mediamtx.paths["cam-01"])
+    relay.mediamtx.paths["cam-01"]["source"] = "rtsp://x:y@192.168.8.99:8554/cam-01"
+    relay.sync_paths(full=True)
+    assert relay.mediamtx.paths["cam-01"] == right
+
+
+def test_with_the_list_unreadable_each_path_is_still_checked_and_none_removed(relay):
+    original = type(relay.mediamtx).__call__
+
+    def no_list(self, request):
+        if request.url.path == "/v3/config/paths/list":
+            self.calls.append(request)
+            return httpx.Response(500, json={"error": "no"})
+        return original(self, request)
+
+    relay.mediamtx.paths["ghost"] = {"source": "rtsp://x:y@192.168.8.9:8554/ghost"}
+    relay.mqtt.deliver(STATUS, heartbeat())
+    type(relay.mediamtx).__call__ = no_list
+    try:
+        relay.sync_paths(full=True)
+    finally:
+        type(relay.mediamtx).__call__ = original
+    assert set(relay.mediamtx.paths) == {"cam-01", "ghost"}
+    assert relay.http.get("/nodes").json()["paths"]["failing"] == 0
+
+
 def test_no_path_is_created_until_the_egress_guard_says_it_is_ready(make_relay, tmp_path):
     # Docker's restart at boot ignores depends_on, so MediaMTX can run with the guard's rules
     # not loaded. With no path it has no source, and so nothing to dial.

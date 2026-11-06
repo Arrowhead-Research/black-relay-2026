@@ -165,20 +165,23 @@ class PathSync:
             for node_id in set(self._backoff) - set(desired):
                 self._backoff.pop(node_id, None)
             self._failing &= set(desired)
+            listed = await self._list_paths() if full else None
             for node_id, source in desired.items():
                 if not full and self._applied.get(node_id) == source:
                     continue
-                await self._sync_node(node_id, source)
-            if full:
-                await self._remove_unreported(desired)
+                await self._sync_node(node_id, source, listed)
+            if listed is not None:
+                await self._remove_unreported(listed, desired)
             self._last_sync_at = self._clock()
 
-    async def _sync_node(self, node_id: str, source: str) -> None:
+    async def _sync_node(self, node_id: str, source: str, listed: dict[str, dict] | None) -> None:
         waiting = self._backoff.get(node_id)
         if waiting is not None and time.monotonic() < waiting[1]:
             return
         try:
-            await self._apply(node_id, source)
+            # One listing covers every node that is already right, with no call of its own.
+            if listed is None or not _holds(listed.get(node_id), path_config(source)):
+                await self._apply(node_id, source)
         except Exception as error:
             # Anything at all: one node's trouble must not end this task and every later path.
             self._applied.pop(node_id, None)
@@ -204,17 +207,16 @@ class PathSync:
             logger.info("path %s created", node_id)
             return
         self._check(current)
-        held = current.json()
-        if all(held.get(key) == value for key, value in desired.items()):
+        if _holds(current.json(), desired):
             return
         self._check(await self._client.patch(f"/v3/config/paths/patch/{node_id}", json=desired))
         logger.info("path %s updated", node_id)
 
-    async def _remove_unreported(self, desired: dict[str, str]) -> None:
-        """mediamtx.yml lists no paths, so any path not wanted here is this API's own leftover."""
+    async def _list_paths(self) -> dict[str, dict] | None:
+        """Every path's config, or None if that cannot be read, when each node asks for its own."""
         try:
             page = 0
-            names: list[str] = []
+            paths: dict[str, dict] = {}
             while True:
                 response = await self._client.get(
                     "/v3/config/paths/list",
@@ -222,21 +224,32 @@ class PathSync:
                 )
                 self._check(response)
                 body = response.json()
-                names += [item["name"] for item in body["items"]]
+                paths.update({item["name"]: item for item in body["items"]})
                 page += 1
                 if page >= body["pageCount"]:
-                    break
-            for name in names:
+                    return paths
+        except Exception as error:
+            logger.warning("could not read the list of paths: %s", _describe(error))
+            return None
+
+    async def _remove_unreported(self, listed: dict[str, dict], desired: dict[str, str]) -> None:
+        """mediamtx.yml lists no paths, so any path not wanted here is this API's own leftover."""
+        try:
+            for name in listed:
                 if name not in desired:
                     self._check(await self._client.delete(f"/v3/config/paths/delete/{name}"))
                     logger.info("path %s removed", name)
         except Exception as error:
-            logger.warning("could not check for leftover paths: %s", _describe(error))
+            logger.warning("could not remove leftover paths: %s", _describe(error))
 
     @staticmethod
     def _check(response: httpx.Response) -> None:
         if response.status_code >= 300:
             raise _Refused(response.status_code)
+
+
+def _holds(held: dict | None, desired: dict) -> bool:
+    return held is not None and all(held.get(key) == value for key, value in desired.items())
 
 
 def _describe(error: Exception) -> str:
