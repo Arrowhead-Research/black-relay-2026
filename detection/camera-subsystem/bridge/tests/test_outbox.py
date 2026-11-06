@@ -31,9 +31,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 
 from camerabridge import formats
+from camerabridge import outbox as outbox_module
 from camerabridge.outbox import Outbox
 
 FIXED_TS = "2026-11-04T19:40:01Z"
@@ -411,6 +413,159 @@ def test_enqueue_does_not_serialize_the_backlog_again(tmp_path, monkeypatch):
     monkeypatch.setattr(box, "_line", lambda entry: (calls.append(1), real(entry))[1])
     box.enqueue(formats.TOPIC_DETECTIONS, make_detection("object_end", 1), durable=True)
     assert len(calls) <= 2
+
+
+# --- rewrites: what the SD card pays for an ack ------------------------------
+
+
+def _big_box(tmp_path, count, **kwargs):
+    path = tmp_path / "big.jsonl"
+    box = Outbox(str(path), max_bytes=kwargs.pop("max_bytes", 64_000_000), max_age_s=1e9, **kwargs)
+    box.enqueue_many(
+        [(formats.TOPIC_DETECTIONS, make_detection("object_start", i)) for i in range(count)]
+    )
+    return path, box
+
+
+def _event_ids_in(path):
+    return [json.loads(json.loads(line)["bytes"])["event_id"] for line in path.read_text().splitlines()]
+
+
+def test_acking_the_last_entry_empties_the_file_with_no_sync_or_new_file(tmp_path, monkeypatch):
+    path = tmp_path / "outbox.jsonl"
+    box = Outbox(str(path), max_bytes=10_000_000, max_age_s=1e9)
+    box.enqueue(formats.TOPIC_DETECTIONS, make_detection("object_start", 1), durable=True)
+    mids = box.flush(RecordingPublish())
+    fsyncs, replaces = [], []
+    monkeypatch.setattr(outbox_module.os, "fsync", lambda fd: fsyncs.append(fd))
+    monkeypatch.setattr(outbox_module.os, "replace", lambda a, b: replaces.append(b))
+    box.ack_many(mids)
+    assert path.read_bytes() == b""
+    assert fsyncs == [] and replaces == []
+
+
+def test_an_enqueue_still_syncs_before_it_can_be_sent(tmp_path, monkeypatch):
+    path = tmp_path / "outbox.jsonl"
+    box = Outbox(str(path), max_bytes=10_000_000, max_age_s=1e9)
+    events = []
+    real_fsync = outbox_module.os.fsync
+    monkeypatch.setattr(
+        outbox_module.os, "fsync", lambda fd: (events.append("fsync"), real_fsync(fd))[1]
+    )
+    box.enqueue(formats.TOPIC_DETECTIONS, make_detection("object_start", 1), durable=True)
+    publish = RecordingPublish()
+    real_call = publish.__call__
+    box.flush(lambda *args: (events.append("publish"), real_call(*args))[1])
+    assert events == ["fsync", "publish"]
+
+
+def test_a_rewrite_of_a_real_backlog_still_syncs_before_it_replaces(tmp_path, monkeypatch):
+    # An empty file can lose nothing, but this holds entries that are not on any broker.
+    path, box = _big_box(tmp_path, 40)
+    mids = box.flush(RecordingPublish())
+    events = []
+    real_fsync, real_replace = outbox_module.os.fsync, outbox_module.os.replace
+    monkeypatch.setattr(
+        outbox_module.os, "fsync", lambda fd: (events.append("fsync"), real_fsync(fd))[1]
+    )
+    monkeypatch.setattr(
+        outbox_module.os, "replace", lambda a, b: (events.append("replace"), real_replace(a, b))[1]
+    )
+    box.ack_many(mids)
+    assert events == ["fsync", "replace"]
+
+
+def test_a_large_replay_writes_a_small_multiple_of_the_backlog(tmp_path, monkeypatch):
+    path, box = _big_box(tmp_path, 2000)
+    backlog = path.stat().st_size
+    assert backlog > 16 * outbox_module._DEAD_MIN_BYTES
+    written = [0]
+    real = outbox_module.os.replace
+
+    def counting(source, target):
+        written[0] += os.path.getsize(source)
+        real(source, target)
+
+    monkeypatch.setattr(outbox_module.os, "replace", counting)
+    publish = RecordingPublish()
+    box.replay(publish)
+    sent = 0
+    while box._entries:
+        mids = list(box._inflight)
+        sent += len(mids)
+        for mid in mids:  # one at a time, as paho's network thread delivers them
+            box.ack(mid)
+            box.flush(publish)
+    assert sent == 2000
+    assert path.read_bytes() == b""
+    assert written[0] < 20 * backlog
+
+
+def test_a_crash_during_a_replay_loses_nothing_and_resends_only_a_bounded_tail(tmp_path):
+    path, box = _big_box(tmp_path, 2000)
+    all_ids = _event_ids_in(path)
+    backlog = path.stat().st_size
+    publish = RecordingPublish()
+    box.replay(publish)
+    acked = 0
+    while acked < 700:
+        mids = list(box._inflight)
+        box.ack_many(mids)
+        acked += len(mids)
+        box.flush(publish)
+
+    # The process dies here: a new Outbox sees only the file.
+    reopened = Outbox(str(path), max_bytes=64_000_000, max_age_s=1e9)
+    on_disk = [json.loads(e.payload)["event_id"] for e in reopened._entries.values()]
+    still_owed = all_ids[acked:]
+    assert on_disk[-len(still_owed):] == still_owed
+    assert on_disk == all_ids[all_ids.index(on_disk[0]):]
+    allowed = max(min(outbox_module._DEAD_MAX_BYTES, backlog // 8), outbox_module._DEAD_MIN_BYTES)
+    assert sum(entry.size for entry in reopened._entries.values()) - box._live_bytes <= allowed
+
+
+def test_new_entries_after_kept_lines_survive_a_crash_in_order(tmp_path):
+    path, box = _big_box(tmp_path, 2000)
+    publish = RecordingPublish()
+    box.replay(publish)
+    box.ack_many(list(box._inflight))
+    assert box._dead_bytes > 0
+    message = make_detection("object_end", 9999)
+    box.enqueue(formats.TOPIC_DETECTIONS, message, durable=True)
+
+    reopened = Outbox(str(path), max_bytes=64_000_000, max_age_s=1e9)
+    ids = [json.loads(e.payload)["event_id"] for e in reopened._entries.values()]
+    assert ids[-1] == message["event_id"]
+    assert len(ids) == len(set(ids))
+
+
+def test_the_file_never_passes_max_bytes_even_while_it_keeps_acked_lines(tmp_path):
+    path = tmp_path / "cap.jsonl"
+    probe_line = len(json.dumps(make_detection("object_start", 0)))
+    cap = 1000 * probe_line
+    box = Outbox(str(path), max_bytes=cap, max_age_s=1e9)
+    publish = RecordingPublish()
+    for i in range(1500):
+        box.enqueue(formats.TOPIC_DETECTIONS, make_detection("object_start", i), durable=True)
+        assert path.stat().st_size <= cap
+        if i % 7 == 0:
+            box.flush(publish)
+            box.ack_many(list(box._inflight)[:1])
+            assert path.stat().st_size <= cap
+
+
+def test_age_shed_lines_may_wait_for_a_rewrite_but_never_replay_in_memory(tmp_path):
+    clock = [0.0]
+    path, box = _big_box(tmp_path, 2000, time_fn=lambda: clock[0])
+    box._max_age_s = 10.0
+    clock[0] = 5.0
+    box.enqueue(formats.TOPIC_DETECTIONS, make_detection("object_end", 1), durable=True)
+    clock[0] = 12.0  # only the first 2000 are too old
+    box.enqueue(formats.TOPIC_DETECTIONS, make_detection("object_end", 2), durable=True)
+    assert len(box._entries) == 2
+    publish = RecordingPublish()
+    box.replay(publish)
+    assert len(publish.payloads) == 2
 
 
 # --- enqueue_many: one fsync and one overflow pass for a whole batch ---------

@@ -49,9 +49,18 @@ Send window
 At most :data:`_SEND_WINDOW` entries are in flight (sent and unacked) at once;
 acknowledgements open the window for the next ones. A large backlog therefore never
 sits in the MQTT client's memory, and a replay costs a bounded amount of work per
-round trip. Acks are applied in batches (:meth:`ack_many`) with one file rewrite per
-batch, because a rewrite is proportional to the backlog and acks can arrive faster
-than one rewrite per ack can keep up with.
+round trip. Acks are applied in batches (:meth:`ack_many`), because acks can arrive
+faster than a rewrite per ack can keep up with.
+
+File rewrites
+-------------
+A rewrite is proportional to the backlog, and this file lives on an SD card, so an ack
+does not always rewrite. Past a small backlog the file may keep lines already acked,
+up to a share of its size (:data:`_DEAD_MAX_BYTES` at most). A crash then re-sends
+those lines, which at-least-once delivery allows and fusion dedupes by ``event_id``.
+An unacked line is never removed, so nothing can be lost by this. An acked line was
+never durably gone anyway: a rewrite never synced its directory. For the same reason
+emptying the file needs no sync at all.
 """
 
 from __future__ import annotations
@@ -79,6 +88,13 @@ _DURABLE_QOS = 1
 
 # Most entries in flight at once. Matches paho's default max_inflight_messages.
 _SEND_WINDOW = 20
+
+# A rewrite costs the whole backlog, and PUBACKs arrive one at a time on the thread doing the
+# rewrite, so a rewrite per ack wrote 2.3 GB to the SD card to replay a day's 1.4 MB outage. So the
+# file may hold acked lines, up to this share of its live bytes, within these limits.
+_DEAD_SHARE_DIVISOR = 8
+_DEAD_MIN_BYTES = 16 * 1024
+_DEAD_MAX_BYTES = 1024 * 1024
 
 # A publish callback: publish(topic, payload_bytes, qos) -> broker message id, or None
 # if the client did not accept the message (the entry stays unsent).
@@ -135,6 +151,8 @@ class Outbox:
         self._next_mid = 1
         # What the index occupies on disk, so that a size check does not measure the queue.
         self._live_bytes = 0
+        # What the file still holds for entries no longer in the index.
+        self._dead_bytes = 0
         self._load()
 
     # --- construction / reconstruction --------------------------------------
@@ -278,7 +296,7 @@ class Outbox:
             self._sent.discard(entry_mid)
             removed = True
         if removed:
-            self._rewrite()
+            self._rewrite_if_due()
 
     # --- overflow -----------------------------------------------------------
 
@@ -321,8 +339,9 @@ class Outbox:
             self._discard_entry_state(oldest_mid)
             dropped += 1
 
+        if dropped or self._live_bytes + self._dead_bytes > self._max_bytes:
+            self._rewrite_if_due()
         if dropped:
-            self._rewrite()
             logger.warning(
                 "outbox overflow: dropped %d oldest durable entr%s (FIFO) to stay "
                 "within max_bytes=%s / max_age_s=%s",
@@ -356,6 +375,17 @@ class Outbox:
     def _forget_size(self, entry: _Entry | None) -> None:
         if entry is not None:
             self._live_bytes -= entry.size
+            self._dead_bytes += entry.size
+
+    def _rewrite_if_due(self) -> None:
+        """Rewrite once the file's acked lines are worth the cost. See the module docstring."""
+        allowed = min(_DEAD_MAX_BYTES, self._live_bytes // _DEAD_SHARE_DIVISOR)
+        if (
+            self._live_bytes <= _DEAD_MIN_BYTES
+            or self._dead_bytes >= max(allowed, _DEAD_MIN_BYTES)
+            or self._live_bytes + self._dead_bytes > self._max_bytes
+        ):
+            self._rewrite()
 
     def _append(self, entries: list[_Entry]) -> None:
         """Append entries' lines to the file and fsync once (durable before send)."""
@@ -369,9 +399,14 @@ class Outbox:
         """Atomically rewrite the file from the index (used by ack/overflow).
 
         Writes a temp file, fsyncs it, then ``os.replace`` swaps it in so a crash
-        never leaves a half-written queue.
+        never leaves a half-written queue. An empty queue just truncates: this is the
+        usual case, once per message, and a crash can bring back only acked lines.
         """
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._dead_bytes = 0
+        if not self._entries:
+            self._path.open("w").close()
+            return
         tmp = self._path.with_name(self._path.name + ".tmp")
         with tmp.open("w", encoding="utf-8") as handle:
             for entry in self._entries.values():
