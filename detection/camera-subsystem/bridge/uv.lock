@@ -16,25 +16,27 @@ name = "camerabridge"
 version = "0.0.0"
 source = { editable = "." }
 dependencies = [
-    { name = "jsonschema" },
     { name = "paho-mqtt" },
     { name = "pyyaml" },
 ]
 
 [package.dev-dependencies]
 dev = [
+    { name = "jsonschema" },
     { name = "pytest" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "jsonschema", specifier = ">=4.20" },
     { name = "paho-mqtt", specifier = ">=2.2,<2.3" },
     { name = "pyyaml", specifier = ">=6.0" },
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8.0" }]
+dev = [
+    { name = "jsonschema", specifier = ">=4.20" },
+    { name = "pytest", specifier = ">=8.0" },
+]
 
 [[package]]
 name = "colorama"
