@@ -43,6 +43,7 @@ __all__ = [
     "write_bridge_config",
 ]
 
+# What a saved config must match. A save must also pass the relay's rule, below.
 _NODE_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 _RFC1123_LABEL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 _HTTP_URL_RE = re.compile(r"https?://\S+")
@@ -78,6 +79,12 @@ _NOT_A_CENTRAL_NODE = tuple(
 _ZONE_NAME_RE = re.compile(r"[a-zA-Z0-9_-]{2,}")
 _RELAY_USER_RE = re.compile(r"[a-zA-Z0-9._~@+-]+")
 _RELAY_PASSWORD_RE = re.compile(r"[!#%&(-\[\]-_a-~]*")
+
+# Copies of the rule in relayapi.nodes, which this package cannot import at run time. The relay
+# drops a message whose node or camera name breaks it, so a kit saved with one never appears on
+# central. relay/api/tests/test_node_id_rule.py holds the two equal.
+_RELAY_NODE_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
+_RELAY_RESERVED_NODE_IDS = frozenset({"all", "all_others"})
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -299,6 +306,17 @@ def frigate_problems(
     return [message for ok, message in checks if not ok]
 
 
+def _relay_name_problems(cfg: NodeConfig) -> list[str]:
+    """Why the central relay would refuse a name that :func:`validate_saved` has let through."""
+    return [
+        f"{field_name} must be at most 63 characters and not the reserved name all: "
+        "the central relay refuses anything else, and this kit would not appear there"
+        for field_name, name in (("node_id", cfg.node_id), ("frigate.camera", cfg.frigate.camera))
+        if _matches(_NODE_ID_RE, name)
+        and (not _matches(_RELAY_NODE_ID_RE, name) or name in _RELAY_RESERVED_NODE_IDS)
+    ]
+
+
 def validate(cfg: NodeConfig) -> list[str]:
     """Return every problem that stops ``cfg`` being saved, as readable text; empty means valid.
 
@@ -307,7 +325,7 @@ def validate(cfg: NodeConfig) -> list[str]:
     the clean-text rule, because spaces are legal in them.
     """
     broker = cfg.broker
-    problems = validate_saved(cfg)
+    problems = validate_saved(cfg) + _relay_name_problems(cfg)
     if not _is_ipv4_literal(broker.host):
         # This says more about the same field.
         problems = [problem for problem in problems if problem != _BROKER_HOST_RULE]

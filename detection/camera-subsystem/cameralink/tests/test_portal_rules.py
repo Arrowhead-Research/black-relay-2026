@@ -81,7 +81,7 @@ def test_the_portal_and_render_agree_on_a_word_yaml_or_frigate_might_keep(zone):
     assert portal_accepts(zones=[zone]) is render_accepts(zones=[zone])
 
 
-@pytest.mark.parametrize("node_id", ["a", "cam-01", "0", "a" * 33, "a" * 64, "a" * 300])
+@pytest.mark.parametrize("node_id", ["a", "cam-01", "0", "a" * 33, "a" * 63])
 def test_a_node_id_the_portal_saves_renders(node_id):
     cfg = NodeConfig(
         node_id=node_id,

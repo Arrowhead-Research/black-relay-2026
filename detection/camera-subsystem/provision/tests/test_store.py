@@ -1104,6 +1104,22 @@ def test_an_old_config_that_no_longer_passes_a_save_still_loads(
         store.save(replace(saved, wifi_psk="a-real-psk-1"))
 
 
+@pytest.mark.parametrize("node_id", ["all", "a" * 64])
+def test_an_old_node_id_the_relay_refuses_still_loads_and_cannot_be_saved_again(
+    store: NodeStore, paths: Paths, node_id: str
+) -> None:
+    store.save(config())
+    bridge = yaml.safe_load(paths.bridge_config.read_text())
+    bridge["node_id"] = node_id
+    paths.bridge_config.write_text(yaml.safe_dump(bridge))
+
+    saved = store.load()
+
+    assert saved is not None and saved.node_id == node_id
+    with pytest.raises(ValueError, match="node_id"):
+        store.save(replace(saved, wifi_psk="a-real-psk-1"))
+
+
 def test_an_old_tailscale_key_is_deleted_on_load(store: NodeStore, paths: Paths) -> None:
     old_image_files(store, paths)
     key = paths.state_dir / "tailscale.key"

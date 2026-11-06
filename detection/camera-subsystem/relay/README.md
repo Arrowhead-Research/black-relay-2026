@@ -47,7 +47,8 @@ Pi, a laptop and a server.
 5. In each node's portal, set the broker address to this host's LAN IP, the broker login to
    `RELAY_BROKER_USER` and `RELAY_BROKER_PASSWORD` from `.env`, and leave the time server on its
    default, which follows the broker address. A `node_id` must be at most 63 lowercase letters, digits
-   and hyphens, and not `all`. The portal allows a longer one, and the relay refuses it.
+   and hyphens, and not `all`. The portal refuses any other at save, but a node saved before that
+   rule keeps its old value until it is saved again, and the relay refuses that value.
 6. Check it. A node appears within a status interval, about 30 s.
 
    ```bash

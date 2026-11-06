@@ -107,6 +107,57 @@ def test_bad_node_id_is_rejected(node_id: Any) -> None:
     assert any("node_id" in e for e in errors)
 
 
+def node_id_errors(cfg: NodeConfig) -> list[str]:
+    return [error for error in validate(cfg) if error.startswith("node_id")]
+
+
+@pytest.mark.parametrize(
+    "node_id", ["all", "all_others", "~x", "~^.*$", "a" * 64, "a" * 300, "A" * 10, "-cam"]
+)
+def test_a_node_id_the_central_relay_refuses_gets_one_error_at_save(node_id: str) -> None:
+    assert len(node_id_errors(make_config(node_id=node_id))) == 1
+
+
+@pytest.mark.parametrize("node_id", ["a", "0", "cam-01", "cam-", "all-1", "al", "a" * 63])
+def test_a_node_id_the_central_relay_takes_can_be_saved(node_id: str) -> None:
+    assert validate(make_config(node_id=node_id)) == []
+
+
+@pytest.mark.parametrize(
+    ("node_id", "words"), [("all", "reserved"), ("a" * 64, "63 characters")]
+)
+def test_the_new_node_id_error_says_why_and_quotes_no_value(node_id: str, words: str) -> None:
+    errors = node_id_errors(make_config(node_id=node_id))
+
+    assert words in errors[0] and "central relay" in errors[0]
+    assert "a" * 64 not in errors[0]
+
+
+@pytest.mark.parametrize("camera", ["all", "a" * 64])
+def test_a_camera_name_the_central_relay_refuses_cannot_be_saved(camera: str) -> None:
+    cfg = make_config(frigate=FrigateConfig(base_url="http://cam-01.local:5000", camera=camera))
+
+    assert any(error.startswith("frigate.camera") for error in validate(cfg))
+    assert validate_saved(cfg) == []
+
+
+@pytest.mark.parametrize("node_id", ["all", "a" * 64, "a" * 300])
+def test_an_old_node_id_the_relay_refuses_passes_validate_saved(node_id: str) -> None:
+    assert validate_saved(make_config(node_id=node_id)) == []
+
+
+@pytest.mark.parametrize("node_id", ["all", "a" * 64])
+def test_the_bridge_config_is_not_written_for_a_node_id_the_relay_refuses(
+    tmp_path: Path, node_id: str
+) -> None:
+    path = tmp_path / "bridge.yaml"
+
+    with pytest.raises(ValueError, match="node_id"):
+        write_bridge_config(make_config(node_id=node_id), path)
+
+    assert not path.exists()
+
+
 @pytest.mark.parametrize(
     ("field", "overrides"),
     [

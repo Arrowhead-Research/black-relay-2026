@@ -449,6 +449,10 @@ def test_portal_only_fields_stay_out_of_the_bridge_yaml(tmp_path: Path) -> None:
         ("node_id", valid_form(node_id="cam\n")),  # must not be trimmed into validity
         ("node_id", valid_form(node_id="cam ")),
         ("node_id", valid_form(node_id="-cam")),
+        ("node_id", valid_form(node_id="all")),
+        ("node_id", valid_form(node_id="all_others")),
+        ("node_id", valid_form(node_id="~x")),
+        ("node_id", valid_form(node_id="a" * 64)),
         ("hostname", form_without("hostname")),
         ("hostname", valid_form(hostname="edge.local")),
         ("hostname", valid_form(hostname="edge\n")),
