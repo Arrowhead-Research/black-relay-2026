@@ -4,6 +4,7 @@ import pytest
 from conftest import CUE_ACKS, DETECTIONS, cue_ack, detection
 
 from relayapi.app import event_stream
+from relayapi.store import Store, StoreLocked
 
 
 def events(relay, **params):
@@ -105,6 +106,80 @@ def test_start_and_end_have_a_limit_too(make_relay):
     assert ids(events(relay, since=0, limit=1000)) == [m["event_id"] for m in messages[-2:]]
 
 
+def test_a_commit_reaches_the_disk_before_it_returns(relay):
+    # An acknowledgement follows the commit, and the node then deletes its copy.
+    db = relay.app.state.store._db
+    assert db.execute("PRAGMA synchronous").fetchone()[0] == 2  # FULL
+    assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+
+def test_retention_holds_a_byte_limit_too_taking_updates_first(make_relay):
+    relay = make_relay(
+        retain_bytes=6000, retain_updates=1000, retain_durable=1000, retention_check_every=1
+    )
+    start = detection("object_start", attributes={"x": "y" * 1000})
+    relay.mqtt.deliver(DETECTIONS, start)
+    updates = [detection("object_update", attributes={"x": "y" * 1000}) for _ in range(8)]
+    for update in updates:
+        relay.mqtt.deliver(DETECTIONS, update)
+    kept = ids(events(relay, since=0, limit=1000))
+    assert start["event_id"] in kept
+    assert updates[-1]["event_id"] in kept
+    assert updates[0]["event_id"] not in kept
+    assert relay.app.state.store.stored_bytes() <= 6000
+
+
+def test_when_only_start_and_end_are_left_the_byte_limit_still_holds(make_relay):
+    relay = make_relay(retain_bytes=3000, retention_check_every=1)
+    messages = [detection("object_start", attributes={"x": "y" * 1000}) for _ in range(6)]
+    for message in messages:
+        relay.mqtt.deliver(DETECTIONS, message)
+    kept = ids(events(relay, since=0, limit=1000))
+    assert messages[-1]["event_id"] in kept
+    assert messages[0]["event_id"] not in kept
+    assert relay.app.state.store.stored_bytes() <= 3000
+
+
+def test_byte_accounting_survives_a_restart(make_relay):
+    relay = make_relay(retain_bytes=1_000_000)
+    relay.mqtt.deliver(DETECTIONS, detection(attributes={"x": "y" * 1000}))
+    before = relay.app.state.store.stored_bytes()
+    assert before > 1000
+    relay.restart()
+    assert relay.app.state.store.stored_bytes() == before
+
+
+def test_stream_batches_are_capped_by_bytes(relay):
+    store = relay.app.state.store
+    for _ in range(5):
+        relay.mqtt.deliver(DETECTIONS, detection(attributes={"x": "y" * 1000}))
+    assert len(store.events_after(0, 100, max_bytes=3000)) == 3
+    # One row always comes back, or a large row could never be sent.
+    assert len(store.events_after(0, 100, max_bytes=1)) == 1
+
+
+def test_the_number_of_streams_is_limited(make_relay, monkeypatch):
+    relay = make_relay(max_streams=2)
+    calls = []
+
+    async def fake(store, after, **kwargs):
+        calls.append(after)
+        yield "id: 1\n\n"
+
+    monkeypatch.setattr("relayapi.app.event_stream", fake)
+    streams = relay.app.state.streams
+    assert streams.acquire() and streams.acquire()
+    response = relay.http.get("/events/stream")
+    assert response.status_code == 503
+    assert calls == []
+    streams.release()
+    assert relay.http.get("/events/stream").status_code == 200
+    # The stream that ran gave its place back.
+    assert streams.acquire()
+    streams.release()
+    streams.release()
+
+
 def test_stream_sends_new_events_in_order_with_their_cursor(relay):
     first = detection()
     relay.mqtt.deliver(DETECTIONS, first)
@@ -163,3 +238,14 @@ def test_stream_ignores_a_bad_last_event_id(relay, monkeypatch, value):
     response = relay.http.get("/events/stream", headers={"Last-Event-ID": value})
     assert response.status_code == 200
     assert seen["after"] == 1
+
+
+def test_a_second_api_on_the_same_database_refuses_to_start(relay):
+    # Two would keep pushing each other off the one broker session.
+    with pytest.raises(StoreLocked):
+        Store(relay.settings().db_path, 1, 1, 1, 1)
+
+
+def test_the_database_is_free_again_after_a_clean_stop(relay):
+    relay.restart()
+    assert relay.http.get("/nodes").status_code == 200

@@ -1,6 +1,7 @@
 """A relay API wired to fakes: an MQTT client, a node's Frigate and MediaMTX's control API."""
 
 import asyncio
+import ipaddress
 import json
 import types
 import uuid
@@ -17,6 +18,9 @@ from relayapi.settings import Settings
 TOKEN = "correct-horse-battery-staple"
 BROKER_USER = "relay"
 BROKER_PASSWORD = "br0ker%2F/p#w@rd:x"
+API_BROKER_USER = "relay-api-login"
+API_BROKER_PASSWORD = "api-broker-pass"
+SITE_SUBNET = "192.168.8.0/24"
 SCHEMAS = Path(__file__).resolve().parents[3] / "bridge" / "schemas"
 NOW = "2026-11-05T12:00:10Z"
 DETECTIONS = "detection/camera/detections"
@@ -91,13 +95,19 @@ class FakeMqtt:
         self.started = False
         self.stopped = False
         self.connect_target = None
+        self.acks = []
+        self.delays = []
+        self.next_mid = 0
         self.on_connect = self.on_disconnect = self.on_message = None
 
     def username_pw_set(self, username, password):
         self.credentials = (username, password)
 
     def reconnect_delay_set(self, min_delay, max_delay):
-        pass
+        self.delays.append(min_delay)
+
+    def ack(self, mid, qos):
+        self.acks.append(mid)
 
     def connect_async(self, host, port, keepalive=60):
         self.connect_target = (host, port)
@@ -123,10 +133,14 @@ class FakeMqtt:
         code = types.SimpleNamespace(is_failure=True)
         self.on_disconnect(self, None, None, code, None)
 
-    def deliver(self, topic, payload):
+    def deliver(self, topic, payload, qos=1):
+        """Returns the message's mid, to compare with ``acks``."""
         if not isinstance(payload, bytes):
             payload = json.dumps(payload).encode()
-        self.on_message(self, None, types.SimpleNamespace(topic=topic, payload=payload, qos=1))
+        self.next_mid += 1
+        message = types.SimpleNamespace(topic=topic, payload=payload, qos=qos, mid=self.next_mid)
+        self.on_message(self, None, message)
+        return self.next_mid
 
 
 class FakeMediaMtx:
@@ -141,6 +155,11 @@ class FakeMediaMtx:
         self.calls.append(request)
         if self.down:
             raise httpx.ConnectError("control API down", request=request)
+        if request.url.path == "/v3/config/paths/list":
+            items = [{"name": name, **conf} for name, conf in self.paths.items()]
+            return httpx.Response(
+                200, json={"pageCount": 1, "itemCount": len(items), "items": items}
+            )
         action, name = request.url.path.removeprefix("/v3/config/paths/").split("/", 1)
         if action == "get":
             if name in self.paths:
@@ -155,6 +174,9 @@ class FakeMediaMtx:
             if name not in self.paths:
                 return httpx.Response(404, json={"error": "path not found"})
             self.paths[name].update(json.loads(request.content))
+            return httpx.Response(200)
+        if action == "delete":
+            self.paths.pop(name, None)
             return httpx.Response(200)
         return httpx.Response(500)
 
@@ -222,6 +244,10 @@ class Relay:
             mediamtx_api_url="http://mediamtx.test:9997",
             mediamtx_api_user="relay-api",
             mediamtx_api_password="control-pass",
+            site_subnet=ipaddress.ip_network(SITE_SUBNET),
+            api_broker_user=API_BROKER_USER,
+            api_broker_password=API_BROKER_PASSWORD,
+            mqtt_client_id="relay-api-secret-id",
             db_path=self.tmp_path / "relay.sqlite3",
             schema_dir=SCHEMAS,
             path_sync_interval_s=3600.0,

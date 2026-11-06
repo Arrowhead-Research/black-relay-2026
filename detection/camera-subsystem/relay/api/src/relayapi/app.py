@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -16,7 +17,14 @@ from starlette.responses import Response, StreamingResponse
 from relayapi.auth import token_checker
 from relayapi.mediamtx import PathSync
 from relayapi.mqtt import Consumer, Ingest, make_client
-from relayapi.nodes import NO_CENTRAL_PROXY, attributes_of, report, timestamp_us
+from relayapi.nodes import (
+    NO_CENTRAL_PROXY,
+    READ_FAILURES,
+    AddressPolicy,
+    attributes_of,
+    report,
+    timestamp_us,
+)
 from relayapi.proxy import FrigateProxy, frigate_target
 from relayapi.settings import Settings
 from relayapi.store import Store
@@ -25,6 +33,7 @@ _MAX_SEQ = 2**63 - 1
 _PROXY_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]
 _SNAPSHOT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _STREAM_BATCH = 100
+_STREAM_BATCH_BYTES = 256 * 1024
 
 
 def _event_json(row) -> str:
@@ -44,7 +53,7 @@ async def event_stream(
     seq = after
     last_sent = time.monotonic()
     while True:
-        rows = await asyncio.to_thread(store.events_after, seq, _STREAM_BATCH)
+        rows = await asyncio.to_thread(store.events_after, seq, _STREAM_BATCH, _STREAM_BATCH_BYTES)
         for row in rows:
             seq = row["seq"]
             last_sent = time.monotonic()
@@ -74,6 +83,34 @@ def _parse_since(since: str | None) -> tuple[int | None, int | None]:
         raise refused from None
 
 
+class _StreamLimit:
+    """Every open stream holds a batch in memory, so their number is limited."""
+
+    def __init__(self, limit: int):
+        self._limit = limit
+        self._open = 0
+        self._lock = threading.Lock()
+
+    def acquire(self) -> bool:
+        with self._lock:
+            if self._open >= self._limit:
+                return False
+            self._open += 1
+            return True
+
+    def release(self) -> None:
+        with self._lock:
+            self._open -= 1
+
+
+async def _held(stream: AsyncIterator[str], limit: _StreamLimit) -> AsyncIterator[str]:
+    try:
+        async for chunk in stream:
+            yield chunk
+    finally:
+        limit.release()
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -87,15 +124,20 @@ def create_app(
         level=os.environ.get("RELAY_LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    # httpx logs each URL at INFO, with its query, and every node's address.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     settings = Settings.from_env() if settings is None else settings
+    policy = AddressPolicy(settings.site_subnet, settings.internal_subnets, settings.central_ip)
     store = Store(
         settings.db_path,
         settings.retain_updates,
         settings.retain_durable,
         settings.retention_check_every,
+        settings.retain_bytes,
     )
-    path_sync = PathSync(settings, store, mediamtx_transport)
-    ingest = Ingest(settings, store, clock, on_address=path_sync.wake)
+    path_sync = PathSync(settings, store, policy, clock, mediamtx_transport)
+    ingest = Ingest(settings, store, policy, clock, on_address=path_sync.wake)
+    streams = _StreamLimit(settings.max_streams)
     consumer = Consumer(settings, ingest, mqtt_client_factory)
     proxy = FrigateProxy(settings, node_transport)
 
@@ -124,17 +166,37 @@ def create_app(
     )
     app.state.store = store
     app.state.path_sync = path_sync
-    app.state.proxy = proxy
+    app.state.consumer = consumer
+    app.state.streams = streams
 
     @app.get("/nodes")
     def list_nodes() -> Response:
         now = clock()
-        body = {
-            "broker": {"connected": consumer.connected, "dropped": ingest.dropped()},
-            "nodes": [report(row, now, settings.stale_after_s) for row in store.nodes()],
-        }
+        listed = []
+        unreadable = 0
+        for row in store.nodes():
+            # Each by itself: one row that cannot be read or encoded must not take the list down.
+            try:
+                node = report(row, policy, now, settings.stale_after_s, settings.max_depth)
+                listed.append(json.dumps(node))
+            except READ_FAILURES:
+                unreadable += 1
+        head = json.dumps(
+            {
+                "broker": {
+                    "connected": consumer.connected,
+                    "reconnects": consumer.reconnects,
+                    "unacked": consumer.unacked(),
+                    "dropped": ingest.dropped(),
+                    **ingest.store_failures(),
+                },
+                "paths": path_sync.status(),
+                "unreadable_nodes": unreadable,
+            }
+        )
         # ASCII-only, because a message can hold a lone surrogate, which UTF-8 cannot encode.
-        return Response(json.dumps(body, allow_nan=False), media_type="application/json")
+        body = f'{head[:-1]},"nodes":[{",".join(listed)}]}}'
+        return Response(body, media_type="application/json")
 
     @app.get("/events")
     def list_events(
@@ -159,8 +221,10 @@ def create_app(
                 after = int(last_event_id)
         if after is None:
             after = store.latest_seq()
+        if not streams.acquire():
+            raise HTTPException(status_code=503, detail="too many event streams are open")
         return StreamingResponse(
-            event_stream(store, after),
+            _held(event_stream(store, after), streams),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )
@@ -170,7 +234,12 @@ def create_app(
         row = store.node(node_id)
         if row is None:
             raise HTTPException(status_code=404, detail=f"no heartbeat from node {node_id}")
-        reason = attributes_of(row["message"]).get("reason")
+        try:
+            reason = attributes_of(row["message"]).get("reason")
+        except READ_FAILURES:
+            raise HTTPException(
+                status_code=503, detail=f"node {node_id}'s last heartbeat cannot be read"
+            ) from None
         if isinstance(reason, str) and NO_CENTRAL_PROXY in reason:
             raise HTTPException(
                 status_code=503,
@@ -179,11 +248,13 @@ def create_app(
                     "it shares no proxy secret and its live view is on loopback only"
                 ),
             )
-        if row["node_address"] is None:
+        # Checked again here, as a database can be older than today's rule.
+        address = policy.check(row["node_address"])
+        if address is None:
             raise HTTPException(
-                status_code=503, detail=f"node {node_id} has not reported an address"
+                status_code=503, detail=f"node {node_id} has not reported a usable address"
             )
-        return row["node_address"]
+        return address
 
     @app.get("/nodes/{node_id}/snapshot/{event_id}.jpg")
     async def snapshot(node_id: str, event_id: str, request: Request) -> Response:

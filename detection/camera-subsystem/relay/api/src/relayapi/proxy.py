@@ -219,15 +219,14 @@ class FrigateProxy:
                 PROXY_SECRET_HEADER: self._secret,
                 # So that the body can be checked for the secret.
                 "Accept-Encoding": "identity",
-                # Frigate's nginx writes this into the UI's links.
-                "X-Ingress-Path": base,
             }
         )
         loop = asyncio.get_running_loop()
         deadline = loop.time() + total
-        url = httpx.URL(scheme="https", host=address, port=FRIGATE_PORT).copy_with(raw_path=target)
-        outgoing = self._client.build_request(method, url, headers=headers, content=body)
         try:
+            url = httpx.URL(scheme="https", host=address, port=FRIGATE_PORT)
+            url = url.copy_with(raw_path=target)
+            outgoing = self._client.build_request(method, url, headers=headers, content=body)
             async with asyncio.timeout(total):
                 upstream = await self._client.send(outgoing, stream=True)
         except (TimeoutError, httpx.TimeoutException):

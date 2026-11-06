@@ -1,3 +1,5 @@
+import hmac
+import logging
 import re
 
 import pytest
@@ -13,6 +15,10 @@ ENV = {
     "RELAY_MEDIAMTX_API_URL": "http://mediamtx:9997",
     "RELAY_MEDIAMTX_API_USER": "relay-api",
     "RELAY_MEDIAMTX_API_PASSWORD": "ctl",
+    "RELAY_SITE_SUBNET": "192.168.8.0/24",
+    "RELAY_API_BROKER_USER": "relay-api",
+    "RELAY_API_BROKER_PASSWORD": "api-pw",
+    "RELAY_MQTT_CLIENT_ID": "relay-api-secret",
 }
 
 
@@ -91,6 +97,10 @@ def test_the_factory_refuses_to_build_an_open_app(monkeypatch):
         "RELAY_MEDIAMTX_API_URL",
         "RELAY_MEDIAMTX_API_USER",
         "RELAY_MEDIAMTX_API_PASSWORD",
+        "RELAY_SITE_SUBNET",
+        "RELAY_API_BROKER_USER",
+        "RELAY_API_BROKER_PASSWORD",
+        "RELAY_MQTT_CLIENT_ID",
     ],
 )
 def test_other_required_settings_stop_startup(name):
@@ -109,7 +119,80 @@ def test_settings_error_and_repr_hold_no_secret():
     assert TOKEN not in str(error.value)
 
 
+def test_the_token_is_compared_in_constant_time(relay, monkeypatch):
+    # Timing cannot be measured here, so this checks that the comparison used is the right one.
+    calls = []
+    real = hmac.compare_digest
+
+    def spy(a, b):
+        calls.append((a, b))
+        return real(a, b)
+
+    monkeypatch.setattr("relayapi.auth.hmac.compare_digest", spy)
+    assert TestClient(relay.app).get("/nodes").status_code == 401
+    client = TestClient(relay.app)
+    client.get("/nodes", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert (TOKEN.encode(), TOKEN.encode()) in calls
+
+
+@pytest.mark.parametrize(
+    "subnet",
+    [
+        "",
+        "banana",
+        "192.168.8.1/24",  # host bits set
+        "192.168.8.5",
+        "192.168.8.0/31",
+        "192.168.8.0/32",
+        "fd00::/64",
+        "0.0.0.0/0",
+        "0.0.0.0/1",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "224.0.0.0/4",
+        "240.0.0.0/4",
+        "192.168.8.0/24\n",
+    ],
+)
+def test_an_unusable_site_subnet_stops_startup(subnet):
+    with pytest.raises(SettingsError, match="RELAY_SITE_SUBNET"):
+        Settings.from_env({**ENV, "RELAY_SITE_SUBNET": subnet})
+
+
+def test_a_site_subnet_overlapping_the_bundles_networks_stops_startup():
+    with pytest.raises(SettingsError, match="RELAY_SITE_SUBNET"):
+        Settings.from_env(
+            {
+                **ENV,
+                "RELAY_SITE_SUBNET": "172.31.0.0/16",
+                "RELAY_INTERNAL_SUBNETS": "172.31.250.0/29",
+            }
+        )
+
+
+@pytest.mark.parametrize("value", ["banana", "172.31.250.0/99", "fd00::/64", "172.31.250.1/29"])
+def test_a_bad_internal_subnet_stops_startup(value):
+    with pytest.raises(SettingsError, match="RELAY_INTERNAL_SUBNETS"):
+        Settings.from_env({**ENV, "RELAY_INTERNAL_SUBNETS": value})
+
+
+@pytest.mark.parametrize("value", ["banana", "fd00::1", "192.168.8.1/32"])
+def test_a_bad_central_ip_stops_startup(value):
+    with pytest.raises(SettingsError, match="RELAY_CENTRAL_IP"):
+        Settings.from_env({**ENV, "RELAY_CENTRAL_IP": value})
+
+
+def test_the_api_needs_a_broker_login_of_its_own():
+    with pytest.raises(SettingsError, match="RELAY_API_BROKER_USER"):
+        Settings.from_env({**ENV, "RELAY_API_BROKER_USER": ENV["RELAY_BROKER_USER"]})
+
+
 @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "huge" * 3, "9" * 5000])
 def test_a_bad_number_stops_startup(value):
     with pytest.raises(SettingsError, match="RELAY_STALE_AFTER_S"):
         Settings.from_env({**ENV, "RELAY_STALE_AFTER_S": value})
+
+
+def test_urls_and_node_addresses_stay_out_of_the_log(relay):
+    # httpx logs each request's URL, with its query, at INFO.
+    assert logging.getLogger("httpx").level == logging.WARNING

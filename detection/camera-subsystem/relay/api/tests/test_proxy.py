@@ -72,8 +72,12 @@ def test_no_secret_comes_from_an_empty_password():
 
 def test_proxy_refuses_an_unknown_node(relay):
     response = relay.http.get(
-        "/nodes/ghost/frigate/api/stats?address=10.0.0.9",
-        headers={"X-Forwarded-Host": "10.0.0.9", "Host": "10.0.0.9", "X-Node-Address": "10.0.0.9"},
+        "/nodes/ghost/frigate/api/stats?address=192.168.8.9",
+        headers={
+            "X-Forwarded-Host": "192.168.8.9",
+            "Host": "192.168.8.9",
+            "X-Node-Address": "192.168.8.9",
+        },
     )
     assert response.status_code == 404
     assert relay.node.requests == []
@@ -87,13 +91,13 @@ def test_proxy_refuses_a_node_with_no_address(relay):
 
 def test_proxy_uses_only_the_heartbeats_address(online):
     response = online.http.get(
-        "/nodes/cam-01/frigate/api/stats?host=10.0.0.9",
-        headers={"X-Forwarded-Host": "10.0.0.9", "Host": "10.0.0.9"},
+        "/nodes/cam-01/frigate/api/stats?host=192.168.8.9",
+        headers={"X-Forwarded-Host": "192.168.8.9", "Host": "192.168.8.9"},
     )
     assert response.status_code == 200
     url = online.node.requests[0].url
     assert (url.scheme, url.host, url.port) == ("https", "192.168.8.21", 8971)
-    assert url.raw_path == b"/api/stats?host=10.0.0.9"
+    assert url.raw_path == b"/api/stats?host=192.168.8.9"
 
 
 ESCAPES = [
@@ -179,6 +183,26 @@ def test_the_node_id_in_the_path_is_not_a_way_out(online):
     assert asgi_request(online, b"/nodes/cam-01%2f..%2fx/frigate/api") in (400, 404)
     assert asgi_request(online, b"/nodes/../frigate/api") in (400, 404)
     assert online.node.requests == []
+
+
+def test_an_encoded_slash_after_frigate_is_refused(online):
+    # The router sees .../frigate/../x. The raw path is what is checked.
+    assert asgi_request(online, b"/nodes/cam-01/frigate%2f../x") == 400
+    assert asgi_request(online, b"/nodes/cam-01/frigate%2F..%2Fx") in (400, 404)
+    assert online.node.requests == []
+
+
+def test_an_encoded_but_correct_prefix_still_works(online):
+    assert asgi_request(online, b"/nodes/cam-01/fri%67ate/api/x") == 200
+    assert online.node.requests[0].url.raw_path == b"/api/x"
+
+
+def test_an_address_httpx_cannot_build_is_a_clean_failure(online, monkeypatch):
+    def boom(*args, **kwargs):
+        raise httpx.InvalidURL("no")
+
+    monkeypatch.setattr("relayapi.proxy.httpx.URL", boom)
+    assert online.http.get("/nodes/cam-01/frigate/x").status_code == 502
 
 
 def test_the_bare_frigate_path_is_the_ui_root(online):
@@ -289,11 +313,6 @@ def test_harmless_request_headers_pass(online):
     assert sent["range"] == "bytes=0-99"
     assert sent["if-none-match"] == '"abc"'
     assert sent["x-csrf-token"] == "1"
-
-
-def test_frigate_is_told_its_public_base_path(online):
-    online.http.get("/nodes/cam-01/frigate/")
-    assert online.node.requests[0].headers["x-ingress-path"] == "/nodes/cam-01/frigate"
 
 
 def test_a_post_body_is_forwarded(online):
@@ -472,6 +491,14 @@ def test_snapshot_never_builds_a_path_from_another_nodes_event(online):
 def test_snapshot_refuses_an_id_that_is_not_an_id(online, event_id):
     status = asgi_request(online, b"/nodes/cam-01/snapshot/" + event_id + b".jpg")
     assert status in (400, 404)
+    assert online.node.requests == []
+
+
+def test_snapshot_keeps_a_bad_track_id_from_a_message_out_of_the_url(online):
+    message = detection(object_id="../../evil")
+    online.mqtt.deliver(DETECTIONS, message)
+    response = online.http.get(f"/nodes/cam-01/snapshot/{message['event_id']}.jpg")
+    assert response.status_code == 502
     assert online.node.requests == []
 
 

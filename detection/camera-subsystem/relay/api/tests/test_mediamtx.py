@@ -1,5 +1,8 @@
+import asyncio
+import concurrent.futures
 import logging
 
+import httpx
 import pytest
 from conftest import BROKER_PASSWORD, STATUS, heartbeat
 
@@ -26,30 +29,156 @@ def test_the_control_api_is_called_with_its_own_login_and_no_broker_password(rel
 
 
 def test_user_and_password_are_percent_encoded():
-    url = source_url("a b:c", "p@ss/w%rd#?", "10.0.0.5", "cam-01")
-    assert url == "rtsp://a%20b%3Ac:p%40ss%2Fw%25rd%23%3F@10.0.0.5:8554/cam-01"
+    url = source_url("a b:c", "p@ss/w%rd#?", "192.168.8.5", "cam-01")
+    assert url == "rtsp://a%20b%3Ac:p%40ss%2Fw%25rd%23%3F@192.168.8.5:8554/cam-01"
 
 
-def test_an_ipv6_address_is_bracketed():
-    assert source_url("u", "p", "fd00::5", "cam-01") == "rtsp://u:p@[fd00::5]:8554/cam-01"
+@pytest.mark.parametrize(
+    "address",
+    [
+        "fd00::1%\n",
+        "fd00::1%25x]:9997?",
+        "1.2.3.4:1883",
+        "1.2.3.4/x",
+        "a@1.2.3.4",
+        "1.2.3.4?x",
+        "h#x",
+        "EVIL",
+    ],
+)
+def test_a_source_that_does_not_round_trip_is_never_built(address):
+    # MediaMTX logs a source it refuses, with the password in it, so it must never see one.
+    with pytest.raises(ValueError) as error:
+        source_url("u", "secret-password", address, "cam-01")
+    assert "secret-password" not in str(error.value)
+
+
+def test_a_refused_source_backs_off_and_does_not_retry_every_pass(relay, monkeypatch):
+    moment = {"now": 1000.0}
+    monkeypatch.setattr("relayapi.mediamtx.time.monotonic", lambda: moment["now"])
+
+    def refusing(request):
+        relay.mediamtx.calls.append(request)
+        if request.method == "GET":
+            return httpx.Response(404, json={"error": "path not found"})
+        return httpx.Response(400, json={"error": "no"})
+
+    relay.mqtt.deliver(STATUS, heartbeat())
+    original = type(relay.mediamtx).__call__
+    type(relay.mediamtx).__call__ = lambda self, request: refusing(request)
+    try:
+        counts = []
+        relay.mediamtx.calls.clear()
+        for _ in range(4):
+            relay.sync_paths(full=True)
+            counts.append(len(relay.mediamtx.writes))
+        assert counts == [1, 1, 1, 1]
+        moment["now"] += 5.1
+        relay.sync_paths(full=True)
+        assert len(relay.mediamtx.writes) == 2
+        moment["now"] += 5.1  # the wait has doubled
+        relay.sync_paths(full=True)
+        assert len(relay.mediamtx.writes) == 2
+        moment["now"] += 5.1
+        relay.sync_paths(full=True)
+        assert len(relay.mediamtx.writes) == 3
+    finally:
+        type(relay.mediamtx).__call__ = original
+    relay.sync_paths(full=True)  # still waiting
+    moment["now"] += 600
+    relay.sync_paths(full=True)
+    assert "cam-01" in relay.mediamtx.paths
+
+
+def test_a_path_nobody_reports_is_removed(relay):
+    relay.mediamtx.paths["ghost"] = {"source": "rtsp://x:y@192.168.8.9:8554/ghost"}
+    relay.mqtt.deliver(STATUS, heartbeat())
+    relay.sync_paths(full=True)
+    assert set(relay.mediamtx.paths) == {"cam-01"}
+
+
+def test_several_pages_of_paths_are_read(relay):
+    original = type(relay.mediamtx).__call__
+
+    def paged(self, request):
+        if request.url.path == "/v3/config/paths/list":
+            self.calls.append(request)
+            page = int(request.url.params.get("page", "0"))
+            items = [[{"name": "ghost-a"}], [{"name": "ghost-b"}]][page]
+            return httpx.Response(200, json={"pageCount": 2, "items": items})
+        return original(self, request)
+
+    type(relay.mediamtx).__call__ = paged
+    relay.mediamtx.paths.update({"ghost-a": {}, "ghost-b": {}})
+    try:
+        relay.sync_paths(full=True)
+    finally:
+        type(relay.mediamtx).__call__ = original
+    assert relay.mediamtx.paths == {}
+
+
+def test_a_broken_answer_from_mediamtx_cannot_stop_the_sync(relay):
+    original = type(relay.mediamtx).__call__
+
+    def garbage(self, request):
+        self.calls.append(request)
+        return httpx.Response(200, content=b"not json")
+
+    relay.mqtt.deliver(STATUS, heartbeat())
+    type(relay.mediamtx).__call__ = garbage
+    try:
+        relay.sync_paths(full=True)
+    finally:
+        type(relay.mediamtx).__call__ = original
+    paths = relay.http.get("/nodes").json()["paths"]
+    assert paths["failing"] == 1
+    relay.sync_paths(full=True)
+    assert "cam-01" in relay.mediamtx.paths
+    paths = relay.http.get("/nodes").json()["paths"]
+    assert paths["failing"] == 0
+    assert paths["last_sync_at"] == relay.now
+
+
+def test_the_sync_loop_survives_an_exception_in_a_pass(relay, monkeypatch):
+    calls = []
+
+    async def boom(full):
+        calls.append(full)
+        if len(calls) == 1:
+            raise RuntimeError("not expected")
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(relay.app.state.path_sync, "sync_once", boom)
+    monkeypatch.setattr("relayapi.mediamtx._RETRY_S", 0.001)
+    with pytest.raises((asyncio.CancelledError, concurrent.futures.CancelledError)):
+        relay.http.portal.call(relay.app.state.path_sync.run)
+    assert len(calls) == 2
+
+
+def test_a_quick_pass_makes_no_call_for_a_path_already_right(relay):
+    relay.mqtt.deliver(STATUS, heartbeat())
+    relay.sync_paths(full=True)
+    relay.mediamtx.calls.clear()
+    relay.sync_paths(full=False)
+    assert relay.mediamtx.calls == []
 
 
 def test_a_new_address_updates_the_path(relay):
-    relay.mqtt.deliver(STATUS, heartbeat(timestamp="2026-11-05T12:00:00Z", address="10.0.0.5"))
+    relay.mqtt.deliver(STATUS, heartbeat(timestamp="2026-11-05T12:00:00Z", address="192.168.8.5"))
     relay.sync_paths()
-    relay.mqtt.deliver(STATUS, heartbeat(timestamp="2026-11-05T12:00:05Z", address="10.0.0.6"))
+    relay.mqtt.deliver(STATUS, heartbeat(timestamp="2026-11-05T12:00:05Z", address="192.168.8.6"))
     relay.sync_paths()
-    assert "@10.0.0.6:8554/" in relay.mediamtx.paths["cam-01"]["source"]
+    assert "@192.168.8.6:8554/" in relay.mediamtx.paths["cam-01"]["source"]
 
 
 def test_an_old_replay_does_not_touch_the_path(relay):
-    relay.mqtt.deliver(STATUS, heartbeat(timestamp="2026-11-05T12:00:00Z", address="10.0.0.5"))
+    relay.mqtt.deliver(STATUS, heartbeat(timestamp="2026-11-05T12:00:00Z", address="192.168.8.5"))
     relay.sync_paths()
     relay.mediamtx.calls.clear()
-    relay.mqtt.deliver(STATUS, heartbeat(timestamp="2026-11-05T11:00:00Z", address="10.0.0.6"))
+    relay.mqtt.deliver(STATUS, heartbeat(timestamp="2026-11-05T11:00:00Z", address="192.168.8.6"))
     relay.sync_paths()
     assert relay.mediamtx.writes == []
-    assert "@10.0.0.5:8554/" in relay.mediamtx.paths["cam-01"]["source"]
+    assert "@192.168.8.5:8554/" in relay.mediamtx.paths["cam-01"]["source"]
 
 
 def test_an_unchanged_address_leaves_the_path_alone(relay):
@@ -92,8 +221,6 @@ def test_a_node_with_no_address_gets_no_path(relay):
 
 @pytest.mark.parametrize("status", [401, 400, 500])
 def test_a_refusal_from_the_control_api_is_not_fatal(relay, status, caplog):
-    import httpx
-
     original = relay.mediamtx.__class__.__call__
 
     def refusing(self, request):

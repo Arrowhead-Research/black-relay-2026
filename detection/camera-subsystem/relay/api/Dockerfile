@@ -16,4 +16,4 @@ USER relay
 
 EXPOSE 8080
 CMD ["uvicorn", "--factory", "relayapi.app:create_app", "--host", "0.0.0.0", "--port", "8080", \
-     "--no-server-header", "--timeout-graceful-shutdown", "5"]
+     "--no-server-header", "--no-access-log", "--timeout-graceful-shutdown", "5"]
