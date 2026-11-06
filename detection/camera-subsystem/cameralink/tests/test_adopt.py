@@ -2003,7 +2003,9 @@ def test_lock_can_be_nested_on_one_store(path):
 
 
 def test_save_outside_the_lock_is_refused(path):
-    with pytest.raises(StoreError):
+    # The directory exists, so only the lock check can refuse this: a write would succeed.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with pytest.raises(StoreError, match="outside the lock"):
         CameraStore(path).save(CameraRecord(MAC, "pw", None, None))
     assert not path.exists()
 
