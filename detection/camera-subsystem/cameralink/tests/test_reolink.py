@@ -319,6 +319,8 @@ def test_login_success_without_a_token_is_an_api_error(value):
 NEVER_DELIVERED = [
     ConnectionRefusedError(111, "Connection refused"),
     urllib.error.URLError(ConnectionRefusedError(111, "Connection refused")),
+    # Holds what a message must never quote, so that quoting the exception fails the test.
+    ConnectionRefusedError(111, f"refused, token={TOKEN}, {PASSWORD}"),
 ]
 MAY_HAVE_BEEN_DELIVERED = [
     urllib.error.URLError(f"no route, token={TOKEN}, {PASSWORD}"),
@@ -350,7 +352,7 @@ def test_connection_refused_raises_unreachable(failure):
     with pytest.raises(Unreachable) as caught:
         client.login("admin", PASSWORD)
 
-    assert_clean(caught.value, PASSWORD)
+    assert_clean(caught.value, PASSWORD, TOKEN)
 
 
 @pytest.mark.parametrize("failure", MAY_HAVE_BEEN_DELIVERED, ids=failure_id)
@@ -1167,6 +1169,16 @@ def test_baichuan_logout_failure_after_success_is_not_an_error(caplog, failure):
 
     assert baichuan.ports == ports["after_enabling_http_and_rtsp"]
     assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_a_logout_failure_logs_its_type_and_not_its_text(caplog):
+    ports = recorded("baichuan_factory_ports")["before"]
+    baichuan = FakeBaichuan(ports, logout_error=rl_exc.ReolinkConnectionError(f"gone {PASSWORD}"))
+
+    run_enable(baichuan, password=PASSWORD)
+
+    assert "ReolinkConnectionError" in caplog.text
+    assert PASSWORD not in caplog.text
 
 
 def test_real_host_session_is_closed_after_enable_services():
