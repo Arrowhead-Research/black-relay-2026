@@ -1,6 +1,6 @@
 # Field run: kit 1, camera link and relay
 
-The ordered run for when the owner is back on `Lab_Admin_Net`. It installs the current code on kit 1, then checks it,
+The ordered run for when the owner is back on the site network. It installs the current code on kit 1, then checks it,
 riskiest and most basic first, so that a basic failure stops the run early instead of spending the camera's login
 attempts or a day of waiting.
 
@@ -57,27 +57,69 @@ once the camera profile exists, from how NetworkManager is documented to work. C
 
 ## Before you start: laptop
 
-Agent, in the repository's `detection/camera-subsystem`. These are used all through.
+*Agent, in the repository's `detection/camera-subsystem`.* Site values stay out of git: fill them in
+`field-run.local.env`, which `.gitignore` covers and no `rsync` here copies.
 
 ```bash
-export NODE=192.168.1.206     # The node's address. Its DHCP lease may move it: GET /nodes has node_address.
-export CENTRAL=192.168.1.22
-nodes() { ( . relay/.env; curl -s -H "Authorization: Bearer $RELAY_API_TOKEN" "http://$CENTRAL:8081/nodes" | python3 -m json.tool ); }
+cat > field-run.local.env <<'LOCAL'
+SITE_WIFI='<site WiFi name>'
+NODE_ID='<node id: cam- and the last 6 of the Pi serial>'
+NODE='<node address. Its DHCP lease may move it: GET /nodes has node_address>'
+SITE_SUBNET='<site LAN, such as 192.0.2.0/24>'
+CENTRAL='<the laptop address read below>'
+LOCAL
 ```
 
-The node needs to see this laptop as exactly `192.168.1.22`, since that goes in its firewall. On the day:
+**The node's firewall admits one address, the broker's, so all of central's traffic must come from that address.**
+MediaMTX and the API leave their containers through Docker's masquerade, which takes the route's source address. So
+the broker address is **the laptop's real address, read now,** and it goes in the portal, `RELAY_CENTRAL_IP` and
+everywhere else. Do not add a second address for this: traffic out still leaves from the primary, so SSH-style checks
+would pass inbound while live view and the Frigate proxy are refused, and it would look like a node fault.
 
 ```bash
-ip -4 -br addr | grep 192.168.1.
+. ./field-run.local.env
+ip -4 -br addr
+ip -4 -o route get "$NODE"
 ```
 
-If the laptop has a different address, and the owner confirms `.22` is free on `Lab_Admin_Net`, add it, and force SSH
-to use it, because SSH otherwise leaves from the primary address and the node's firewall will refuse it:
+Put the `src` address from the second command in `CENTRAL`. Stop if its interface shows more than one IPv4 address, and
+remove the extra one.
+
+**Reserve that address for the laptop in the site's DHCP, before C52.** If the lease moves after the portal save, the
+node refuses central until it is provisioned again.
+
+Load these in every shell. `central_check` says whether the laptop still has the address the node was given:
 
 ```bash
-sudo ip addr add 192.168.1.22/24 dev <wifi-nic>
-alias ssh='ssh -b 192.168.1.22'
+. ./field-run.local.env
+# Each helper reads relay/.env in a subshell, and passes secrets by file or stdin, so none is in any argv.
+api() { ( . relay/.env; printf 'header = "Authorization: Bearer %s"\n' "$RELAY_API_TOKEN" | curl -s -K - "$@" ); }
+nodes() { api "http://$CENTRAL:8081/nodes" | python3 -m json.tool; }
+central_sub() { ( . relay/.env; umask 077; dir=$(mktemp -d); trap 'rm -rf "$dir"' EXIT
+  printf -- '-u %s\n-P %s\n' "$RELAY_BROKER_USER" "$RELAY_BROKER_PASSWORD" >"$dir/mosquitto_sub"
+  XDG_CONFIG_HOME=$dir mosquitto_sub -h "$CENTRAL" "$@" ); }
+# relay_read ffprobe <options>, or relay_read ffplay. The tool reads the URL from a file. This needs ffmpeg 5 or later.
+relay_read() { ( . relay/.env; umask 077; list=$(mktemp); trap 'rm -f "$list"' EXIT
+  printf "ffconcat version 1.0\nfile 'rtsp://%s:%s@%s:8554/%s'\noption rtsp_transport tcp\n" \
+    "$RELAY_READ_USER" "$RELAY_READ_PASSWORD" "$CENTRAL" "$NODE_ID" >"$list"
+  "$@" -f concat -safe 0 -protocol_whitelist file,rtsp,rtp,tcp,udp,crypto -i "$list" ); }
+central_check() {
+  local now; now=$(ip -4 -o route get "$NODE" | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+  if [ "$now" != "$CENTRAL" ]; then
+    echo "CENTRAL CHANGED: the laptop now sends from ${now:-nothing}, and the node admits only $CENTRAL"; return 1
+  fi
+  if [ -e relay/.env ] && ! ( . relay/.env; [ "$RELAY_CENTRAL_IP" = "$CENTRAL" ] ); then
+    echo "CENTRAL CHANGED: RELAY_CENTRAL_IP in relay/.env is not $CENTRAL"; return 1
+  fi
+  echo "central ok: $CENTRAL"
+}
+command -v curl mosquitto_sub ffprobe ffplay
 ```
+
+**Run `central_check` at the start of each part, and first whenever SSH or video times out.** C52's pass also checks
+what the node holds. If it reports a change, get the old address back, by its reservation, or if that cannot be done:
+at a console or with C56's procedure, save the new address in the portal, set it in `CENTRAL` and `relay/.env`, and run
+`docker compose up -d`. Do not read a refused connection as a node fault until `central_check` passes.
 
 ---
 
@@ -110,7 +152,8 @@ installer keeps it. Copy the code. The literal backslash survives `rsync`:
 
 ```bash
 rsync -a --delete --exclude .venv --exclude __pycache__ --exclude .pytest_cache --exclude .ruff_cache \
-  --exclude docs --exclude relay ./ kit-1@$NODE:camera-subsystem/
+  --exclude docs --exclude relay --exclude .env --exclude '.env.*' --exclude '*.local.env' \
+  ./ kit-1@$NODE:camera-subsystem/
 ssh kit-1@$NODE 'sudo rsync -a --delete --chown=root:root ~/camera-subsystem/ /opt/black-relay/src/ &&
   ls /opt/black-relay/src/cameralink/ops/'
 ```
@@ -146,30 +189,31 @@ C49  date ________  rc, first run ___  rc, second run ___  Files changed ___
 
 ## C50. Relay bundle on the laptop. NOT YET RUN.
 
-*Agent.* On the laptop, measured 2026-11-06: `mitmdump` holds `0.0.0.0:8080`, and host services hold `127.0.0.1:1883`
-and `127.0.0.1:123`, so a wildcard bind of those three would fail. Check again, then use another API port and bind
-the broker and NTP to the LAN address, as `relay/README.md` describes. Touch no other container.
+*Agent.* A wildcard bind fails on any port a host service already holds, on any address. Check what this laptop runs.
+The commands below assume it holds some of these, so they use API port 8081 and bind the broker and NTP to the LAN
+address, as `relay/README.md` describes. Touch no other container.
 
 ```bash
 sudo ss -lntup | grep -E ':(123|1883|8080|8081|8554|8889|8189)\b'
 cd relay
 ./setup-credentials.sh
-sed -i -e "s|^RELAY_SITE_SUBNET=.*|RELAY_SITE_SUBNET='192.168.1.0/24'|" \
-  -e "s|^RELAY_CENTRAL_IP=.*|RELAY_CENTRAL_IP='192.168.1.22'|" \
-  -e "s|^RELAY_WEBRTC_HOSTS=.*|RELAY_WEBRTC_HOSTS='192.168.1.22'|" \
-  -e "s|^RELAY_BROKER_BIND_ADDRESS=.*|RELAY_BROKER_BIND_ADDRESS='192.168.1.22'|" \
-  -e "s|^RELAY_NTP_BIND_ADDRESS=.*|RELAY_NTP_BIND_ADDRESS='192.168.1.22'|" \
+sed -i -e "s|^RELAY_SITE_SUBNET=.*|RELAY_SITE_SUBNET='$SITE_SUBNET'|" \
+  -e "s|^RELAY_CENTRAL_IP=.*|RELAY_CENTRAL_IP='$CENTRAL'|" \
+  -e "s|^RELAY_WEBRTC_HOSTS=.*|RELAY_WEBRTC_HOSTS='$CENTRAL'|" \
+  -e "s|^RELAY_BROKER_BIND_ADDRESS=.*|RELAY_BROKER_BIND_ADDRESS='$CENTRAL'|" \
+  -e "s|^RELAY_NTP_BIND_ADDRESS=.*|RELAY_NTP_BIND_ADDRESS='$CENTRAL'|" \
   -e "s|^RELAY_API_PORT=.*|RELAY_API_PORT=8081|" .env
 docker compose up -d --build
 docker compose ps --format '{{.Service}} {{.Status}}'
 cd ..
+central_check
 nodes
 ```
 
 `setup-credentials.sh` refuses an existing `.env`. If there is one, read it, rather than using `--force`. `relay/.env`
 is ignored by git and is never committed.
 
-Pass: `api`, `netguard`, `mediamtx`, `chrony` and `mosquitto` all up, and `nodes` prints `broker.connected` true,
+Pass: `api`, `netguard`, `mediamtx`, `chrony` and `mosquitto` all up, `central_check` passes, and `nodes` prints `broker.connected` true,
 `paths.guard_ready` true, and an empty `nodes` list. The laptop is amd64, so the bundle's arm64 run stays open. It is
 a separate check if a Pi becomes the central host.
 
@@ -179,7 +223,7 @@ C50  date ________  output ___________________________________________________  
 
 ## C51. A backup way back in. NOT YET RUN.
 
-After the portal save, SSH admits **only** `192.168.1.22`, on `wlan0`. After the coming reboot, if the set is empty,
+After the portal save, SSH admits **only** `$CENTRAL`, on `wlan0`. After the coming reboot, if the set is empty,
 it admits nobody. `eth0` and the AP never admit SSH. So prove a way in that does not depend on that, first.
 
 *Owner, with Agent reading out the commands.*
@@ -197,7 +241,7 @@ Recovery by card, if ever needed. Replace `<sdX>` after checking `lsblk`:
 
 ```bash
 sudo mkdir -p /mnt/kit1 && sudo mount /dev/<sdX>2 /mnt/kit1
-printf 'add element inet black_relay central_hosts { 192.168.1.22 }\n' \
+printf 'add element inet black_relay central_hosts { %s }\n' "$CENTRAL" \
   | sudo tee /mnt/kit1/etc/black-relay/central-hosts.nft
 sudo umount /mnt/kit1
 ```
@@ -240,20 +284,21 @@ sudo mv /etc/NetworkManager/system-connections/black-relay-uplink.nmconnection /
 sudo reboot
 ```
 
-If the AP profile is missing, run `sudo /opt/black-relay/ops/seed-kit.sh` first, which prints the label.
+If the AP profile is missing, run `sudo /opt/black-relay/ops/seed-kit.sh` first, at the console, which prints the label.
+It also asks for a new console password and replaces the host keys, so afterwards run `ssh-keygen -R "$NODE"` on the
+laptop.
 
 *Owner, within a minute or two of the reboot:* the screen shows the login prompt, and the SSID appears on the phone.
 Join it with the passphrase, open `http://10.42.0.1/`, and fill in the form. Check every field, as old values may show.
 
 | Field | Value |
 |---|---|
-| WiFi | `Lab_Admin_Net` and its password |
-| Node ID, hostname | `cam-8da040` |
+| WiFi | `$SITE_WIFI` and its password |
+| Node ID, hostname | `$NODE_ID` |
 | Covered zones | The site's zone name, at least two letters |
-| Frigate address | `https://cam-8da040.local:8971` |
-| Broker address, port | `192.168.1.22`, `1883`, TLS off, anonymous off |
+| Frigate address | `https://$NODE_ID.local:8971` |
+| Broker address, port | `$CENTRAL`, `1883`, TLS off, anonymous off. **Read it out with `central_check` first** |
 | Broker username, password | `RELAY_BROKER_USER`, `RELAY_BROKER_PASSWORD` from `relay/.env` |
-| MediaMTX address | `192.168.1.22:8554` |
 | Time server | Blank |
 | Upside down | As mounted |
 
@@ -270,11 +315,13 @@ sudo chmod 600 /etc/NetworkManager/system-connections/black-relay-uplink.nmconne
 sudo reboot
 ```
 
-*Agent, once the phone shows the saved page, from the laptop at `.22`:*
+*Agent, once the phone shows the saved page, from the laptop:*
 
 ```bash
+central_check
 nodes                            # Within 90 s or so. node_address gives the new $NODE if it moved.
 ssh kit-1@$NODE '
+  echo "the node sees this SSH from: ${SSH_CONNECTION%% *}"
   sudo cat /var/lib/camera-provision/state.json; echo
   journalctl -b -u camera-provision --no-pager -g " -> |portal|firewall"
   cat /etc/black-relay/central-hosts.nft; sudo nft list set inet black_relay central_hosts
@@ -293,16 +340,18 @@ Pass, all of these:
 
 - `ap_up + config_received -> joining`, `joining + uplink_up -> provisioned`, and no `reloading the firewall failed`.
   That also shows the firewall reload works from inside the provision unit's hardening.
-- The set and the file both hold `192.168.1.22`, and SSH works from `.22`. `bridge.yaml`'s central host is `.22`.
+- `central_check` passes. The set and the file both hold `$CENTRAL`, the node sees the SSH session from `$CENTRAL`, and
+  `bridge.yaml`'s central host is `$CENTRAL`.
 - `black-relay-uplink` on `wlan0`, and **no `Wired connection 1`**. `eth0` has no carrier, and no default route uses it.
 - No `docker0`, which shows `daemon.json` applied. The services are `active`, `frigate` is `static`, wait-online is
   `masked`, NTP is `yes` with the laptop as server, and the journal is on disk. `vpn_requested` is not in `node.json`.
-- `nodes` has `cam-8da040`: `stale` false, `link_online` true, `camera_online` false (no camera yet), `node_address` set,
+- `nodes` has `$NODE_ID`: `stale` false, `link_online` true, `camera_online` false (no camera yet), `node_address` set,
   `attributes.camera_link_state` `no_camera`. This also closes C08's open item, a form save reaching a live broker. On the node, no
   `SECCOMP` or `Operation not permitted` in `journalctl -b -u camerabridge`, as the address comes from an ioctl under
   the bridge's system call filter.
 
-**If SSH from `.22` times out:** the save has the wrong address, or the laptop is not on `.22`. Use C51, and stop.
+**If SSH times out:** run `central_check`. Either the save has the wrong address, or the laptop has moved off it. Use
+C51, and stop.
 
 ```
 C52  date ________  AP seen after ___ s  saved, joined after ___ s  heartbeat after ___ s
@@ -428,7 +477,7 @@ at once, with `--dhcp-authoritative` on one. Fill in the form as in C52, submit,
 
 Pass: two `dnsmasq` processes, one with `--interface=eth0` and one from NetworkManager for `wlan0`; `type AP`;
 `unprovisioned + boot -> ap_up`; the phone and the dongle each get the right
-range; after the save, SSH from `.22` works, and the heartbeat is back. Nothing was edited by hand after the save.
+range; after the save, `central_check` passes, SSH works, and the heartbeat is back. Nothing was edited by hand after the save.
 Once `nodes` is healthy, run `sudo rm -rf /root/kit1-uplink-saved`. **Unplug the dongle.**
 
 **Physical button, for the record.** The button is a short between header pins 11 and 9. A jumper wire does the same
@@ -465,6 +514,16 @@ try:
 finally:
     client.logout()
 ' "$@"; }
+
+# On the node. Runs a command in the Frigate container with $input set to read one camera stream. The URL is in a
+# root-only file there, and the password expands only inside that shell's builtins, so it is in no argv.
+cam_stream() { sudo docker exec -e STREAM="$1" -e ACTION="$2" frigate sh -c '
+  umask 077; list=$(mktemp); trap "rm -f $list" EXIT
+  { echo "ffconcat version 1.0"
+    echo "file '"'"'rtsp://admin:$FRIGATE_CAMERA_PASSWORD@10.77.0.10:554/h264Preview_01_$STREAM'"'"'"
+    echo "option rtsp_transport tcp"; } >"$list"
+  input="-f concat -safe 0 -protocol_whitelist file,rtsp,rtp,tcp,udp,crypto -i $list"
+  eval "$ACTION"'; }
 ```
 
 ## C57. A factory camera is adopted with no operator action, with timings. NOT YET RUN.
@@ -530,9 +589,8 @@ restarted its encoder.
 
 ```bash
 cam_read Enc
-for s in main sub; do sudo docker exec frigate sh -c "ffprobe -v error -rtsp_transport tcp -select_streams v:0 \
-  -show_entries stream=codec_name,width,height,avg_frame_rate -of csv=p=0 \
-  rtsp://admin:\$FRIGATE_CAMERA_PASSWORD@10.77.0.10:554/h264Preview_01_$s"; done
+for s in main sub; do cam_stream "$s" 'ffprobe -v error $input -select_streams v:0 \
+  -show_entries stream=codec_name,width,height,avg_frame_rate -of csv=p=0'; done
 journalctl -u camera-link --no-pager -g 'failed|error' | tail
 ```
 
@@ -583,8 +641,7 @@ C59  date ________  segment age samples (s) _______________________  restarts in
 Zones and boxes are drawn on detect frames and shown over recordings. *Agent:* one frame of each, with nothing moving:
 
 ```bash
-for s in main sub; do sudo docker exec frigate sh -c "ffmpeg -y -v error -rtsp_transport tcp -i \
-  rtsp://admin:\$FRIGATE_CAMERA_PASSWORD@10.77.0.10:554/h264Preview_01_$s -frames:v 1 /tmp/fov-$s.jpg"
+for s in main sub; do cam_stream "$s" "ffmpeg -y -v error \$input -frames:v 1 /tmp/fov-$s.jpg"
   sudo docker cp frigate:/tmp/fov-$s.jpg /tmp/fov-$s.jpg; done
 sudo chmod 644 /tmp/fov-main.jpg /tmp/fov-sub.jpg
 ```
@@ -675,14 +732,20 @@ sudo ss -un 'dst 10.77.0.10'
 Idle first. Then one reader, from the laptop, using the login from `relay/.env`, then two at once:
 
 ```bash
-( . relay/.env; ffplay -rtsp_transport tcp "rtsp://$RELAY_READ_USER:$RELAY_READ_PASSWORD@$CENTRAL:8554/cam-8da040" )
+relay_read ffplay
+```
+
+While one reader is on, on the node. This is what the firewall sees, so it must show `$CENTRAL`:
+
+```bash
+sudo ss -tn state established 'sport = :8554'
 ```
 
 Then 10 rounds of a reader starting and stopping, watching for a count that does not come back down: if the camera
 refuses go2rtc's backchannel DESCRIBE, each first dial leaks one socket. The fix, only if this shows it, is
 `#backchannel=0` on the template's source, and it goes in the tracker for a decision.
 
-Pass: 2 sessions when idle, 3 while viewing, and still 3 with two viewers; video plays in each; back to 2 within about
+Pass: the pull comes from `$CENTRAL`; 2 sessions when idle, 3 while viewing, and still 3 with two viewers; video plays in each; back to 2 within about
 10 s of the last reader leaving; no UDP; no growth across 10 rounds; the camera refuses none of it.
 
 ```
@@ -695,8 +758,7 @@ C63  date ________  idle ___  one viewer ___  two viewers ___  after 10 rounds _
 
 ```bash
 # Time to first frame, 5 times, from the laptop. Each time, first wait for the idle count from C63.
-( . relay/.env; time ffprobe -v error -rtsp_transport tcp -select_streams v:0 -show_entries stream=codec_name,width \
-  -of csv=p=0 "rtsp://$RELAY_READ_USER:$RELAY_READ_PASSWORD@$CENTRAL:8554/cam-8da040" )
+time relay_read ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,width -of csv=p=0
 nodes | grep -A6 '"paths"'
 ```
 
@@ -748,8 +810,8 @@ iperf3 -s -1
 # On the node:
 sudo apt-get install -y iperf3
 iw dev wlan0 link | grep -E 'signal|tx bitrate'
-iperf3 -c 192.168.1.22 -t 60 -b 24M
-iperf3 -c 192.168.1.22 -t 60 -u -b 24M
+iperf3 -c <central> -t 60 -b 24M
+iperf3 -c <central> -t 60 -u -b 24M
 sudo apt-get purge -y iperf3
 ```
 
@@ -768,8 +830,7 @@ C66  date ________  signal ___  TCP ___ Mbps  UDP loss ___ %  one stream ___ Mbp
 *Agent*, while the owner walks through the view with several zones in use. The node's login can read `detection/`:
 
 ```bash
-( . relay/.env; mosquitto_sub -h $CENTRAL -u "$RELAY_BROKER_USER" -P "$RELAY_BROKER_PASSWORD" -t 'detection/camera/#' \
-  -W 600 -F '%l %t' | tee /tmp/sizes.log )
+central_sub -t 'detection/camera/#' -W 600 -F '%l %t' | tee /tmp/sizes.log
 sort -n /tmp/sizes.log | tail -3
 nodes | grep -A8 '"broker"'
 ```
@@ -783,7 +844,7 @@ C67  date ________  largest ___ bytes, on topic ________  dropped ___  result __
 
 ## C68. Browser WebRTC. NOT YET RUN.
 
-*Owner*, in a browser on the laptop, or any device on the LAN: open `http://192.168.1.22:8889/cam-8da040`, and log in
+*Owner*, in a browser on the laptop, or any device on the LAN: open `http://<central>:8889/<node-id>`, with the values from `field-run.local.env`, and log in
 with `RELAY_READ_USER` and `RELAY_READ_PASSWORD`. Agent can read `chrome://webrtc-internals` bytes received.
 
 Pass: moving video with no plugin, audio not needed, `bytesReceived` rising on the UDP candidate, time to first frame
@@ -894,8 +955,7 @@ C72  date ________  output ___________________________________________________  
 Plan C50. *Owner* walks through. *Agent*:
 
 ```bash
-( . relay/.env; mosquitto_sub -h $CENTRAL -u "$RELAY_BROKER_USER" -P "$RELAY_BROKER_PASSWORD" \
-  -t detection/camera/detections -W 300 | tee /tmp/detections.jsonl )
+central_sub -t detection/camera/detections -W 300 | tee /tmp/detections.jsonl
 ( cd bridge && uv run python - <<'PY'
 import json
 from pathlib import Path
@@ -908,7 +968,7 @@ print(len(rows), "valid", sorted({r["event"] for r in rows}), sorted({r["label"]
 print(rows[0]["attributes"].get("snapshot_url"))
 PY
 )
-( . relay/.env; curl -s -H "Authorization: Bearer $RELAY_API_TOKEN" "http://$CENTRAL:8081/events?limit=5" | python3 -m json.tool | head -40 )
+api "http://$CENTRAL:8081/events?limit=5" | python3 -m json.tool | head -40
 ```
 
 Pass: `object_start`, `object_end`, and some `object_update`, with `label` `person`, all valid; the `zones` are the
@@ -923,13 +983,11 @@ C73  date ________  count ___  events ________  valid ___  result ________
 Plan C51, with the Frigate UI replaced by the tunnel, per the ruling. *Agent:*
 
 ```bash
-. relay/.env
 EVENT=$(python3 -c "import json; print([json.loads(l) for l in open('/tmp/detections.jsonl')][0]['object_id'])")
-ffprobe -v error -rtsp_transport tcp -show_entries stream=codec_name -of csv=p=0 \
-  "rtsp://$RELAY_READ_USER:$RELAY_READ_PASSWORD@$CENTRAL:8554/cam-8da040"
-curl -s -o /tmp/snap.jpg -w '%{http_code} %{content_type} %{size_download}\n' \
-  -H "Authorization: Bearer $RELAY_API_TOKEN" "http://$CENTRAL:8081/nodes/cam-8da040/snapshot/$EVENT.jpg"
-curl -s -H "Authorization: Bearer $RELAY_API_TOKEN" "http://$CENTRAL:8081/nodes/cam-8da040/frigate/api/version"; echo
+relay_read ffprobe -v error -show_entries stream=codec_name -of csv=p=0
+api -o /tmp/snap.jpg -w '%{http_code} %{content_type} %{size_download}\n' \
+  "http://$CENTRAL:8081/nodes/$NODE_ID/snapshot/$EVENT.jpg"
+api "http://$CENTRAL:8081/nodes/$NODE_ID/frigate/api/version"; echo
 curl -s -o /dev/null -w '%{http_code}\n' "http://$CENTRAL:8081/nodes"
 # The laptop is central, so it needs no jump host. Then open http://localhost:15000. Kill it afterwards.
 ssh -L 15000:127.0.0.1:5000 kit-1@$NODE -N &
@@ -938,7 +996,7 @@ ssh -L 15000:127.0.0.1:5000 kit-1@$NODE -N &
 A site LAN host that is not central, by *Owner* or any other machine on the network:
 
 ```bash
-nc -zv -w 3 192.168.1.206 22; nc -zv -w 3 192.168.1.206 8971; nc -zv -w 3 192.168.1.206 8554
+nc -zv -w 3 <node> 22; nc -zv -w 3 <node> 8971; nc -zv -w 3 <node> 8554
 ```
 
 Over Tailscale, the API and MediaMTX on the laptop's Tailscale address, as for a remote user, but no route to the node.
@@ -955,7 +1013,10 @@ C74  date ________  video ___  snapshot ___  proxy ___  no token ___  other host
 ## C45 and C46, from the README. NOT YET RUN.
 
 Run them now, and record them there. For "hold the button at boot", use C56's procedure. C45 needs a second broker
-address, such as a second address on the laptop, with the relay reachable at it. Its step 3 is proved by C53 and C59.
+address. An address added beside the laptop's first does not do, as [above](#before-you-start-laptop). With the owner's
+OK that a second address is free, make it the laptop's only address, update `CENTRAL` and `relay/.env`, and run `docker
+compose up -d`, or use a second machine as the broker. To see the old address time out, change the laptop back, then
+re-provision to the original and confirm `central_check` passes before going on. Its step 3 is proved by C53 and C59.
 C46's step 3 overlaps C76, so one run serves both, and record in both.
 
 ```
@@ -985,7 +1046,7 @@ sudo rm /root/central-hosts.saved
 ```
 
 Pass, before the repair: `nftables` failed; `ssh`, `frigate` and `camera-provision` not active, as their guards hold; no
-table; no port answers and no AP opens; the heartbeat, if any, shows detection false. After it: SSH from `.22` works,
+table; no port answers and no AP opens; the heartbeat, if any, shows detection false. After it: SSH works,
 Frigate is back, and `nodes` is healthy, with no reboot. The README's recovery installs the empty file and re-provisions;
 this uses the saved one to save a re-provision. An unsaved node needs that route, so read it too.
 
@@ -1000,11 +1061,11 @@ counts from what central received. Then undo it, and confirm a return to all tru
 raw `attributes.reason`.
 
 ```bash
-truth() { ( . relay/.env; curl -s -H "Authorization: Bearer $RELAY_API_TOKEN" "http://$CENTRAL:8081/nodes" | python3 -c '
+truth() { api "http://$CENTRAL:8081/nodes" | python3 -c '
 import json, sys
 for n in json.load(sys.stdin)["nodes"]:
     keys = ("camera_online", "link_online", "recording_ok", "detector_ok", "stale", "heartbeat_age_s", "attributes")
-    print({k: n.get(k) for k in keys})' ); }
+    print({k: n.get(k) for k in keys})'; }
 while :; do date +%T; truth; sleep 10; done
 ```
 
@@ -1068,7 +1129,7 @@ Afterwards, stop the sampler, and read it:
 sudo systemctl stop field-sampler.timer field-sampler.service
 grep -c . /var/tmp/field-24h.log; tail -30 /var/tmp/field-24h.log
 journalctl --since -24h --no-pager -u camera-link -u frigate -u camerabridge -g 'detector_error|restart|failed' | tail -30
-( . relay/.env; curl -s -H "Authorization: Bearer $RELAY_API_TOKEN" "http://$CENTRAL:8081/events?limit=5" | python3 -m json.tool | head )
+api "http://$CENTRAL:8081/events?limit=5" | python3 -m json.tool | head
 sudo rm /var/tmp/field-24h.log
 ```
 
@@ -1089,8 +1150,9 @@ C78  date started ________  ended ________  disk ___  max temp ___  inference __
 
 1. Record results here, and in README's C-numbers where they overlap. Replace `tests/fixtures` Hailo lines with the
    real ones from C55, C59 and C76.
-2. Remove `frigate-spike` and everything else site-specific with README build step 10, on a kit that has passed,
-   then capture, shrink, write and seed, steps 11 and 12, and "Seed each kit". C41 checks two of the clones.
+2. Remove `frigate-spike` and everything else site-specific with README build step 10, which also clears every file
+   this run may have left, on a kit that has passed,
+   then capture, shrink, write and seed, steps 11 and 12, and "Seed each kit", which sets each kit's console password. C41 checks two of the clones.
 3. Report: every failed check, with its output.
 
 # Where each binding item is checked
