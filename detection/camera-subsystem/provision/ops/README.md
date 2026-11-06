@@ -262,8 +262,12 @@ old build, so it starts from [`field-run-kit1.md`](field-run-kit1.md) instead, a
    ```bash
    # On the build host:
    rsync -a --exclude .venv --exclude __pycache__ --exclude .pytest_cache --exclude .ruff_cache \
+     --exclude docs --exclude relay --exclude .env --exclude '.env.*' --exclude '*.local.env' \
      detection/camera-subsystem/ <build-pi>:camera-subsystem/
    ```
+
+   **Never copy `relay/` or any `.env` to a node.** `relay/.env` holds the central node's secrets, and this tree goes
+   into every clone. The installer refuses to run if the tree holds one.
 
    ```bash
    # On the Pi:
@@ -384,7 +388,16 @@ old build, so it starts from [`field-run-kit1.md`](field-run-kit1.md) instead, a
     # The node's name from the portal, which a clone would otherwise announce over mDNS until its own save.
     sudo hostnamectl set-hostname black-relay-node
     sudo rm -f /root/.bash_history "$HOME/.bash_history" /var/lib/systemd/random-seed
-    sudo rm -rf "$HOME/camera-subsystem" /root/kit1-uplink-saved
+    sudo rm -rf "$HOME/camera-subsystem" /root/kit1-uplink-saved /root/kit1-camera-saved
+    # What the field run may have left, if a stop rule ended a part early, and a seed of this card.
+    sudo rm -f /root/central-hosts.saved /root/hailo_pci.conf /var/tmp/field-24h.log \
+      /etc/NetworkManager/dnsmasq-shared.d/zz-field-debug.conf /etc/black-relay/kit-seeded \
+      /tmp/adopt.log /tmp/ports.log /tmp/one-attempt.log /tmp/fov-main.jpg /tmp/fov-sub.jpg
+    # Anything that is not for a node. relay/.env holds the central node's secrets.
+    sudo rm -rf /opt/black-relay/src/relay /opt/black-relay/src/docs
+    sudo find /opt/black-relay/src \( -name .env -o -name '.env.*' -o -name '*.local.env' \) -delete
+    # NetworkManager makes a new one. Every clone would otherwise share it.
+    sudo rm -f /var/lib/NetworkManager/secret_key
     sudo journalctl --rotate
     sudo journalctl --vacuum-time=1s
     ```
@@ -394,7 +407,13 @@ old build, so it starts from [`field-run-kit1.md`](field-run-kit1.md) instead, a
     ```bash
     # Each of these must say "No such file or directory".
     sudo ls -d /etc/camerabridge/bridge.yaml /var/lib/camera-link /var/lib/camera-provision /var/lib/frigate-spike \
-      /var/lib/frigate/config/config.yml /var/lib/frigate/config/frigate.db
+      /var/lib/frigate/config/config.yml /var/lib/frigate/config/frigate.db \
+      /opt/black-relay/src/relay /opt/black-relay/src/docs /etc/black-relay/kit-seeded \
+      /root/kit1-uplink-saved /root/kit1-camera-saved /root/central-hosts.saved /root/hailo_pci.conf \
+      /var/tmp/field-24h.log /etc/NetworkManager/dnsmasq-shared.d/zz-field-debug.conf \
+      /tmp/adopt.log /tmp/ports.log /tmp/one-attempt.log /var/lib/NetworkManager/secret_key
+    # Must print nothing.
+    sudo find /opt/black-relay/src \( -name .env -o -name '.env.*' -o -name '*.local.env' \) -print
     # Must print only the file's comments, so no address.
     cat /etc/black-relay/central-hosts.nft
     # Must print the model's hash, 6a20a395...124e, and the camera profile, and no site WiFi profile or name.
@@ -405,7 +424,8 @@ old build, so it starts from [`field-run-kit1.md`](field-run-kit1.md) instead, a
     sudo poweroff
     ```
 
-    The machine ID and SSH host keys are replaced per kit, in the next section. C41 checks all of it.
+    `seed-kit.sh` replaces the machine ID, SSH host keys and console password per kit, in the next section. A clone
+    is no use until then: it has no setup WiFi, and its firewall admits nobody. C41 checks all of it.
 
 11. **Capture the image once,** with the card in the build host. Kits 2-4 are identical to kit 1, so one image
     serves all four. Writing an uncompressed image takes as long as the card is large, and a 128 GB image will not fit
@@ -453,24 +473,26 @@ old build, so it starts from [`field-run-kit1.md`](field-run-kit1.md) instead, a
 ## Seed each kit
 
 Do this once per kit, on the kit's own Pi, with the kit's own card. This is what makes clones of one image into
-separate kits: each gets its own passphrase, SSH host keys and machine ID, and its serial sets its default name. Use
-a console (micro-HDMI and USB keyboard), because the firewall is now active and `eth0` allows no SSH. Until seeding,
-the daemon logs failures to start the AP. That is expected.
+separate kits: each gets its own passphrase, SSH host keys, machine ID and console password, and its serial sets its
+default name. Use a console (micro-HDMI and USB keyboard), because the firewall is now active and `eth0` allows no SSH.
+Log in with the image's password. Until seeding, the daemon logs failures to start the AP. That is expected.
 
 ```bash
-# Give this kit its own identity. The clone otherwise shares all of these with every other kit.
 sudo raspi-config nonint do_expand_rootfs
-sudo rm -f /etc/ssh/ssh_host_*
-sudo ssh-keygen -A
-sudo rm -f /etc/machine-id /var/lib/dbus/machine-id
-sudo systemd-machine-id-setup
 
-# Generate the passphrase, install the AP profile as root-only 0600, and show the label.
+# Everything that makes this kit its own. It asks for the new console password, twice.
 sudo /opt/black-relay/ops/seed-kit.sh
 ```
 
-The script prints the label text once, and the only stored copy is the 0600 profile. It refuses
-to run twice, because a second passphrase would make the label wrong. `--force` overrides that.
+The script first asks for a console password for the user running `sudo`, at least 8 characters, never echoed and
+never in an argument or a log. **Choose one per kit, and keep it in your password manager, not on the label.** Nothing
+has changed until the two entries match. It then replaces the SSH host keys and machine ID, installs the AP profile as
+root-only 0600, writes `/etc/black-relay/kit-seeded`, and prints the label text once. The only stored copy of the
+passphrase is the 0600 profile.
+
+It refuses to run on a kit with that marker or that profile, since a second passphrase would make the label wrong.
+`--force` overrides that, and replaces all of the above. If it stops partway, for a power cut or any error, run it again:
+with neither the marker nor the profile written yet, it needs no `--force`.
 
 **Print the label:** the image has no printing stack, so enter the four printed lines into your
 label printer's workstation, and do not save them to a file. Fix the label to the kit. Then reboot,
@@ -1372,8 +1394,8 @@ sudo nmcli --show-secrets --get-values 802-11-wireless-security.psk connection s
 ```
 
 Expect: no `bridge.yaml`, `node.json`, or time server drop-in, no `black-relay-uplink` profile, and a `central_hosts` set with no elements.
-Between the two kits, a different machine ID, SSH key fingerprint, AP passphrase, and form default for
-`node_id`. Then provision both with their defaults, on one site: both kits' heartbeats keep arriving, with no repeated connect and disconnect for either
+Between the two kits, a different machine ID, SSH key fingerprint, AP passphrase, console password, and form default
+for `node_id`. The password each kit was seeded with works at its console, and the image's does not. Then provision both with their defaults, on one site: both kits' heartbeats keep arriving, with no repeated connect and disconnect for either
 `node_id` in the central broker's log. Two kits sharing an ID would share an MQTT client ID, and
 disconnect each other.
 
@@ -1425,7 +1447,9 @@ sudo nft list set inet black_relay central_hosts
 journalctl -b -u camera-provision --no-pager -g 'firewall'
 ```
 
-1. Hold the button at boot, change `broker_host` to a second address, and submit. Expect the file and the
+1. Hold the button at boot, change `broker_host` to a second address, and submit. On a laptop acting as central,
+   that must become the laptop's only address, not one added beside the first: traffic out leaves from the primary
+   address, which the node would then refuse. Expect the file and the
    live set both to name the new address, no `reloading the firewall failed`, SSH working from the new
    address and timing out from the old one.
 2. Make the reload fail, with `sudo mv /etc/nftables.conf /etc/nftables.conf.saved`, then submit another
