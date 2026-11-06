@@ -23,6 +23,11 @@ Builds the SD image for a camera edge node and defines how to check it in the fi
 | `camerabridge-config.path`, `camerabridge-config-changed.service` | `/etc/systemd/system/` | Start or restart the bridge when `bridge.yaml` changes |
 | `mosquitto-black-relay.conf` | `/etc/mosquitto/conf.d/black-relay.conf` | Node-local broker |
 | `mosquitto-service-override.conf` | `/etc/systemd/system/mosquitto.service.d/black-relay.conf` | Broker restart policy |
+| `journald-persistent.conf` | `/etc/systemd/journald.conf.d/90-black-relay.conf` | Keeps the journal across reboots, capped at 256 MB |
+| `field-run-kit1.md` | Not installed | The ordered field run for kit 1, with checks C49 onward |
+| `../../cameralink/ops/install-node.sh` | Run from the source tree | Installs all of this and `cameralink/ops`. See build step 9 |
+| `../../cameralink/ops/reach-check.sh` | Run from the source tree | Tests each daemon's reach to docker and systemd, inside its hardening. See C53 |
+| `../../cameralink/ops/*.service`, `*.mount`, `*.nmconnection`, `daemon.json`, `hailo_pci.conf` | By `install-node.sh`, as each file's first line says | Camera link, Frigate, Docker and Hailo settings |
 
 ## Design decisions
 
@@ -105,6 +110,11 @@ roles, told apart by address: anything from `10.42.0.0/24` or to `10.42.0.1` is 
   that NetworkManager owns. **Do not run `systemctl stop nftables` or
   `systemctl restart nftables`:** the Debian unit's `ExecStop` runs `nft flush ruleset`, which removes
   every table, including that one, and restart runs it too.
+- **A hung dockerd (review finding F7):** Frigate's container runs outside `frigate.service`'s cgroup. If dockerd
+  hangs so that `docker stop` outlasts the unit's `TimeoutStopSec=45`, systemd kills only the client and calls the
+  unit stopped, while the container may still run. If nftables is then stopped, which the rule above forbids, that
+  container runs with no firewall. So after a stop of Frigate that took the full 45 s, run `sudo docker ps` before
+  trusting that it stopped, and restart Docker or the node if `frigate` is still listed. No small unit change closes this.
 - **If nftables fails at boot:** this takes a damaged `central-hosts.nft`, not a missing one, because nft
   loads all or nothing. The node then has no firewall table, and the guards hold: sshd
   (`ssh-needs-firewall.conf`), Frigate (`Requires=nftables.service` and its table check) and the
@@ -218,8 +228,9 @@ central outage, if the server is the default. Until `timedatectl show -p NTPSync
 
 ## Build the image
 
-Use a small card for the build, since the image is the size of the card. Commands run on the Pi
-unless marked. `<CC>`, `<build-pi>`, and `<sdX>` are placeholders.
+The image starts as the size of the card. A small build card saves time, and step 11 shrinks a large one. Commands
+run on the Pi unless marked. `<CC>`, `<build-pi>`, and `<sdX>` are placeholders. Kit 1 is already past step 8 on an
+old build, so it starts from [`field-run-kit1.md`](field-run-kit1.md) instead, and comes back here at step 10.
 
 1. **Flash** Raspberry Pi OS (64-bit), Trixie. Lite is preferred. On a Desktop image, also run
    `sudo systemctl set-default multi-user.target`. In Raspberry Pi Imager set a user and SSH
@@ -309,12 +320,48 @@ unless marked. `<CC>`, `<build-pi>`, and `<sdX>` are placeholders.
    sudo systemctl mask NetworkManager-wait-online.service
    ```
 
-9. **Do the Plan 3 steps** that belong in the image, without rebooting. A reboot would apply the
-    firewall and cut the build session on `eth0`.
+9. **Install the camera link,** without rebooting. A reboot would apply the firewall and cut the build session on
+   `eth0`. First the two things the installer checks but does not supply: Docker with the Frigate image, and the
+   Hailo driver. **Never install `hailo-all`:** Frigate needs driver 4.21.0, and Trixie's package is 5.1.1.
 
-10. **Remove anything site-specific, then power off.** Do not boot the card again before imaging.
+   ```bash
+   sudo apt-get install -y docker.io docker-cli
+   sudo docker pull "$(grep -Eo 'ghcr\.io/[^ ]+' /opt/black-relay/src/cameralink/ops/frigate.service)"
+   # Frigate's own driver installer, at the Frigate version in use. It installs the headers for the
+   # running kernel, and dkms on Trixie, builds driver 4.21.0, and adds its firmware and udev rule.
+   cd /tmp
+   curl -fsSL -o user_installation.sh \
+     https://raw.githubusercontent.com/blakeblackshear/frigate/v0.18.2/docker/hailo8l/user_installation.sh
+   bash user_installation.sh
+   ```
+
+   After any kernel update, check that `modinfo -F version hailo_pci` still prints `4.21.0`, and run that script again
+   if it does not. Then run the installer, giving it a copy of the model:
+
+   ```bash
+   sudo /opt/black-relay/src/cameralink/ops/install-node.sh --hef <path>/yolov6n.hef; echo "rc=$?"
+   ```
+
+   It repeats steps 5, 6 and 8 safely, and adds what those leave out: the third package, `cameralink/ops` including
+   the literal-backslash `run-frigate\x2dcache.mount`, `daemon.json`, `hailo_pci.conf`, the `eth0` profile, deleting
+   `Wired connection 1`, the model with its SHA-256 checked, and the persistent journal. `central-hosts.nft` goes in
+   only if absent, so a re-run never erases a saved broker. It never reboots, and starts nothing without `--start`.
+   With an SSH session on `eth0`, it leaves `Wired connection 1` live until the reboot, so the session is not cut.
+
+   Expect `rc=0` and `READY`. `rc=3` means all is installed, and lists what it cannot supply itself. Any other exit
+   names the failed step. Add `--purge-tailscale` on a node from an old image (C48). `tests/container_install_node.sh`
+   tests this script on Debian Trixie, without any Pi hardware.
+
+10. **Remove anything site-specific, then power off.** This is every piece of state a clone must not inherit, so run
+    it last, whatever bench tests the card has seen. Do not boot the card again before imaging.
 
     ```bash
+    # Stop everything that writes what follows. Nothing here reloads the firewall, so a session stays up.
+    sudo systemctl stop camera-link.service frigate.service camera-link-dhcp.service \
+      camerabridge-config.path camerabridge.service camera-provision.service
+    sudo docker rm -f frigate frigate-spike 2>/dev/null || true
+    sudo rm -rf /var/lib/frigate-spike
+
     sudo rm -f /etc/NetworkManager/system-connections/preconfigured.nmconnection
     # Stops first-boot setup from running again on a clone.
     sudo touch /etc/cloud/cloud-init.disabled
@@ -322,28 +369,94 @@ unless marked. `<CC>`, `<build-pi>`, and `<sdX>` are placeholders.
     sudo rm -f /etc/NetworkManager/system-connections/black-relay-uplink.nmconnection \
       /etc/NetworkManager/system-connections/black-relay-setup-ap.nmconnection \
       /etc/systemd/timesyncd.conf.d/black-relay.conf
+    # The kit's bridge.yaml, mediamtx.env and frigate.env, its provisioning state and its outbox.
     sudo rm -rf /var/lib/camera-provision /var/lib/camerabridge /etc/camerabridge
+    # The camera's password, link.json, the proxy secret and the camera leases.
+    sudo rm -rf /var/lib/camera-link
+    # Frigate's config, database and recordings. The model stays: nothing else puts it there.
+    sudo find /var/lib/frigate/config -mindepth 1 -maxdepth 1 ! -name model_cache -exec rm -rf {} +
+    sudo find /var/lib/frigate/media -mindepth 1 -delete
     # A bench test may have saved a broker address here. Clones must admit nobody.
     sudo install -m 0644 /opt/black-relay/ops/central-hosts.nft /etc/black-relay/central-hosts.nft
-    # Confirm the golden image holds no bridge config. Expect it to be missing.
-    sudo ls -d /etc/camerabridge/bridge.yaml
+    # WiFi and AP leases, and the networks this card has seen.
+    # In a root shell, because that directory is unreadable to the glob otherwise.
+    sudo sh -c 'rm -f /var/lib/NetworkManager/*.lease /var/lib/NetworkManager/*.leases \
+      /var/lib/NetworkManager/seen-bssids /var/lib/NetworkManager/timestamps'
+    # The node's name from the portal, which a clone would otherwise announce over mDNS until its own save.
+    sudo hostnamectl set-hostname black-relay-node
+    sudo rm -f /root/.bash_history "$HOME/.bash_history" /var/lib/systemd/random-seed
+    sudo rm -rf "$HOME/camera-subsystem" /root/kit1-uplink-saved
+    sudo journalctl --rotate
+    sudo journalctl --vacuum-time=1s
+    ```
+
+    Then confirm, before powering off:
+
+    ```bash
+    # Each of these must say "No such file or directory".
+    sudo ls -d /etc/camerabridge/bridge.yaml /var/lib/camera-link /var/lib/camera-provision /var/lib/frigate-spike \
+      /var/lib/frigate/config/config.yml /var/lib/frigate/config/frigate.db
+    # Must print only the file's comments, so no address.
+    cat /etc/black-relay/central-hosts.nft
+    # Must print the model's hash, 6a20a395...124e, and the camera profile, and no site WiFi profile or name.
+    sudo sha256sum /var/lib/frigate/config/model_cache/yolov6n.hef
+    sudo ls /etc/NetworkManager/system-connections/
+    sudo sh -c 'grep -ls ssid /boot/firmware/network-config /etc/netplan/*' || echo "no WiFi in cloud-init or netplan"
+    sudo docker images --format '{{.Repository}}:{{.Tag}}'
     sudo poweroff
     ```
 
     The machine ID and SSH host keys are replaced per kit, in the next section. C41 checks all of it.
 
-11. **Capture the image** with the card in the build host, then write it to each kit's card.
+11. **Capture the image once,** with the card in the build host. Kits 2-4 are identical to kit 1, so one image
+    serves all four. Writing an uncompressed image takes as long as the card is large, and a 128 GB image will not fit
+    a card a few sectors smaller, which "128 GB" cards can be.
 
     ```bash
-    # On the build host:
+    # On the build host. Check with lsblk that <sdX> is the card: dd overwrites whatever it is told to.
+    lsblk
     sudo dd if=/dev/<sdX> of=black-relay-camera-node.img bs=4M status=progress conv=fsync
+    ```
+
+    **Shrink it.** This fits the root filesystem to its data plus 2 GB, cuts the partition and the file to match, and
+    changes only the image. The 2 GB is room for the clone's first boot, before seeding expands the filesystem.
+
+    ```bash
+    # On the build host, as root. Needs e2fsprogs and fdisk.
+    img=black-relay-camera-node.img
+    start=$(partx -g -n 2 -o START "$img"); start=$((start))
+    sectors=$(partx -g -n 2 -o SECTORS "$img"); sectors=$((sectors))
+    loop=$(losetup --find --show --offset $((start * 512)) --sizelimit $((sectors * 512)) "$img")
+    e2fsck -f -y "$loop"
+    block_size=$(dumpe2fs -h "$loop" 2>/dev/null | awk '/^Block size:/ {print $3}')
+    minimum=$(resize2fs -P "$loop" 2>/dev/null | awk -F': ' '{print $2}')
+    blocks=$((minimum + 2 * 1024 * 1024 * 1024 / block_size))
+    resize2fs "$loop" "$blocks"
+    losetup -d "$loop"
+    sectors=$((blocks * block_size / 512))
+    echo "$start,$sectors" | sfdisk --no-reread --no-tell-kernel -N 2 "$img"
+    truncate -s $(((start + sectors) * 512)) "$img"
+    ```
+
+    Expect `sfdisk` to report the new size, and the file to be a few GB more than the data. PiShrink does the same
+    job: use `pishrink.sh -s`, as `-s` leaves the expansion to the seeding step below. An image too large for the
+    next card means this step did not take.
+
+12. **Write the image to each kit's card,** the same size as the build card or larger, and to kit 1's own card if it
+    is reused. Then seed each kit, including kit 1, on its own Pi: step 10 removed kit 1's passphrase too.
+
+    ```bash
+    # On the build host, for each card. Check with lsblk that <sdX> is the card.
+    lsblk
+    sudo dd if=black-relay-camera-node.img of=/dev/<sdX> bs=4M status=progress conv=fsync
     ```
 
 ## Seed each kit
 
-Do this once per kit, on the kit's own Pi, with the kit's own card. Use a console (micro-HDMI and
-USB keyboard), because the firewall is now active and `eth0` allows no SSH. Until seeding, the
-daemon logs failures to start the AP. That is expected.
+Do this once per kit, on the kit's own Pi, with the kit's own card. This is what makes clones of one image into
+separate kits: each gets its own passphrase, SSH host keys and machine ID, and its serial sets its default name. Use
+a console (micro-HDMI and USB keyboard), because the firewall is now active and `eth0` allows no SSH. Until seeding,
+the daemon logs failures to start the AP. That is expected.
 
 ```bash
 # Give this kit its own identity. The clone otherwise shares all of these with every other kit.
@@ -473,6 +586,11 @@ mosquitto_sub -h <central> -u <typed-user> -P <typed-password> -t detection/came
 | The heartbeat does not claim a detector it cannot show working | C34, C46 |
 | The heartbeat does not claim recording it cannot show happening | C47 |
 | Tailscale is gone from a node re-provisioned from the old image | C48 |
+| Camera link, adoption, video, heartbeat truth table, the 24 h run | C49 to C78, in [`field-run-kit1.md`](field-run-kit1.md) |
+
+C19, C39 and C42 are retired, and their numbers are not reused. C45 to C48 above came first, so the plan's Task 8
+check numbers moved up. `field-run-kit1.md` has the table. Run kit 1's checks in that file's order, and record results
+there.
 
 ### Static checks and adapters
 
@@ -1366,15 +1484,11 @@ behind the clock the in-use segment's time ever falls: the limit is 60 s. Then:
    segments visible on the host, its unit is the place to look.
 
 **C48. Tailscale removed from a node on the old image. NOT YET RUN.** Kit 1 is re-provisioned, not
-re-imaged, so the firewall change leaves the package, daemon and login behind. From a console, after
-the portal save:
+re-imaged, so the firewall change leaves the package, daemon and login behind. The installer removes them, and
+refuses if the SSH session it runs in is on `tailscale0`:
 
 ```bash
-sudo tailscale logout
-sudo systemctl disable --now tailscaled.service
-sudo apt-get purge -y tailscale
-sudo rm -rf /var/lib/tailscale /etc/apt/sources.list.d/tailscale.list \
-  /usr/share/keyrings/tailscale-archive-keyring.gpg
+sudo /opt/black-relay/src/cameralink/ops/install-node.sh --purge-tailscale
 ```
 
 Then check:
@@ -1384,8 +1498,8 @@ dpkg -s tailscale 2>&1 | head -1
 systemctl status tailscaled.service --no-pager 2>&1 | head -1
 ip link show tailscale0 2>&1 | head -1
 sudo ls -la /var/lib/tailscale /var/lib/camera-provision/tailscale.key 2>&1
-python3 -c "import json; print(sorted(json.load(open('/var/lib/camera-provision/node.json'))))"
+sudo python3 -c "import json; print(sorted(json.load(open('/var/lib/camera-provision/node.json'))))"
 ```
 
-Expect: the package not installed, the unit not found, no `tailscale0`, both paths missing, and no
+Run the last line after the portal save, which rewrites the file. Expect: the package not installed, the unit not found, no `tailscale0`, both paths missing, and no
 `vpn_requested` in `node.json`. Also remove the node from the tailnet's admin console.
