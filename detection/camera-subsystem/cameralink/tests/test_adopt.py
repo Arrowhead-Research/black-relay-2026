@@ -1039,6 +1039,48 @@ def test_login_failing_inside_a_step_is_judged_like_any_login(adopted):
     assert len(adopted.record().failures) == 1
 
 
+def test_store_failure_during_a_tick_still_logs_out_and_reports_the_store_error(blank_http):
+    bench = blank_http
+    real_save = bench.store.save
+    logged_out = []
+    real_logout = FakeClient.logout
+
+    def save(record):
+        # The login has happened by the time the password change is being recorded.
+        if record.pending_password:
+            raise StoreError("disk full")
+        return real_save(record)
+
+    def logout(self):
+        logged_out.append(True)
+        real_logout(self)
+
+    bench.store.save = save
+    FakeClient.logout = logout
+    try:
+        with pytest.raises(StoreError, match="disk full"):
+            bench.link_up()
+    finally:
+        FakeClient.logout = real_logout
+    assert bench.camera.logins, "the scenario must reach a login"
+    assert logged_out == [True]
+
+
+def test_a_failed_logout_does_not_replace_a_store_failure(blank_http):
+    bench = blank_http
+    real_save = bench.store.save
+
+    def save(record):
+        if record.pending_password:
+            raise StoreError("disk full")
+        return real_save(record)
+
+    bench.store.save = save
+    bench.camera.script["logout"] = [ApiError("no")]
+    with pytest.raises(StoreError, match="disk full"):
+        bench.link_up()
+
+
 def test_logout_failure_changes_nothing(adopted):
     adopted.camera.script["logout"] = [ApiError("no")]
     assert adopted.link_up() is LinkState.ADOPTED

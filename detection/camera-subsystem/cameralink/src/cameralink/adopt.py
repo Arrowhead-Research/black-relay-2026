@@ -132,8 +132,11 @@ def step(
             probe or _port_open,
             enable_timeout,
         )
-        state = adoption.run()
-        adoption.logout()
+        try:
+            state = adoption.run()
+        finally:
+            # Also after a StoreError, or the camera's session stays open until it expires.
+            adoption.logout()
     _log.debug("camera %s: generation %s: %s", adoption.mac, link_generation, state)
     return state
 
