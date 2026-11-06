@@ -29,18 +29,22 @@ def free_ports(args):
         print(port)
 
 
-def _client(user, password):
+def _client(user, password, client_id=None):
     import paho.mqtt.client as mqtt
 
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"probe-{uuid.uuid4()}")
+    client = mqtt.Client(
+        mqtt.CallbackAPIVersion.VERSION2,
+        client_id=client_id or f"probe-{uuid.uuid4()}",
+        clean_session=False if client_id else True,
+    )
     if user:
         client.username_pw_set(user, password)
     return client
 
 
-def _connect(args, user, password):
+def _connect(args, user, password, client_id=None):
     """Return a connected client, or (None, reason)."""
-    client = _client(user, password)
+    client = _client(user, password, client_id)
     outcome = {}
     client.on_connect = lambda c, u, f, code, p: outcome.update(failed=code.is_failure, code=str(code))
     client.connect(args.host, args.port, keepalive=10)
@@ -129,6 +133,78 @@ def raw(args):
     return _publish(args, args.topic, args.payload.encode())
 
 
+def deep(args):
+    """A heartbeat whose attributes are nested this deep."""
+    message = {
+        "schema": "camera.node-status.v0",
+        "event_id": str(uuid.uuid4()),
+        "timestamp": _stamp(0),
+        "node_id": args.node,
+        "camera_online": True,
+        "link_online": True,
+        "recording_ok": True,
+        "detector_ok": True,
+        "attributes": "@",
+    }
+    nested = b'{"a":' * args.depth + b"1" + b"}" * args.depth
+    return _publish(
+        args, "detection/camera/status/nodes", json.dumps(message).encode().replace(b'"@"', nested)
+    )
+
+
+def flood(args):
+    """QoS 1 messages of this size, each acknowledged, while nobody is reading them."""
+    client, reason = _connect(args, os.environ["PROBE_USER"], os.environ["PROBE_PASSWORD"])
+    if client is None:
+        print(f"refused: {reason}", file=sys.stderr)
+        return 1
+    payload = b"x" * args.size
+    for _ in range(args.count):
+        info = client.publish("detection/camera/detections", payload, qos=1)
+        info.wait_for_publish(timeout=10)
+    client.disconnect()
+    client.loop_stop()
+    return 0
+
+
+def takeover(args):
+    """Hold this client id for a while, connecting again as paho does when pushed off."""
+    deadline = time.monotonic() + args.seconds
+    while time.monotonic() < deadline:
+        client, reason = _connect(
+            args, os.environ["PROBE_USER"], os.environ["PROBE_PASSWORD"], args.client_id
+        )
+        if client is None:
+            print(f"refused: {reason}", file=sys.stderr)
+            return 1
+        time.sleep(1)
+        client.disconnect()
+        client.loop_stop()
+    return 0
+
+
+def acl_read_only(args):
+    """Exit 0 if a publish from PROBE_API_USER does not reach a subscriber using PROBE_USER."""
+    reader, reason = _connect(args, os.environ["PROBE_USER"], os.environ["PROBE_PASSWORD"])
+    if reader is None:
+        print(f"refused: {reason}", file=sys.stderr)
+        return 2
+    writer, reason = _connect(args, os.environ["PROBE_API_USER"], os.environ["PROBE_API_PASSWORD"])
+    if writer is None:
+        print(f"refused: {reason}", file=sys.stderr)
+        return 2
+    received = []
+    reader.on_message = lambda c, u, m: received.append(m.topic)
+    reader.subscribe("detection/camera/detections", 1)
+    time.sleep(0.5)
+    writer.publish("detection/camera/detections", b"from the api login", qos=1)
+    time.sleep(1.5)
+    for client in (reader, writer):
+        client.disconnect()
+        client.loop_stop()
+    return 0 if not received else 1
+
+
 def huge(args):
     """Messages that have crashed JSON handling before."""
     for payload in (
@@ -205,11 +281,16 @@ def node_field(args):
         if node["node_id"] == args.node:
             print(json.dumps(node.get(args.field)))
             return 0
+    print("absent")
     return 1
 
 
 def broker_field(args):
     print(json.dumps(json.load(sys.stdin)["broker"].get(args.field)))
+
+
+def top_field(args):
+    print(json.dumps(json.load(sys.stdin).get(args.field)))
 
 
 def event_count(args):
@@ -256,6 +337,28 @@ def main():
     )
     command("raw", raw, (["--topic"], {"required": True}), (["--payload"], {"required": True}), mqtt=True)
     command("huge", huge, mqtt=True)
+    command(
+        "deep",
+        deep,
+        (["--node"], {"required": True}),
+        (["--depth"], {**number, "required": True}),
+        mqtt=True,
+    )
+    command(
+        "flood",
+        flood,
+        (["--count"], {**number, "required": True}),
+        (["--size"], {**number, "required": True}),
+        mqtt=True,
+    )
+    command(
+        "takeover",
+        takeover,
+        (["--client-id"], {"required": True}),
+        (["--seconds"], {"type": float, "required": True}),
+        mqtt=True,
+    )
+    command("acl-read-only", acl_read_only, mqtt=True)
     command("acl", acl, mqtt=True)
     command("sntp", sntp, (["--host"], {"default": "127.0.0.1"}), (["--port"], {**number, "required": True}))
     command("clock", clock)
@@ -268,6 +371,7 @@ def main():
     )
     command("node-field", node_field, (["node"], {}), (["field"], {}))
     command("broker-field", broker_field, (["field"], {}))
+    command("top-field", top_field, (["field"], {}))
     command("event-count", event_count, (["event_id"], {}))
     args = parser.parse_args()
     sys.exit(args.function(args) or 0)

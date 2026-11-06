@@ -2,8 +2,7 @@
 # runs unchanged on a Pi, a laptop or a server. See README.md.
 #
 #   ./setup-credentials.sh
-#   docker compose --profile broker up -d --build    # with the bundled broker
-#   docker compose up -d --build                     # with the shared compute node's broker
+#   docker compose up -d --build
 
 name: camera-relay
 
@@ -30,9 +29,16 @@ services:
       RELAY_BROKER_PORT: ${RELAY_BROKER_PORT:-1883}
       RELAY_BROKER_USER: ${RELAY_BROKER_USER:?run ./setup-credentials.sh}
       RELAY_BROKER_PASSWORD: ${RELAY_BROKER_PASSWORD:?run ./setup-credentials.sh}
+      RELAY_API_BROKER_USER: ${RELAY_API_BROKER_USER:?run ./setup-credentials.sh}
+      RELAY_API_BROKER_PASSWORD: ${RELAY_API_BROKER_PASSWORD:?run ./setup-credentials.sh}
+      RELAY_MQTT_CLIENT_ID: ${RELAY_MQTT_CLIENT_ID:?run ./setup-credentials.sh}
+      RELAY_SITE_SUBNET: ${RELAY_SITE_SUBNET:?set it in .env, for example 192.168.1.0/24}
+      RELAY_INTERNAL_SUBNETS: ${RELAY_EDGE_SUBNET:-172.31.251.0/24},${RELAY_CONTROL_SUBNET:-172.31.250.0/29}
+      RELAY_CENTRAL_IP: ${RELAY_CENTRAL_IP:-}
       RELAY_MEDIAMTX_API_URL: http://${RELAY_MEDIAMTX_CONTROL_IP:-172.31.250.2}:9997
       RELAY_MEDIAMTX_API_USER: relay-api
       RELAY_MEDIAMTX_API_PASSWORD: ${RELAY_MEDIAMTX_API_PASSWORD:?run ./setup-credentials.sh}
+    mem_limit: 512m
     tmpfs: [/tmp]
     volumes:
       - api-data:/data
@@ -89,6 +95,10 @@ services:
     environment:
       RELAY_BROKER_USER: ${RELAY_BROKER_USER:?run ./setup-credentials.sh}
       RELAY_BROKER_PASSWORD: ${RELAY_BROKER_PASSWORD:?run ./setup-credentials.sh}
+      RELAY_API_BROKER_USER: ${RELAY_API_BROKER_USER:?run ./setup-credentials.sh}
+      RELAY_API_BROKER_PASSWORD: ${RELAY_API_BROKER_PASSWORD:?run ./setup-credentials.sh}
+    # Well above mosquitto.conf's queue limit of 64 MiB, so that it is the limit reached first.
+    mem_limit: 256m
     cap_add: [CHOWN, SETUID, SETGID]
     tmpfs:
       - /tmp
@@ -104,7 +114,11 @@ services:
       - edge
 
 networks:
-  edge: {}
+  # An explicit subnet, so that the API can refuse any node address on it.
+  edge:
+    ipam:
+      config:
+        - subnet: ${RELAY_EDGE_SUBNET:-172.31.251.0/24}
   # MediaMTX's control API lives here. No gateway, and only the API and MediaMTX are on it.
   control:
     internal: true

@@ -36,6 +36,7 @@ wait_until() { # wait_until <seconds> <command...>
     done
 }
 
+test_positive() { (($("$@" 2>/dev/null) > 0)); }
 wait_equal() { # wait_equal <seconds> <expected> <command...>: runs the command again each time
     local deadline=$((SECONDS + $1)) expected="$2"
     shift 2
@@ -51,7 +52,7 @@ done
 
 compose() {
     docker compose -p "$project" --project-directory "$relay" --env-file "$work/env" \
-        -f "$relay/compose.yaml" -f "$here/compose.test.yaml" --profile broker "$@"
+        -f "$relay/compose.yaml" -f "$here/compose.test.yaml" "$@"
 }
 others() { # every container this test did not create
     docker ps --format '{{.ID}} {{.Names}}' | grep -v " $project" | sort
@@ -110,7 +111,8 @@ from urllib.parse import quote
 text = sys.stdin.read()
 for s in sys.argv[1:]:
     text = text.replace(s, "<secret>").replace(quote(s, safe=""), "<secret>")
-sys.stdout.write(text)' "$broker_password" "$token" "$read_password" "$control_password" "$secret"
+sys.stdout.write(text)' "$broker_password" "${old_broker_password:-unset}" "$api_broker_password" \
+            "$client_id" "$token" "$read_password" "$control_password" "$secret"
     else
         cat
     fi
@@ -131,8 +133,27 @@ refuted "setup refuses to overwrite without --force" "$relay/setup-credentials.s
 check "a refused overwrite leaves the file alone" test "$(sha256sum "$credentials")" = "$before"
 check "setup overwrites with --force" "$relay/setup-credentials.sh" --force --output "$credentials"
 if [[ "$(sha256sum "$credentials")" != "$before" ]]; then ok "--force makes new secrets"; else not_ok "--force makes new secrets"; fi
-check "compose accepts the file setup writes" docker compose --env-file "$credentials" \
-    -f "$relay/compose.yaml" --profile broker config --quiet
+check "compose accepts the file setup writes, with a site subnet" env RELAY_SITE_SUBNET=192.168.1.0/24 \
+    docker compose --env-file "$credentials" -f "$relay/compose.yaml" config --quiet
+refuted "compose refuses it with no site subnet" env -u RELAY_SITE_SUBNET \
+    docker compose --env-file "$credentials" -f "$relay/compose.yaml" config --quiet
+services="$(RELAY_SITE_SUBNET=192.168.1.0/24 docker compose --env-file "$credentials" \
+    -f "$relay/compose.yaml" config --services)"
+check "the file setup writes turns on the broker with no --profile flag" grep -qx mosquitto <<<"$services"
+shim="$work/shim"
+mkdir -p "$shim"
+printf '#!/bin/sh\nexit 1\n' >"$shim/head"
+chmod +x "$shim/head"
+failed_output="$work/failed.env"
+if PATH="$shim:$PATH" "$relay/setup-credentials.sh" --output "$failed_output" >/dev/null 2>&1; then
+    not_ok "setup fails when it cannot make a secret"
+else
+    ok "setup fails when it cannot make a secret"
+fi
+refuted "and it leaves no file" test -e "$failed_output"
+for name in RELAY_API_BROKER_PASSWORD RELAY_MQTT_CLIENT_ID; do
+    if grep -qE "^$name='.{20,}'$" "$credentials"; then ok "setup generates $name"; else not_ok "setup generates $name"; fi
+done
 check "the example file holds no secret" test -z "$(grep -E "^RELAY_[A-Z_]*(PASSWORD|TOKEN)=.+" "$relay/.env.example")"
 if grep -qE '(^|[^0-9])1935([^0-9]|$)|\blatest\b' "$relay/compose.yaml" "$relay/mediamtx.yml"; then
     not_ok "no port 1935 and no latest tag in the bundle"
@@ -149,14 +170,12 @@ probe() { "$py" "$here/probe.py" "$@"; }
 # A control subnet nothing here is using.
 used_subnets="$(docker network inspect $(docker network ls -q) \
     --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null)"
-control_prefix=""
-for candidate in 172.31.249 172.31.248 172.31.247 172.31.246 10.254.249 10.254.248; do
-    if ! grep -qF "$candidate." <<<"$used_subnets"; then
-        control_prefix="$candidate"
-        break
-    fi
+free_prefixes=()
+for candidate in 172.31.249 172.31.248 172.31.247 172.31.246 172.31.245 10.254.249 10.254.248; do
+    grep -qF "$candidate." <<<"$used_subnets" || free_prefixes+=("$candidate")
 done
-[[ -n "$control_prefix" ]] || { log "no free control subnet"; exit 2; }
+((${#free_prefixes[@]} >= 3)) || { log "no free subnets"; exit 2; }
+control_prefix="${free_prefixes[0]}" edge_prefix="${free_prefixes[1]}" site="${free_prefixes[2]}"
 
 mapfile -t ports < <(probe free-ports 6)
 api_port="${ports[0]}" rtsp_port="${ports[1]}" webrtc_port="${ports[2]}" media_port="${ports[3]}"
@@ -166,6 +185,9 @@ broker_user=relay
 # Every character a node's portal accepts that means something in a URL, so that a working pull
 # proves the percent-encoding, including a literal %2F which must not decode to a slash.
 broker_password="t3st%2F/p#w@rd:x?&=$(openssl rand -hex 6)"
+api_broker_user=relay-api-login
+api_broker_password="$(openssl rand -hex 16)"
+client_id="relay-api-$(openssl rand -hex 16)"
 read_user=viewer
 read_password="$(openssl rand -hex 16)"
 control_password="$(openssl rand -hex 16)"
@@ -180,12 +202,19 @@ RELAY_WEBRTC_UDP_PORT=$media_port
 RELAY_WEBRTC_HOSTS=127.0.0.1
 RELAY_BROKER_PUBLISH_PORT=$broker_port
 RELAY_NTP_PORT=$ntp_port
+COMPOSE_PROFILES=broker
+RELAY_SITE_SUBNET=$site.0/24
+RELAY_CENTRAL_IP=$site.250
+RELAY_EDGE_SUBNET=$edge_prefix.0/24
 RELAY_CONTROL_SUBNET=$control_prefix.0/29
 RELAY_MEDIAMTX_CONTROL_IP=$control_prefix.2
 RELAY_API_CONTROL_IP=$control_prefix.3
 RELAY_API_TOKEN='$token'
 RELAY_BROKER_USER='$broker_user'
 RELAY_BROKER_PASSWORD='$broker_password'
+RELAY_API_BROKER_USER='$api_broker_user'
+RELAY_API_BROKER_PASSWORD='$api_broker_password'
+RELAY_MQTT_CLIENT_ID='$client_id'
 RELAY_READ_USER='$read_user'
 RELAY_READ_PASSWORD='$read_password'
 RELAY_MEDIAMTX_API_PASSWORD='$control_password'
@@ -193,6 +222,7 @@ RELAY_TEST_DIR=$work
 ENV
 chmod 600 "$work/env"
 export PROBE_USER="$broker_user" PROBE_PASSWORD="$broker_password"
+export PROBE_API_USER="$api_broker_user" PROBE_API_PASSWORD="$api_broker_password"
 
 cat >"$work/go2rtc.yaml" <<YAML
 api:
@@ -226,9 +256,9 @@ api_url="http://127.0.0.1:$api_port"
 nodes() { api "$api_url/nodes"; }
 wait_until 60 nodes || not_ok "the API answers"
 
-container_ip() { # the service's address on the bundle's edge network
+container_ip() { # container_ip <service> <network>
     docker inspect "$(compose ps -q "$1")" --format \
-        "{{(index .NetworkSettings.Networks \"${project}_edge\").IPAddress}}"
+        "{{(index .NetworkSettings.Networks \"${project}_$2\").IPAddress}}"
 }
 # Runs inside the API container, the one place the control API admits, with its own login.
 control_api() {
@@ -238,6 +268,17 @@ request = urllib.request.Request(os.environ["RELAY_MEDIAMTX_API_URL"] + sys.argv
 login = os.environ["RELAY_MEDIAMTX_API_USER"] + ":" + os.environ["RELAY_MEDIAMTX_API_PASSWORD"]
 request.add_header("Authorization", "Basic " + base64.b64encode(login.encode()).decode())
 print(urllib.request.urlopen(request, timeout=5).read().decode())' "$1"
+}
+path_status() { # the control API's HTTP status for this path's configuration
+    compose exec -T api python -c '
+import base64, os, sys, urllib.error, urllib.request
+request = urllib.request.Request(os.environ["RELAY_MEDIAMTX_API_URL"] + "/v3/config/paths/get/" + sys.argv[1])
+login = os.environ["RELAY_MEDIAMTX_API_USER"] + ":" + os.environ["RELAY_MEDIAMTX_API_PASSWORD"]
+request.add_header("Authorization", "Basic " + base64.b64encode(login.encode()).decode())
+try:
+    print(urllib.request.urlopen(request, timeout=5).status)
+except urllib.error.HTTPError as error:
+    print(error.code)' "$1"
 }
 path_source_host() { # the host part only, as the URL holds the broker's credentials
     control_api "/v3/config/paths/get/$1" | python3 -c '
@@ -278,8 +319,14 @@ broker_field() { nodes | "$py" "$here/probe.py" broker-field "$1"; }
 
 log "--- the API's login"
 status() { curl -s -o /dev/null --max-time 10 -w '%{http_code}' "$@"; }
-for route in /nodes /events /events/stream /nodes/x/snapshot/y.jpg /nodes/x/frigate/api/stats /docs /openapi.json; do
-    check "no token: $route is refused" test "$(status "$api_url$route")" = 401 -o "$(status "$api_url$route")" = 404
+for route in /nodes /events /events/stream /nodes/x/snapshot/y.jpg /nodes/x/frigate/api/stats; do
+    check "no token: $route is refused with 401" test "$(status "$api_url$route")" = 401
+done
+for route in /docs /openapi.json; do
+    code="$(status "$api_url$route")"
+    check "no token: $route does not exist or is refused ($code)" test "$code" = 401 -o "$code" = 404
+    code="$(status -H "Authorization: Bearer $token" "$api_url$route")"
+    check "with the token: $route does not exist ($code)" test "$code" = 404
 done
 check "a wrong token is refused" test "$(status -H 'Authorization: Bearer wrong' "$api_url/nodes")" = 401
 check "the right token reads" test "$(status -H "Authorization: Bearer $token" "$api_url/nodes")" = 200
@@ -289,6 +336,15 @@ if docker run --rm --network none "$image" >"$no_token_log" 2>&1; then
     not_ok "with no token the API refuses to start"
 else
     check "with no token the API refuses to start, and says why" grep -q RELAY_API_TOKEN "$no_token_log"
+fi
+no_site_log="$work/no-site.log"
+if docker run --rm --network none -e RELAY_API_TOKEN=x -e RELAY_BROKER_USER=x -e RELAY_BROKER_PASSWORD=x \
+    -e RELAY_API_BROKER_USER=y -e RELAY_API_BROKER_PASSWORD=x -e RELAY_MQTT_CLIENT_ID=x \
+    -e RELAY_MEDIAMTX_API_URL=http://x -e RELAY_MEDIAMTX_API_USER=x -e RELAY_MEDIAMTX_API_PASSWORD=x \
+    "$image" >"$no_site_log" 2>&1; then
+    not_ok "with no site subnet the API refuses to start"
+else
+    check "with no site subnet the API refuses to start, and says why" grep -q RELAY_SITE_SUBNET "$no_site_log"
 fi
 
 log "--- MQTT"
@@ -302,9 +358,12 @@ check "a login with the password works" probe login --port "$broker_port"
 refuted "an anonymous login is refused" probe login --port "$broker_port" --anonymous
 refuted "a wrong password is refused" probe login --port "$broker_port" --wrong-password
 check "the ACL allows detection/ and blocks everything else" probe acl --port "$broker_port"
+check "the API's own login works" env PROBE_USER="$api_broker_user" PROBE_PASSWORD="$api_broker_password" \
+    "$py" "$here/probe.py" login --port "$broker_port"
+check "the API's login can only read" probe acl-read-only --port "$broker_port"
 
 log "--- heartbeats and paths"
-node_ip="$(container_ip node-sim)"
+node_ip="$(container_ip node-sim site)"
 check "publishing a heartbeat works" probe heartbeat --port "$broker_port" --node cam-01 --address "$node_ip"
 wait_equal 10 "\"$node_ip\"" node_field cam-01 node_address || true
 check "the heartbeat appears at GET /nodes" test "$(node_field cam-01 node_address)" = "\"$node_ip\""
@@ -316,16 +375,127 @@ check "the path pulls on demand" test "$(path_field cam-01 sourceOnDemand)" = Tr
 check "the path closes after 10 s" test "$(path_field cam-01 sourceOnDemandCloseAfter)" = 10s
 check "the path uses TCP" test "$(path_field cam-01 rtspTransport)" = tcp
 
-probe heartbeat --port "$broker_port" --node cam-01 --address 192.0.2.99 --age 3600
+probe heartbeat --port "$broker_port" --node cam-01 --address "$site.99" --age 3600
 sleep 2
 check "an old replay does not move the address in /nodes" test "$(node_field cam-01 node_address)" = "\"$node_ip\""
 check "an old replay does not move the path" test "$(path_source_host cam-01)" = "$node_ip:8554/cam-01"
-probe heartbeat --port "$broker_port" --node cam-01 --address 192.0.2.98
-wait_equal 10 "192.0.2.98:8554/cam-01" path_source_host cam-01 || true
-check "a newer heartbeat does move the path" test "$(path_source_host cam-01)" = "192.0.2.98:8554/cam-01"
+probe heartbeat --port "$broker_port" --node cam-01 --address "$site.98"
+wait_equal 10 "$site.98:8554/cam-01" path_source_host cam-01 || true
+check "a newer heartbeat does move the path" test "$(path_source_host cam-01)" = "$site.98:8554/cam-01"
 probe heartbeat --port "$broker_port" --node cam-01 --address "$node_ip"
 wait_equal 10 "$node_ip:8554/cam-01" path_source_host cam-01 || true
 check "and back" test "$(path_source_host cam-01)" = "$node_ip:8554/cam-01"
+
+log "--- F1, F2, F3: addresses that must never reach the proxy or MediaMTX"
+broker_edge_ip="$(container_ip mosquitto edge)"
+mediamtx_edge_ip="$(container_ip mediamtx edge)"
+attacks=(
+    "::ffff:$broker_edge_ip%25x]:1883?"
+    "::ffff:$control_prefix.2%25x]:9997?"
+    "fd00::1%25x]:9997?"
+    $'fd00::1%\n'
+    "$site.21:1883"
+    "$site.21:9997"
+    "$site.21"$'\n'
+    "8.8.8.8"
+    "2606:4700::1111"
+    "2002:7f00:1::"
+    "::ffff:8.8.8.8"
+    "100.100.100.100"
+    "$control_prefix.2"
+    "$edge_prefix.3"
+    "172.17.0.1"
+    "$site.255"
+    "$site.0"
+    "$site.250"
+    "127.0.0.1"
+    "169.254.1.1"
+)
+broker_connections_before="$(compose logs --no-color mosquitto 2>/dev/null | grep -c "New connection from $mediamtx_edge_ip")"
+index=0
+for attack in "${attacks[@]}"; do
+    probe heartbeat --port "$broker_port" --node "attack-$index" --address "$attack" >/dev/null
+    index=$((index + 1))
+done
+sleep 7
+stored=0
+paths=0
+proxied=0
+for ((i = 0; i < index; i++)); do
+    [[ "$(node_field "attack-$i" node_address)" == null ]] || stored=$((stored + 1))
+    [[ "$(path_status "attack-$i")" == 404 ]] || paths=$((paths + 1))
+    code="$(status -H "Authorization: Bearer $token" "$api_url/nodes/attack-$i/frigate/x")"
+    [[ "$code" == 503 ]] || proxied=$((proxied + 1))
+done
+refused_count="$(broker_field dropped | python3 -c 'import json,sys;print(json.load(sys.stdin).get("refused_address",0))')"
+log "     measured: of ${index} attack addresses: $stored stored, $paths paths created, $proxied not refused by the proxy; refused_address=$refused_count"
+check "no attack address is stored" test "$stored" = 0
+check "no attack address made a path" test "$paths" = 0
+check "the proxy refuses every one of those nodes" test "$proxied" = 0
+check "each is counted" test "$refused_count" -ge "$index"
+refuted "reading an attack's path fails" ffprobe -v error -rtsp_transport tcp -timeout 8000000 \
+    "rtsp://$read_user:$read_password@127.0.0.1:$rtsp_port/attack-0"
+sleep 2
+broker_connections_after="$(compose logs --no-color mosquitto 2>/dev/null | grep -c "New connection from $mediamtx_edge_ip")"
+log "     measured: connections from MediaMTX to the broker: $broker_connections_before before, $broker_connections_after after"
+check "MediaMTX never dialled port 1883" test "$broker_connections_before" = "$broker_connections_after"
+mediamtx_logs="$(compose logs --no-color mediamtx 2>&1)"
+check "MediaMTX's log holds no source URL or refused source" test -z "$(grep -E 'is not a valid URL|rtsp://' <<<"$mediamtx_logs")"
+
+log "--- F4: nesting and size"
+check "a heartbeat 33 deep is published" probe deep --port "$broker_port" --node deep-33 --depth 33
+check "one 9992 deep is published" probe deep --port "$broker_port" --node deep-9992 --depth 9992
+sleep 1
+check "GET /nodes still answers" test "$(status -H "Authorization: Bearer $token" "$api_url/nodes")" = 200
+check "neither is stored" test "$(node_field deep-33 stale)" = absent -a "$(node_field deep-9992 stale)" = absent
+dropped="$(broker_field dropped)"
+log "     measured: too_deep and oversize counters: $dropped"
+check "they are counted" python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["too_deep"]>=1 and d["oversize"]>=1' "$dropped"
+# As a database from before this rule would hold them: put in directly, past ingest.
+compose exec -T api python -c '
+import json, os, sqlite3, time
+db = sqlite3.connect(os.environ.get("RELAY_DB_PATH", "/data/relay.sqlite3"))
+base = {"schema": "camera.node-status.v0", "timestamp": "2026-01-01T00:00:00Z", "camera_online": True,
+        "link_online": True, "recording_ok": True, "detector_ok": True, "attributes": "@"}
+text = json.dumps(base)
+for depth in range(9985, 10001):
+    nested = "{\"a\":" * depth + "1" + "}" * depth
+    db.execute("INSERT OR REPLACE INTO nodes VALUES (?, 1, ?, NULL, ?)",
+               (f"row-{depth}", time.time(), text.replace("\"@\"", nested)))
+db.execute("INSERT OR REPLACE INTO nodes VALUES (?, 1, ?, NULL, ?)", ("row-garbage", time.time(), "{nope"))
+db.commit()'
+stored_bad_status="$(status -H "Authorization: Bearer $token" "$api_url/nodes")"
+unreadable="$(nodes | probe top-field unreadable_nodes)"
+log "     measured: GET /nodes with 17 bad rows stored: HTTP $stored_bad_status, unreadable_nodes=$unreadable"
+check "stored bad rows do not break the listing" test "$stored_bad_status" = 200
+check "they are counted, and good nodes are listed" test "$unreadable" -ge 17 -a "$(node_field cam-01 node_address)" = "\"$node_ip\""
+check "a bad row's own route is a clean refusal" test "$(status -H "Authorization: Bearer $token" "$api_url/nodes/row-9992/frigate/x")" = 503
+
+log "--- F5: names MediaMTX treats specially, and length"
+probe heartbeat --port "$broker_port" --node all --address "$site.31"
+probe heartbeat --port "$broker_port" --node "$(printf 'a%.0s' {1..64})" --address "$site.32"
+long_ok="$(printf 'b%.0s' {1..63})"
+probe heartbeat --port "$broker_port" --node "$long_ok" --address "$site.33"
+wait_equal 10 200 path_status "$long_ok" || true
+check "a 63-character id makes a path" test "$(path_status "$long_ok")" = 200
+check "all makes no path" test "$(path_status all)" = 404
+check "all is not listed" test "$(node_field all stale)" = absent
+check "a 64-character id is not listed" test "$(node_field "$(printf 'a%.0s' {1..64})" stale)" = absent
+ghost_log="$work/ghost.log"
+ffprobe -v error -rtsp_transport tcp -timeout 8000000 \
+    "rtsp://$read_user:$read_password@127.0.0.1:$rtsp_port/ghost-path" >"$ghost_log" 2>&1
+ghost_starts="$(compose logs --no-color mediamtx 2>/dev/null | grep -c 'path ghost-path.*source')"
+log "     measured: reading a name nobody configured: $(tail -1 "$ghost_log" | sed 's/.*: //' | cut -c1-40); source starts on it: $ghost_starts"
+check "reading an unknown name starts no source" test "$ghost_starts" = 0
+
+log "--- F6: a stamp ahead of the clock"
+probe heartbeat --port "$broker_port" --node clock-test --address "$site.40" --age -299
+sleep 1
+check "a stamp 299 s ahead is dropped" test "$(node_field clock-test stale)" = absent
+probe heartbeat --port "$broker_port" --node clock-test --address "$site.41"
+wait_equal 5 "\"$site.41\"" node_field clock-test node_address || true
+check "the truthful heartbeat after it is accepted" test "$(node_field clock-test node_address)" = "\"$site.41\""
+log "     measured: heartbeat_age_s right after receipt: $(node_field clock-test heartbeat_age_s)"
 
 log "--- video pulled only on demand"
 rtsp_url="rtsp://127.0.0.1:$rtsp_port/cam-01"
@@ -385,7 +555,7 @@ check "no published port for it" test -z "$(compose port mediamtx 9997 2>/dev/nu
 host_status="$(status -u "relay-api:$control_password" --max-time 5 "$control_url")"
 log "     measured: from this host, with the right password: HTTP $host_status (000 = no connection)"
 check "this host cannot, even with its password" test "$host_status" != 200
-mediamtx_ip="$(container_ip mediamtx)"
+mediamtx_ip="$(container_ip mediamtx edge)"
 refuted "a container on the edge network cannot, by the control address" \
     compose exec -T mosquitto wget -q -T 3 -O /dev/null \
     "http://relay-api:$control_password@$control_prefix.2:9997/v3/config/global/get"
@@ -413,11 +583,14 @@ sleep 1
 check "the API survives them" test "$(status -H "Authorization: Bearer $token" "$api_url/nodes")" = 200
 dropped="$(broker_field dropped)"
 log "     measured: dropped counters: $dropped"
-check "they are counted" python3 -c 'import json,sys; assert json.loads(sys.argv[1]).get("not_json", 0) >= 3' "$dropped"
+check "they are counted" python3 -c '
+import json, sys
+dropped = json.loads(sys.argv[1])
+assert dropped["not_json"] >= 2 and dropped["oversize"] >= 2 and dropped["schema"] >= 1' "$dropped"
 check "the API did not restart" test "$(docker inspect "$(compose ps -q api)" --format '{{.RestartCount}}')" = 0
 
 log "--- Frigate proxy, over real TLS with a self-signed certificate"
-frigate_ip="$(container_ip frigate-sim)"
+frigate_ip="$(container_ip frigate-sim site)"
 probe heartbeat --port "$broker_port" --node cam-02 --address "$frigate_ip"
 wait_equal 10 "\"$frigate_ip\"" node_field cam-02 node_address || true
 proxied="$work/proxied.json"
@@ -442,6 +615,21 @@ for raw in '..' '%2e%2e' '..%2fx' '%252e%252e/x' '//evil.example/x' 'http://evil
 done
 check "an unknown node is refused" test "$(status -H "Authorization: Bearer $token" "$api_url/nodes/ghost/frigate/x")" = 404
 
+log "--- F7: the API's session"
+reconnects() { broker_field reconnects; }
+before="$(reconnects)"
+check "a node login using the old public client id connects" probe takeover --port "$broker_port" --client-id relay-api --seconds 5
+after="$(reconnects)"
+log "     measured: API reconnects while a node login held the id relay-api: $((after - before))"
+check "it does not disturb the API" test "$before" = "$after"
+check "and the API stays connected" test "$(broker_field connected)" = true
+before="$(reconnects)"
+probe takeover --port "$broker_port" --client-id "$client_id" --seconds 8
+after="$(reconnects)"
+log "     measured: API reconnects in 8 s while a client held the API's secret id itself: $((after - before)); the id's secrecy is what prevents this"
+wait_equal 40 true broker_field connected || true
+check "after that the API reconnects by itself" test "$(broker_field connected)" = true
+
 log "--- a broker outage and an API restart"
 compose stop -t 5 api >/dev/null 2>&1
 replay_id="$(python3 -c 'import uuid;print(uuid.uuid4())')"
@@ -460,14 +648,67 @@ check "broker down: nodes are still listed" test "$(node_field cam-01 node_addre
 compose start mosquitto >/dev/null 2>&1
 wait_equal 60 true broker_field connected || true
 check "broker back: the API reconnects by itself" test "$(broker_field connected)" = true
-wait_until 20 probe heartbeat --port "$broker_port" --node cam-03 --address 192.0.2.5 || true
-wait_equal 10 '"192.0.2.5"' node_field cam-03 node_address || true
-check "broker back: new heartbeats arrive" test "$(node_field cam-03 node_address)" = '"192.0.2.5"'
+wait_until 20 probe heartbeat --port "$broker_port" --node cam-03 --address "$site.5" || true
+wait_equal 10 "\"$site.5\"" node_field cam-03 node_address || true
+check "broker back: new heartbeats arrive" test "$(node_field cam-03 node_address)" = "\"$site.5\""
 
 mediamtx_restart_before="$(path_source_host cam-01)"
 compose restart -t 3 mediamtx >/dev/null 2>&1
 wait_equal 30 "$mediamtx_restart_before" path_source_host cam-01 || true
 check "a restarted MediaMTX gets its paths back" test "$(path_source_host cam-01)" = "$mediamtx_restart_before"
+
+log "--- F8: the broker's queue limit"
+compose stop -t 5 api >/dev/null 2>&1
+check "400 messages of 200 KB are published with the API down" probe flood --port "$broker_port" --count 400 --size 200000
+sleep 1
+broker_memory="$(docker stats --no-stream --format '{{.MemUsage}}' "$(compose ps -q mosquitto)")"
+broker_bytes="$(python3 -c '
+import re, sys
+value, unit = re.match(r"([0-9.]+)(\w+)", sys.argv[1]).groups()
+print(int(float(value) * {"B": 1, "KiB": 2**10, "MiB": 2**20, "GiB": 2**30}[unit]))' "$broker_memory")"
+log "     measured: the broker's memory after 80 MB queued against a 64 MiB limit: $broker_memory"
+check "it stays near the limit" test "$broker_bytes" -lt 134217728
+
+log "--- F9: a kill loses at most the autosave window"
+compose start api >/dev/null 2>&1
+wait_equal 40 true broker_field connected || true
+sleep 3
+compose stop -t 5 api >/dev/null 2>&1
+killed_id="$(python3 -c 'import uuid;print(uuid.uuid4())')"
+check "an event is published with the API down" probe detection --port "$broker_port" --node cam-01 --event-id "$killed_id"
+log "     waiting out the 30 s autosave"
+sleep 33
+docker kill -s KILL "$(compose ps -q mosquitto)" >/dev/null
+compose start mosquitto >/dev/null 2>&1
+compose start api >/dev/null 2>&1
+wait_equal 60 1 event_count "$killed_id" || true
+check "it is delivered after the broker was killed" test "$(event_count "$killed_id")" = 1
+
+log "--- F10: a full disk acknowledges nothing"
+wait_equal 40 true broker_field connected || true
+compose exec -T api sh -c 'dd if=/dev/zero of=/data/fill bs=1M >/dev/null 2>&1; true'
+full_id="$(python3 -c 'import uuid;print(uuid.uuid4())')"
+check "an event is published on a full disk" probe detection --port "$broker_port" --node cam-01 --event-id "$full_id"
+store_full() { broker_field store_full; }
+wait_until 15 test_positive store_full
+held="$(store_full)"
+unacked="$(broker_field unacked)"
+log "     measured: on a full disk: store_full=$held unacked=$unacked events found=$(event_count "$full_id")"
+check "it is counted as store_full" test "$held" -ge 1
+check "it is held unacknowledged" test "$unacked" -ge 1
+check "it is not stored" test "$(event_count "$full_id")" = 0
+compose restart -t 5 api >/dev/null 2>&1
+wait_equal 40 true broker_field connected || true
+# A clean stop folds SQLite's write-ahead log away, which can free enough space to take the event.
+redelivered() { (($(store_full) > 0 || $(event_count "$full_id") == 1)); }
+wait_until 15 redelivered
+log "     measured: after an API restart on the full disk: store_full=$(store_full) unacked=$(broker_field unacked) events found=$(event_count "$full_id")"
+check "the broker delivered it again after the restart, as it was never acknowledged" redelivered
+compose exec -T api rm -f /data/fill
+wait_equal 15 1 event_count "$full_id" || true
+check "with space again it is stored" test "$(event_count "$full_id")" = 1
+wait_equal 10 0 broker_field unacked || true
+check "and nothing is held" test "$(broker_field unacked)" = 0
 
 log "--- NTP and the host's clock"
 ntp="$(probe sntp --port "$ntp_port")"
@@ -488,15 +729,54 @@ drift="$(python3 -c 'import sys;print(abs(float(sys.argv[1])-float(sys.argv[2]))
 log "     measured: the host's wall clock moved ${drift} s against its monotonic clock during the run"
 check "the host's clock was not changed" python3 -c 'import sys; assert float(sys.argv[1]) < 0.5' "$drift"
 
-log "--- secrets in logs"
+log "--- F12: changing the broker password as the README says"
+old_broker_password="$broker_password"
+new_broker_password="n3w%2F/p#w@rd:x?&=$(openssl rand -hex 6)"
+python3 - "$work/env" "$new_broker_password" <<'SWAP'
+import re, sys
+path, new = sys.argv[1:]
+text = open(path).read()
+text = re.sub(r"(?m)^RELAY_BROKER_PASSWORD=.*$", lambda m: f"RELAY_BROKER_PASSWORD='{new}'", text)
+open(path, "w").write(text)
+SWAP
+compose up -d >/dev/null 2>&1
+wait_equal 60 true broker_field connected || true
+check "the API is connected after the change" test "$(broker_field connected)" = true
+refuted "the old password is refused" probe login --port "$broker_port"
+check "the new password works" env PROBE_PASSWORD="$new_broker_password" "$py" "$here/probe.py" login --port "$broker_port"
+source_uses_new() {
+    control_api /v3/config/paths/get/cam-01 | python3 -c '
+import json, sys, urllib.parse as u
+print(u.quote(sys.argv[1], safe="") in json.load(sys.stdin)["source"])' "$new_broker_password"
+}
+wait_equal 30 True source_uses_new || true
+check "MediaMTX's pull uses the new password" test "$(source_uses_new)" = True
+# go2rtc still holds the old one, so this read fails, as the README says until nodes change too.
+ffprobe -v error -rtsp_transport tcp -timeout 8000000 \
+    "rtsp://$read_user:$read_password@127.0.0.1:$rtsp_port/cam-01" >/dev/null 2>&1
+export PROBE_PASSWORD="$new_broker_password"
+broker_password="$new_broker_password"
+
+log "--- F3 and F15: secrets in logs, after every failure above"
+status "$api_url/nodes?token=$token" >/dev/null
+sleep 1
 logs="$work/all.log"
 compose logs --no-color >"$logs" 2>&1
 leaked=0
-encoded_password="$(python3 -c 'import sys,urllib.parse as u;print(u.quote(sys.argv[1],safe=""))' "$broker_password")"
-for value in "$broker_password" "$encoded_password" "$token" "$read_password" "$control_password" "$secret"; do
-    grep -qF "$value" "$logs" && leaked=$((leaked + 1))
+encode() { python3 -c 'import sys,urllib.parse as u;print(u.quote(sys.argv[1],safe=""))' "$1"; }
+for value in "$old_broker_password" "$(encode "$old_broker_password")" "$new_broker_password" \
+    "$(encode "$new_broker_password")" "$api_broker_password" "$token" "$read_password" \
+    "$control_password" "$secret"; do
+    grep -qF -- "$value" "$logs" && leaked=$((leaked + 1))
 done
-check "no secret in any container's log" test "$leaked" = 0
+log "     measured: $(wc -l <"$logs") log lines, $leaked secret values found"
+check "no password, token or proxy secret in any container's log" test "$leaked" = 0
+check "the broker password is not in MediaMTX's log, raw or encoded" test -z "$(compose logs --no-color mediamtx 2>&1 |
+    grep -F -e "$old_broker_password" -e "$(encode "$old_broker_password")" -e "$new_broker_password" \
+        -e "$(encode "$new_broker_password")")"
+# The broker's own log names each client, so it holds the API's client id, and nothing else does.
+check "the API's client id is in no log but the broker's" test -z "$(grep -F "$client_id" "$logs" | grep -v '^.*mosquitto-1')"
+check "no proxied URL or access line in the API's log" test -z "$(grep -E 'api-1.*(GET |HTTP Request)' "$logs")"
 
 log "--- a published port that clashes"
 compose stop -t 3 chrony >/dev/null 2>&1

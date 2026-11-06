@@ -42,22 +42,33 @@ random() {
     value="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c "$1" || true)"
     if ((${#value} != $1)); then
         echo "could not read random bytes" >&2
-        exit 1
+        return 1
     fi
     printf '%s' "$value"
 }
+
+# Each in its own assignment, as set -e does not see a failure inside an argument's $(...).
+api_token="$(random 48)"
+broker_password="$(random 40)"
+api_broker_password="$(random 40)"
+client_id="relay-api-$(random 32)"
+read_password="$(random 32)"
+control_password="$(random 32)"
 
 umask 077
 temporary="$(mktemp "$output.XXXXXX")"
 trap 'rm -f "$temporary"' EXIT
 while IFS= read -r line || [[ -n "$line" ]]; do
     case "$line" in
-    RELAY_API_TOKEN=*) printf "RELAY_API_TOKEN='%s'\n" "$(random 48)" ;;
+    RELAY_API_TOKEN=*) printf "RELAY_API_TOKEN='%s'\n" "$api_token" ;;
     RELAY_BROKER_USER=*) printf "RELAY_BROKER_USER='relay'\n" ;;
-    RELAY_BROKER_PASSWORD=*) printf "RELAY_BROKER_PASSWORD='%s'\n" "$(random 40)" ;;
+    RELAY_BROKER_PASSWORD=*) printf "RELAY_BROKER_PASSWORD='%s'\n" "$broker_password" ;;
+    RELAY_API_BROKER_USER=*) printf "RELAY_API_BROKER_USER='relay-api'\n" ;;
+    RELAY_API_BROKER_PASSWORD=*) printf "RELAY_API_BROKER_PASSWORD='%s'\n" "$api_broker_password" ;;
+    RELAY_MQTT_CLIENT_ID=*) printf "RELAY_MQTT_CLIENT_ID='%s'\n" "$client_id" ;;
     RELAY_READ_USER=*) printf "RELAY_READ_USER='viewer'\n" ;;
-    RELAY_READ_PASSWORD=*) printf "RELAY_READ_PASSWORD='%s'\n" "$(random 32)" ;;
-    RELAY_MEDIAMTX_API_PASSWORD=*) printf "RELAY_MEDIAMTX_API_PASSWORD='%s'\n" "$(random 32)" ;;
+    RELAY_READ_PASSWORD=*) printf "RELAY_READ_PASSWORD='%s'\n" "$read_password" ;;
+    RELAY_MEDIAMTX_API_PASSWORD=*) printf "RELAY_MEDIAMTX_API_PASSWORD='%s'\n" "$control_password" ;;
     *) printf '%s\n' "$line" ;;
     esac
 done <"$here/.env.example" >"$temporary"
@@ -69,4 +80,4 @@ echo "Wrote $output, mode 0600."
 if [[ "$force" == 1 ]]; then
     echo "New broker password: change it on every node as well, or they stop reporting."
 fi
-echo "Next: set RELAY_WEBRTC_HOSTS in it, then see README.md."
+echo "Next: set RELAY_SITE_SUBNET and RELAY_WEBRTC_HOSTS in it, then see README.md."

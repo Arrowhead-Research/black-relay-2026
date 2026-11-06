@@ -7,7 +7,7 @@ services:
     volumes:
       - ${RELAY_TEST_DIR}/go2rtc.yaml:/config/go2rtc.yaml:ro
     networks:
-      - edge
+      - site
 
   frigate-sim:
     image: ${RELAY_IMAGE_PREFIX}-api:0.1.0
@@ -15,4 +15,37 @@ services:
     volumes:
       - ${RELAY_TEST_DIR}/sim:/sim:ro
     networks:
-      - edge
+      - site
+
+  # On the site's network as well, as a real host reaches it through its own LAN.
+  api:
+    networks:
+      site: {}
+  mediamtx:
+    networks:
+      site: {}
+
+  # Docker unmounts a tmpfs volume with its last container, which would empty the API's data on
+  # every restart. This keeps it mounted, as a real disk would stay.
+  volume-holder:
+    image: ${RELAY_IMAGE_PREFIX}-api:0.1.0
+    command: ["sleep", "infinity"]
+    network_mode: none
+    volumes:
+      - api-data:/data
+
+# The stand-in for the site LAN, outside the bundle's own networks, which no node address may use.
+networks:
+  site:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${RELAY_SITE_SUBNET}
+
+# Small and able to fill, while surviving a container restart, for the full-disk test.
+volumes:
+  api-data:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=32m,uid=10001
