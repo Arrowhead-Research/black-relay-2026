@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from ipaddress import IPv4Address, IPv4Network
 from typing import Any
 
-# The portal's rule (provision config.py, _NODE_ID_RE), with hostname's limit of 63. Schema
+# The portal's rule (provision config.py, _RELAY_NODE_ID_RE), with hostname's limit of 63. Schema
 # patterns end in "$", which also matches before a final newline, so this is applied again with
 # fullmatch to anything that later reaches a URL or a stored field.
 _NODE_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
