@@ -59,7 +59,13 @@ from cameralink.adopt import (
     LinkState,
     step,
 )
-from cameralink.frigate_config import FrigateConfigError, proxy_secret, render, write_env
+from cameralink.frigate_config import (
+    FrigateConfigError,
+    env_content,
+    proxy_secret,
+    render,
+    write_env,
+)
 from cameralink.reolink import CameraError, ReolinkClient
 from cameralink.store import CameraRecord, CameraStore, StoreError
 
@@ -557,15 +563,18 @@ class Daemon:
             _load_existing(paths.frigate_config),
             secret,
         ).encode()
-        # Staged first, so a value it refuses changes nothing, and so it can be compared.
+        # Compared in memory, because this runs every tick and the card would pay for a write.
+        # A value it refuses changes nothing.
+        env = env_content(record.password, provisioning.relay_password, secret).encode()
         staged = paths.frigate_env.with_name(paths.frigate_env.name + ".new")
         try:
-            write_env(staged, record.password, provisioning.relay_password, secret)
             changed = (
                 _read_or_none(paths.frigate_config) != config
-                or _read_or_none(paths.frigate_env) != staged.read_bytes()
+                or _read_or_none(paths.frigate_env) != env
             )
             if changed or self._link.frigate_mac != mac:
+                # Staged first, so that a failed write changes nothing.
+                write_env(staged, record.password, provisioning.relay_password, secret)
                 # Saved first: both files could match by the next tick with Frigate still old.
                 self._save_link(frigate_mac=mac, restart_owed=True)
                 _write_file(paths.frigate_config, config, 0o644)

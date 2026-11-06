@@ -729,6 +729,88 @@ def test_the_env_file_is_root_only_and_the_config_holds_no_secret(live):
         assert secret not in config
 
 
+def counted_fsyncs(monkeypatch):
+    count = []
+    real = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (count.append(os.readlink(f"/proc/self/fd/{fd}")), real(fd))[1])
+    return count
+
+
+def test_a_steady_tick_syncs_and_replaces_nothing_on_the_card(live, monkeypatch):
+    """The card's wear: a kit ticks 17,280 times a day, and only the tmpfs state file changes."""
+    live.daemon.tick()
+    generation = json.loads(live.paths.link_state.read_text())["generation"]
+    live.seed(
+        attempted=f"{MAC}/{generation}",
+        phase="adopted",
+        applied={
+            "disable_p2p": True,
+            "enable_rtsp": True,
+            "disable_onvif": True,
+            "set_clock": True,
+            "set_name": "cam-8da040",
+            "set_streams": True,
+            "set_rotation": False,
+        },
+    )
+    live.daemon._step = step  # the real one, so that its writes count too
+    live.daemon.tick()
+    assert live.state()["state"] == "adopted"
+    synced = counted_fsyncs(monkeypatch)
+    replaced = []
+    real = os.replace
+    monkeypatch.setattr(os, "replace", lambda a, b: (replaced.append(Path(b).name), real(a, b))[1])
+    on_card = [
+        path
+        for directory in (live.paths.frigate_env.parent, live.paths.store.parent, live.paths.frigate_config.parent)
+        for path in directory.iterdir()
+    ]
+    before = {path: path.stat().st_mtime_ns for path in on_card}
+
+    for _ in range(3):
+        live.clock_epoch += TICK_SECONDS
+        live.daemon.tick()
+
+    assert live.state()["state"] == "adopted"
+    assert set(replaced) == {live.paths.state_file.name}
+    state_dir = str(live.paths.state_file.parent)
+    assert all(path.startswith(state_dir) for path in synced), synced
+    assert before == {path: path.stat().st_mtime_ns for path in on_card}
+
+
+def test_a_changed_password_still_rewrites_the_env_and_restarts(live):
+    live.daemon.tick()
+    live.daemon.tick()
+    live.step.passwords[MAC] = "a-new-camera-password"
+    live.systemd.calls.clear()
+    live.daemon.tick()
+    assert "a-new-camera-password" in live.paths.frigate_env.read_text()
+    assert live.systemd.frigate_calls() == ["restart"]
+
+
+def test_a_stale_staged_file_is_removed_on_a_steady_tick(live):
+    live.daemon.tick()
+    stale = live.paths.frigate_env.with_name("frigate.env.new")
+    stale.write_text("left by a power cut")
+    live.daemon.tick()
+    assert not stale.exists()
+
+
+def test_a_write_that_fails_changes_neither_file_and_is_reported(live, monkeypatch):
+    live.daemon.tick()
+    config = live.paths.frigate_config.read_bytes()
+    env = live.paths.frigate_env.read_bytes()
+    live.provision(node_id="cam-renamed")
+    monkeypatch.setattr(
+        "cameralink.frigate_config._replace_file",
+        lambda path, body: (_ for _ in ()).throw(OSError(28, "No space left on device")),
+    )
+    live.daemon.tick()
+    assert live.paths.frigate_config.read_bytes() == config
+    assert live.paths.frigate_env.read_bytes() == env
+    assert "cannot write" in live.state()["reason"]
+
+
 def test_no_staged_file_is_left_behind(live):
     live.daemon.tick()
     live.daemon.tick()

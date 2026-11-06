@@ -103,10 +103,10 @@ def render(
     )
 
 
-def write_env(path: Path, camera_password: str, relay_password: str, proxy_secret: str) -> None:
-    """Atomically replace the env file that Frigate's container starts with, mode 0600.
+def env_content(camera_password: str, relay_password: str, proxy_secret: str) -> str:
+    """The text of the env file that Frigate's container starts with.
 
-    Every value is written as it is, so a value an env file cannot carry literally is
+    Every value goes in as it is, so a value an env file cannot carry literally is
     refused. An empty ``relay_password`` means an anonymous broker.
     """
     if not isinstance(camera_password, str) or not _LITERAL_SECRET_RE.fullmatch(camera_password):
@@ -118,11 +118,16 @@ def write_env(path: Path, camera_password: str, relay_password: str, proxy_secre
             "the relay password must be printable ASCII, with no space, quote, backslash or $"
         )
     _check_proxy_secret(proxy_secret)
-    body = (
+    return (
         f"{CAMERA_PASSWORD_ENV}={camera_password}\n"
         f"{RELAY_PASSWORD_ENV}={relay_password}\n"
         f"{PROXY_SECRET_ENV}={proxy_secret}\n"
     )
+
+
+def write_env(path: Path, camera_password: str, relay_password: str, proxy_secret: str) -> None:
+    """Atomically replace the env file, mode 0600, refusing what ``env_content`` refuses."""
+    body = env_content(camera_password, relay_password, proxy_secret)
     try:
         _replace_file(Path(path), body)
     except OSError as err:
