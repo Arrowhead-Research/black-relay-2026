@@ -1,0 +1,24 @@
+[Unit]
+Description=Kismet remote capture (TPMS via rtl_433)
+Documentation=file:///etc/rf-node/rf-node.env
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/rf-node/rf-node.env
+Environment=CENTRAL_HOST=rf-central
+Environment=CENTRAL_PORT=3501
+Environment=NODE_NAME=rf-node-01
+Environment=RTL_SOURCE=rtl433-0
+Environment=RTL_SOURCE_OPTS=
+# Requires: kismet-capture-rtl433-v2 AND the rtl_433 decoder binary (package: rtl-433).
+ExecStart=/usr/bin/kismet_cap_sdr_rtl433 --tcp --connect ${CENTRAL_HOST}:${CENTRAL_PORT} --source ${RTL_SOURCE}:name=${NODE_NAME}:tpms${RTL_SOURCE_OPTS}
+Restart=always
+RestartSec=5
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

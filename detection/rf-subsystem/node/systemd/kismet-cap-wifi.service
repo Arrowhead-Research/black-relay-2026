@@ -1,0 +1,24 @@
+[Unit]
+Description=Kismet remote capture (Wi-Fi)
+Documentation=file:///etc/rf-node/rf-node.env
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/rf-node/rf-node.env
+Environment=CENTRAL_HOST=rf-central
+Environment=CENTRAL_PORT=3501
+Environment=NODE_NAME=rf-node-01
+Environment=WIFI_IFACE=wlan1
+Environment=WIFI_SOURCE_OPTS=
+ExecStart=/usr/bin/kismet_cap_linux_wifi --tcp --connect ${CENTRAL_HOST}:${CENTRAL_PORT} --source ${WIFI_IFACE}:name=${NODE_NAME}:wifi${WIFI_SOURCE_OPTS}
+Restart=always
+RestartSec=5
+# Wi-Fi capture may require elevated privileges/capabilities depending on setup.
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
