@@ -30,17 +30,39 @@ On startup the log shows `ERROR: Could not open ICAO database`. You can ignore i
 
 ## Connect a stand-in node
 
-You don't need a Pi 5 to act as a node. Any Linux machine can stream to the central server using Kismet capture helpers from the **same release**:
+You don't need a Pi 5 to act as a node. Any Linux machine can stream to the central server using Kismet capture helpers from the **same release**.
+
+**Install (use the Kismet apt repo that matches the node's OS release):**
 
 ```sh
-# On the stand-in node (Debian/Ubuntu with the Kismet apt repo configured):
-sudo apt install kismet-capture-linux-wifi=2026-10-R1 kismet-capture-linux-bluetooth=2026-10-R1 kismet-capture-rtl433-v2=2026-10-R1
-
-# Wi-Fi (Alfa adapter; monitor mode is handled by the helper):
-sudo kismet_cap_linux_wifi --connect rf-central:3501 --source 'wlan1:name=rf-node-01:wifi'
+# Debian/Ubuntu node with the Kismet apt repo configured for its release.
+# kismet-capture-rtl433-v2 needs the rtl_433 decoder binary installed separately.
+sudo apt install \
+  kismet-capture-linux-wifi=2026-10-R1 \
+  kismet-capture-linux-bluetooth=2026-10-R1 \
+  kismet-capture-rtl433-v2=2026-10-R1 \
+  rtl-433
 ```
 
-The exact remote-capture flags for each helper, including WebSocket mode with an API key, still need to be confirmed against this release (DESIGN.md, open question 5). Record the working commands here once they are verified.
+**Remote capture (validated on Kismet 2026-10-R1, legacy TCP on port 3501):**
+
+Replace `<central-ip>` with the central host (for example `rf-central` over MagicDNS/Tailscale, or a LAN IP that the node can reach). Replace interfaces and `name=` values with the node's actual devices/ID. **Do not capture on the interface used for backhaul/SSH** (for example, do not put an onboard Wi-Fi interface into monitor mode if it carries your connection).
+
+```sh
+# Wi-Fi (external adapter; monitor mode is handled by the helper)
+sudo kismet_cap_linux_wifi --tcp --connect <central-ip>:3501 \
+  --source 'wlan1:name=rf-node-01:wifi'
+
+# Bluetooth / BLE (verify which hciN is the external adapter on each node)
+sudo kismet_cap_linux_bluetooth --tcp --connect <central-ip>:3501 \
+  --source 'hci0:name=rf-node-01:bt'
+
+# TPMS via RTL-SDR + rtl_433
+sudo kismet_cap_sdr_rtl433 --tcp --connect <central-ip>:3501 \
+  --source 'rtl433-0:name=rf-node-01:tpms'
+```
+
+WebSocket remote capture on port 2501 (with `--user`/`--password` or `--apikey`) is supported by the helpers but has not been validated in this environment yet (DESIGN.md, open question 5). For ad-hoc testing, run helpers with `nohup`/`tmux` or as `systemd` units; ad-hoc starts are not persistent across reboot.
 
 ## Security notes
 

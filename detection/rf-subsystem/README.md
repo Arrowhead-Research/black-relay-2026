@@ -8,7 +8,7 @@
 
 The RF subsystem gives the safehouse passive, receive-only awareness of nearby Wi-Fi, Bluetooth/BLE, and TPMS emitters. Distributed WBT nodes stream their captures to a central Kismet server. An analytics service characterizes the emitters, places them in zones, learns patterns of life, and publishes alerts and camera cues to the fusion service over MQTT. The full design is in [`DESIGN.md`](DESIGN.md).
 
-**Current state:** the WBT node hardware is not yet available. The central Kismet stack, a scenario simulator, and `rf-analytics` (ingest, friendly exclusion, visits, zone localization, alert rules, camera cues, and durable MQTT output) are built and tested on simulated data. The Kismet ingest adapter and the node software are not built yet. The node assembly and startup steps below are drafts that still need to be validated on hardware.
+**Current state:** the central Kismet stack, a scenario simulator, and `rf-analytics` (ingest, friendly exclusion, visits, zone localization, alert rules, camera cues, and durable MQTT output) are built and tested on simulated data. The Kismet ingest adapter and the node software (`rf-node-agent` / persistent `systemd` capture units) are not built yet. Node assembly remains draft; on Raspberry Pi 5 WBT nodes (Debian 13/trixie, arm64) the Kismet `2026-10-R1` capture helpers were installed and **legacy TCP remote capture to the central server (port 3501) was validated** for Wi‑Fi, Bluetooth, and TPMS (see [`central/README.md`](central/README.md)). WebSocket remote capture and production node provisioning still need validation.
 
 ## File Tree
 
@@ -114,8 +114,9 @@ Node configuration (`/etc/rf-node/node.yaml`) is specified in DESIGN.md section 
    2. **Power order:** power the USB hub **first**, wait about 5 seconds, then power the Pi. This way all radios are present when the Pi enumerates USB devices.
    3. **First boot only:** SSH in, then:
       - run `sudo apt update && sudo apt full-upgrade`
-      - install Tailscale and join with the tagged auth key: `sudo tailscale up --auth-key=<key> --hostname=<node-id>`
-      - add the Kismet apt repository and install the capture helpers pinned to `2026-10-R1` (see [`central/README.md`](central/README.md))
+      - install Tailscale and join with the tagged auth key: `sudo tailscale up --auth-key=<key> --hostname=<node-id>` (use a tagged, pre-authorized key; never commit it)
+      - add the Kismet apt repository for the node's OS release (for example `trixie` on Debian 13 / recent Raspberry Pi OS) and install the capture helpers pinned to the **same release as the central server** (currently `2026-10-R1`). Install `rtl-433` as well: `kismet-capture-rtl433-v2` depends on the `rtl_433` decoder binary. See [`central/README.md`](central/README.md) for working remote-capture commands.
+      - add the capture user to the `kismet` group if running helpers without root: `sudo usermod -aG kismet <user>` (new login required)
    4. **Check the radios** using the commands under [Testing and Verification](#testing-and-verification).
    5. **Start capture** against `rf-central`, using the stand-in node commands in [`central/README.md`](central/README.md). Confirm that each data source shows as running in the Kismet web UI (*Data Sources*).
    6. **Shutdown:** run `sudo poweroff` on the Pi, wait for the green LED to stop, then unplug the Pi and the hub.
@@ -156,6 +157,10 @@ Focus checks on business rules, event definitions, and contracts with connected 
 | Many Bluetooth or 2.4 GHz packets dropped | USB 3 interference, or radios too close together | Move the hub to a USB 2 port, separate the radios by at least 30 cm, and use the extension cables. |
 | No TPMS decodes | Wrong frequency, or no vehicle moving nearby | Use `-f 315M` in the US. TPMS sensors only transmit while the vehicle moves or just after it starts. |
 | A node does not show up on the tailnet | Auth key expired or untagged, or no backhaul | Run `tailscale status` on the node, check the Ethernet link, and re-run `tailscale up` with a valid tagged key. |
+| `kismet_cap_sdr_rtl433` fails with `rtl_433 binary not installed` | The `rtl-433` decoder package is missing | Install it: `sudo apt install rtl-433`. `kismet-capture-rtl433-v2` provides the Kismet helper, not the decoder binary. |
+| TPMS helper cycles / Kismet shows "IPC connection closed" for the TPMS source | A standalone `rtl_433` process or `rtl-433` service is claiming the RTL-SDR, or the helper cannot hold the device | Stop competing processes/services (`ps aux \| grep rtl_433`, `systemctl status '*rtl*433*'`), confirm SDR access (`rtl_test -t`), then restart `kismet_cap_sdr_rtl433`. Check `/tmp/kcap-tpms.log` (or your log path). |
+| Captures stop after a node reboot | Helpers were started ad hoc (`nohup`/foreground) and no persistent unit is installed | Use `systemd` units (node agent/units are not built in this repo yet) or restart helpers after boot. See [`central/README.md`](central/README.md) for validated commands. |
+| Wi-Fi capture drops SSH/backhaul | The helper was pointed at the backhaul interface | Capture only on the external monitor adapter (verify interface names per node). Do not put the onboard/backhaul Wi-Fi interface into monitor mode. |
 
 ## Interfaces and Dependencies
 
