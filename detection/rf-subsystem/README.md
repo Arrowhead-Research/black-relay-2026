@@ -8,25 +8,28 @@
 
 The RF subsystem gives the safehouse passive, receive-only awareness of nearby Wi-Fi, Bluetooth/BLE, and TPMS emitters. Distributed WBT nodes stream their captures to a central Kismet server. An analytics service characterizes the emitters, places them in zones, learns patterns of life, and publishes alerts and camera cues to the fusion service over MQTT. The full design is in [`DESIGN.md`](DESIGN.md).
 
-**Current state:** the central Kismet stack, a scenario simulator, and `rf-analytics` (ingest, friendly exclusion, visits, zone localization, alert rules, camera cues, and durable MQTT output) are built and tested on simulated data. The Kismet ingest adapter and the node software (`rf-node-agent` / persistent `systemd` capture units) are not built yet. Node assembly remains draft; on Raspberry Pi 5 WBT nodes (Debian 13/trixie, arm64) the Kismet `2026-10-R1` capture helpers were installed and **legacy TCP remote capture to the central server (port 3501) was validated** for Wi‑Fi, Bluetooth, and TPMS (see [`central/README.md`](central/README.md)). WebSocket remote capture and production node provisioning still need validation.
+**Current state:** the central Kismet stack, a scenario simulator, and `rf-analytics` (ingest, friendly exclusion, visits, zone localization, alert rules, camera cues, and durable MQTT output) are built and tested on simulated data. The Kismet ingest adapter (`rfanalytics kismet`, v1) polls the Kismet REST API and emits `rf.observation.v0`; a live run produced valid observations from all four WBT nodes. Per-node RSSI is not yet available from Kismet, so the adapter currently uses aggregate device RSSI (see [`AGENTS.md`](AGENTS.md)). Example `systemd` capture units are in [`node/`](node/README.md); the `rf-node-agent` (registration, heartbeats) is not built yet. Node assembly remains draft; on Raspberry Pi 5 WBT nodes (Debian 13/trixie, arm64) the Kismet `2026-10-R1` capture helpers were installed and **legacy TCP remote capture to the central server (port 3501) was validated** for Wi‑Fi, Bluetooth, and TPMS (see [`central/README.md`](central/README.md)). WebSocket remote capture and production node provisioning still need validation.
 
 ## File Tree
 
 ```text
 rf-subsystem/
+├── AGENTS.md                    # Current-state handoff notes for agents and contributors
 ├── DESIGN.md                    # Subsystem design: requirements, architecture, interfaces
 ├── README.md                    # This file
 ├── schemas/
 │   └── observation.v0.schema.json   # Normalized observation contract (ingest → analytics)
 ├── analytics/                   # rf-analytics: ingest, exclusion, visits, localization, alerts (Python, uv)
-│   ├── src/rfanalytics/         # Analyzer, localization, alert rules, wire format, outbox, scorer, CLI
-│   ├── config/                  # Example friendly list and alert rules
+│   ├── src/rfanalytics/         # Kismet ingest, analyzer, localization, alert rules, wire format, outbox, scorer, CLI
+│   ├── config/                  # Example friendly list, alert rules, and WBT node site mapping
 │   └── tests/                   # Contract, business-rule, and scenario tests
 ├── central/                     # Docker Compose stack for the central server
 │   ├── docker-compose.yml       # kismet-server + development MQTT broker
 │   ├── .env.example             # Bind address, Kismet version, admin credentials
 │   ├── kismet/                  # Kismet image: Dockerfile, site config, entrypoint
 │   └── mosquitto/               # Development broker config
+├── node/                        # WBT node artifacts
+│   └── systemd/                 # Example Kismet remote-capture units and env template (no secrets)
 └── simulator/                   # rfsim: multi-node observation simulator (Python, uv)
     ├── src/rfsim/               # Engine, propagation model, devices, scenario loader, CLI
     ├── sites/                   # Site layouts (zones, node positions)
@@ -109,7 +112,8 @@ Node configuration (`/etc/rf-node/node.yaml`) is specified in DESIGN.md section 
 1. Start the central stack: `cd central && cp .env.example .env && docker compose up -d --build --wait`. See [`central/README.md`](central/README.md).
 2. Without node hardware, feed the stack simulated data: `cd simulator && uv sync --extra mqtt && uv run rfsim run scenarios/loiterer.yaml --start-now --realtime --speed 60 --mqtt-host 127.0.0.1 -o /dev/null`. See [`simulator/README.md`](simulator/README.md).
    To process the feed and publish alerts, run `cd analytics && uv sync --extra mqtt && uv run rfanalytics run --site ../simulator/sites/dev-site.yaml --mqtt-host 127.0.0.1 -o events.jsonl --rules config/rules.example.yaml --publish-host 127.0.0.1`. See [`analytics/README.md`](analytics/README.md).
-3. **Bring up WBT nodes.** This is a draft until it is validated on hardware. The node agent and systemd units are not built yet, so steps 3.4–3.5 are manual for now.
+   With live nodes instead, pipe the Kismet adapter into analytics: `uv run rfanalytics kismet --kismet-url http://<kismet-host>:2501 --user "$KISMET_USER" --password-env KISMET_PASSWORD -o - | uv run rfanalytics run --site config/site.wbt-nodes.example.yaml --input - -o events.jsonl --rules config/rules.example.yaml` (replace the example site geometry with real node positions first).
+3. **Bring up WBT nodes.** This is a draft until it is validated on hardware. The node agent is not built yet. Steps 3.4–3.5 can be run manually, or capture can be made persistent with the example systemd units in [`node/README.md`](node/README.md).
    1. Make sure the central stack is running and the central server is on the tailnet as `rf-central`.
    2. **Power order:** power the USB hub **first**, wait about 5 seconds, then power the Pi. This way all radios are present when the Pi enumerates USB devices.
    3. **First boot only:** SSH in, then:
@@ -159,7 +163,7 @@ Focus checks on business rules, event definitions, and contracts with connected 
 | A node does not show up on the tailnet | Auth key expired or untagged, or no backhaul | Run `tailscale status` on the node, check the Ethernet link, and re-run `tailscale up` with a valid tagged key. |
 | `kismet_cap_sdr_rtl433` fails with `rtl_433 binary not installed` | The `rtl-433` decoder package is missing | Install it: `sudo apt install rtl-433`. `kismet-capture-rtl433-v2` provides the Kismet helper, not the decoder binary. |
 | TPMS helper cycles / Kismet shows "IPC connection closed" for the TPMS source | A standalone `rtl_433` process or `rtl-433` service is claiming the RTL-SDR, or the helper cannot hold the device | Stop competing processes/services (`ps aux \| grep rtl_433`, `systemctl status '*rtl*433*'`), confirm SDR access (`rtl_test -t`), then restart `kismet_cap_sdr_rtl433`. Check `/tmp/kcap-tpms.log` (or your log path). |
-| Captures stop after a node reboot | Helpers were started ad hoc (`nohup`/foreground) and no persistent unit is installed | Use `systemd` units (node agent/units are not built in this repo yet) or restart helpers after boot. See [`central/README.md`](central/README.md) for validated commands. |
+| Captures stop after a node reboot | Helpers were started ad hoc (`nohup`/foreground) and no persistent unit is installed | Install and enable the example `systemd` units from [`node/README.md`](node/README.md), or restart helpers after boot. See [`central/README.md`](central/README.md) for validated commands. |
 | Wi-Fi capture drops SSH/backhaul | The helper was pointed at the backhaul interface | Capture only on the external monitor adapter (verify interface names per node). Do not put the onboard/backhaul Wi-Fi interface into monitor mode. |
 
 ## Interfaces and Dependencies
@@ -167,7 +171,7 @@ Focus checks on business rules, event definitions, and contracts with connected 
 | Interface | Direction | Transport | Status |
 |---|---|---|---|
 | WBT node → `kismet-server` | Inbound | Kismet remote capture (TCP 3501 or WebSocket 2501) over Tailscale | Server ready. Node mode to be confirmed. |
-| `kismet-server` → `rf-analytics` | Internal | Kismet REST API and event bus | Adapter not built yet. |
+| `kismet-server` → `rf-analytics` | Internal | Kismet REST API (polled) | Implemented (`rfanalytics kismet`, v1). Per-node RSSI falls back to aggregate; TPMS mapping best-effort until live decodes are verified. |
 | `rf-analytics` ingest | Internal | `rf.observation.v0` ([`schemas/observation.v0.schema.json`](schemas/observation.v0.schema.json)) over JSONL or MQTT | Implemented. Validated against the schema. |
 | `rf-analytics` events | Internal | `rf.analytics-event.v0` (see [`analytics/README.md`](analytics/README.md)) | Implemented. Feeds the alert engine (next). |
 | Alerts, node status → fusion service | Outbound | MQTT QoS 1, `detection/rf/alerts` and `detection/rf/status/nodes`, with a durable outbox | Implemented with the draft format. Waiting on the fusion message standard. |
@@ -186,6 +190,7 @@ Focus checks on business rules, event definitions, and contracts with connected 
 
 | Date | Change |
 |---|---|
+| 2026-11-07 | Added Kismet ingest v1 (`rfanalytics kismet`), example node `systemd` capture units, and validated legacy TCP remote capture on WBT nodes. |
 | 2026-11-02 | Added `rf-analytics` alerting: six rule types, TPMS camera cues, a draft fusion wire format, and durable MQTT output. |
 | 2026-11-02 | Added `rf-analytics` phase 1: ingest, friendly exclusion, visits, zone localization, and a ground-truth scorer. |
 | 2026-11-02 | Added the subsystem design (`DESIGN.md`), the central Kismet and MQTT stack, the observation schema, and the `rfsim` simulator. Drafted node assembly and startup steps; these are not yet validated on hardware. |
