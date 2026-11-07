@@ -9,7 +9,7 @@
 | Visit building: confirmation threshold, gap bridging, per-type gaps | 7.3.5, CEN-08 | Done |
 | Zone localization: windowed medians, strongest-node or centroid, hysteresis, staleness | 7.3.4, CEN-04 | Done |
 | Scoring against `rfsim` ground truth | Phase 3 exit criteria | Done |
-| Kismet ingest adapter | 7.3.1 | Not started |
+| Kismet ingest adapter (polling REST, v1) | 7.3.1 | v1 (maps Kismet devices -> `rf.observation.v0`; see below) |
 | Alert rules: loiter, new device, repeat visitor, watchlist, node offline | 7.3.8, CEN-09 | Done |
 | TPMS camera cues | 7.3.7, CEN-07 | Done |
 | MQTT output with a durable outbox (replayed after a broker outage or restart) | 7.3.8, CEN-13 | Done |
@@ -17,6 +17,24 @@
 | Alert configuration pushed from TAK | 7.3.10, CEN-11 | Waiting on the TAK team |
 | Identity linking, pattern of life, co-travelers | 7.3.2, 7.3.5, 7.3.6 | Later |
 | Persistence (database), config web UI | 7.1, 7.3.9 | Later |
+
+## Kismet live ingest (v1)
+
+`rfanalytics kismet` polls a Kismet server (tested against 2026-10-R1) and emits validated `rf.observation.v0` records, one per (emitter, seeing node/datasource) with a newer `last_time` than previously emitted.
+
+```sh
+# Fetch once (read-only) and inspect observations
+uv run rfanalytics kismet --once --kismet-url http://<kismet-host>:2501 \
+  --user "$KISMET_USER" --password-env KISMET_PASSWORD -o observations.jsonl
+
+# Poll continuously and feed analytics (example)
+uv run rfanalytics kismet --kismet-url http://<kismet-host>:2501 --user "$KISMET_USER" --password-env KISMET_PASSWORD -o - \
+  | uv run rfanalytics run --site ../simulator/sites/dev-site.yaml -o events.jsonl --input - --rules config/rules.example.yaml
+```
+
+Node IDs are derived from Kismet datasource names (e.g. `wbt-1:wifi` -> `wbt-1`), matching the naming used when starting remote capture helpers. **Do not pass credentials on the command line in shared environments;** prefer `--password-env` or `KISMET_PASSWORD`/`KISMET_USER`.
+
+**v1 limitations (validate on your deployment):** per-seenby (per-node) RSSI may not be populated by Kismet/capture; when absent the adapter falls back to aggregate device RSSI and sets `attributes.rssi_is_aggregate=true`, which reduces per-node localization fidelity. RTL433/TPMS mapping is best-effort until verified with live TPMS decodes. Event-bus streaming, richer per-source signal, and field-verified TPMS attributes are follow-ups.
 
 ## Events (`rf.analytics-event.v0`)
 

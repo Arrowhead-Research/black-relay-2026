@@ -1,0 +1,22 @@
+# Starter site config for live WBT nodes (wbt-1..wbt-4).
+# Copy and update with real zone geometry, node positions (meters, local grid),
+# and per-node calibration_db once field placement is known.
+#
+# Node IDs must match Kismet datasource name prefixes (e.g. wbt-1:wifi -> wbt-1).
+# With current v1 Kismet ingest, per-seenby RSSI may be unavailable and the
+# adapter can set attributes.rssi_is_aggregate=true; localization still runs but
+# multi-node differentiation is reduced until per-node RSSI is available.
+
+name: wbt-field
+
+zones:
+  - { name: zone-wbt-1, rect: [0, 0, 10, 10] }
+  - { name: zone-wbt-2, rect: [10, 0, 20, 10] }
+  - { name: zone-wbt-3, rect: [0, 10, 10, 20] }
+  - { name: zone-wbt-4, rect: [10, 10, 20, 20] }
+
+nodes:
+  - { node_id: wbt-1, zone: zone-wbt-1, position: [5, 5] }
+  - { node_id: wbt-2, zone: zone-wbt-2, position: [15, 5] }
+  - { node_id: wbt-3, zone: zone-wbt-3, position: [5, 15] }
+  - { node_id: wbt-4, zone: zone-wbt-4, position: [15, 15] }

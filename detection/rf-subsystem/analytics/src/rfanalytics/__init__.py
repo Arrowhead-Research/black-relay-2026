@@ -5,12 +5,6 @@ devices, builds visits, and estimates each emitter's zone. Emits analytics
 events (``rf.analytics-event.v0``) for alerting and downstream consumers.
 """
 
-from rfanalytics.analyzer import Analyzer, AnalyzerConfig
-from rfanalytics.events import Event
-from rfanalytics.friendly import FriendlyEntry, FriendlyList, load_friendly
-from rfanalytics.observation import Observation, ObservationError, parse_observation
-from rfanalytics.site import Site, load_site
-
 __all__ = [
     "Analyzer",
     "AnalyzerConfig",
@@ -24,3 +18,29 @@ __all__ = [
     "load_site",
     "parse_observation",
 ]
+
+_LAZY = {
+    "Analyzer": ("rfanalytics.analyzer", "Analyzer"),
+    "AnalyzerConfig": ("rfanalytics.analyzer", "AnalyzerConfig"),
+    "Event": ("rfanalytics.events", "Event"),
+    "FriendlyEntry": ("rfanalytics.friendly", "FriendlyEntry"),
+    "FriendlyList": ("rfanalytics.friendly", "FriendlyList"),
+    "load_friendly": ("rfanalytics.friendly", "load_friendly"),
+    "Observation": ("rfanalytics.observation", "Observation"),
+    "ObservationError": ("rfanalytics.observation", "ObservationError"),
+    "parse_observation": ("rfanalytics.observation", "parse_observation"),
+    "Site": ("rfanalytics.site", "Site"),
+    "load_site": ("rfanalytics.site", "load_site"),
+}
+
+
+def __getattr__(name: str):
+    if name in _LAZY:
+        mod_name, attr = _LAZY[name]
+        import importlib
+
+        mod = importlib.import_module(mod_name)
+        value = getattr(mod, attr)
+        globals()[name] = value
+        return value
+    raise AttributeError(name)
