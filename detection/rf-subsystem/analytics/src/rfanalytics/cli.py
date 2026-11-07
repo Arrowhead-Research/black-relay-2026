@@ -2,6 +2,7 @@
 
     rfanalytics run      process observations from a file or MQTT, write events
     rfanalytics kismet   poll Kismet and emit rf.observation.v0 JSONL
+    rfanalytics live     poll Kismet, run analytics and alerting, publish to MQTT
     rfanalytics score    compare events with rfsim ground truth
     rfanalytics friendly-from-truth   build a friendly list from rfsim ground truth
 """
@@ -55,16 +56,44 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     ki = sub.add_parser("kismet", help="poll Kismet REST API and emit rf.observation.v0 JSONL")
-    ki.add_argument("--kismet-url", required=True, help="Kismet base URL, e.g. http://127.0.0.1:2501")
-    ki.add_argument("--user", default=None, help="Kismet username (or set KISMET_USER)")
-    ki.add_argument("--password", default=None, help="Kismet password (prefer --password-env)")
-    ki.add_argument("--password-env", default=None, help="read Kismet password from this environment variable")
-    ki.add_argument("--poll", type=float, default=5.0, help="poll interval seconds (default: 5)")
+    _add_kismet_args(ki)
     ki.add_argument("--once", action="store_true", help="fetch once and exit")
     ki.add_argument("-o", "--out", default="-", help="observation JSONL output (default: stdout)")
     ki.add_argument("--publish-host", help="also publish observations to this MQTT broker")
     ki.add_argument("--publish-port", type=int, default=1883)
     ki.add_argument("--publish-topic", default="detection/rf/observations")
+
+    lv = sub.add_parser(
+        "live",
+        help="poll Kismet, run analytics and alert rules, publish alerts/cues/status to MQTT",
+    )
+    _add_kismet_args(lv)
+    lv.add_argument("--site", type=Path, required=True, help="site YAML (zones and nodes)")
+    lv.add_argument("--friendly", type=Path, help="friendly list YAML")
+    lv.add_argument("--rules", type=Path, required=True, help="alert rules YAML")
+    lv.add_argument("--method", choices=METHODS, default="strongest")
+    lv.add_argument(
+        "--backfill-s",
+        type=float,
+        default=120.0,
+        help="on start, only process devices Kismet heard in the last N seconds (default: 120)",
+    )
+    lv.add_argument(
+        "--max-age-s",
+        type=float,
+        default=30.0,
+        help="drop observations older than this when polled (default: 30). Kismet keeps "
+        "each node's last-heard time per device, which can be far older than the device's",
+    )
+    lv.add_argument("--events-out", default="none", help="analytics events JSONL ('-' for stdout; default: none)")
+    lv.add_argument("--observations-out", default="none", help="observation JSONL archive (default: none)")
+    lv.add_argument("--alerts-out", help="write outbound messages as JSONL {topic, payload} ('-' for stdout)")
+    lv.add_argument("--publish-host", help="publish outbound messages to this MQTT broker")
+    lv.add_argument("--publish-port", type=int, default=1883)
+    lv.add_argument("--topic-prefix", default=TOPIC_PREFIX)
+    lv.add_argument("--outbox", type=Path, default=Path("rf-outbox.jsonl"), help="durable outbox path")
+    lv.add_argument("--stats-every", type=int, default=12, help="print stats every N polls (default: 12)")
+    lv.add_argument("--duration", type=float, help="stop after N seconds (default: run until Ctrl+C)")
 
     sc = sub.add_parser("score", help="score events against rfsim ground truth")
     sc.add_argument("--site", type=Path, required=True)
@@ -85,29 +114,20 @@ def main(argv: list[str] | None = None) -> int:
         return _run(args)
     if args.command == "kismet":
         return _kismet(args)
+    if args.command == "live":
+        return _live(args)
     if args.command == "score":
         return _score(args)
     return _friendly_from_truth(args)
 
 
 def _run(args: argparse.Namespace) -> int:
-    from rfanalytics.alerts import AlertEngine, load_rules
-    from rfanalytics.analyzer import Analyzer, AnalyzerConfig
-    from rfanalytics.friendly import FriendlyList, load_friendly
     from rfanalytics.observation import ObservationError, parse_observation
-    from rfanalytics.site import load_site
 
-    site = load_site(args.site)
-    friendly = load_friendly(args.friendly) if args.friendly else FriendlyList()
-    analyzer = Analyzer(site, friendly, AnalyzerConfig(method=args.method))
-    engine = None
-    if args.rules:
-        rules, tz = load_rules(args.rules)
-        engine = AlertEngine(rules, node_ids=sorted(site.nodes), tz=tz)
-    sink = _MessageSink(args) if engine else None
-    out = None if args.out in ("none", "") else (sys.stdout if args.out == "-" else open(args.out, "w"))
+    pipeline = _build_pipeline(args)
+    sink = _MessageSink(args) if pipeline.engine else None
+    out = _open_out(args.out)
     invalid = 0
-    next_tick = float("-inf")
     try:
         records = _mqtt_records(args) if args.mqtt_host else _file_records(args.input)
         for line_no, record in records:
@@ -117,35 +137,51 @@ def _run(args: argparse.Namespace) -> int:
                 invalid += 1
                 print(f"rfanalytics: skipping record {line_no}: {exc}", file=sys.stderr)
                 continue
-            messages = engine.observe(obs) if engine else []
-            events = analyzer.ingest(obs)
+            events, messages = pipeline.process(obs)
             _write(out, events)
-            if engine:
-                for ev in events:
-                    messages += engine.handle(ev)
-                if obs.t >= next_tick:
-                    messages += engine.tick(obs.t)
-                    next_tick = obs.t + 1.0
-                assert sink is not None
+            if sink:
                 sink.send(messages)
     except KeyboardInterrupt:
         pass
     finally:
-        events = analyzer.flush()
+        events, messages = pipeline.flush()
         _write(out, events)
-        if engine and sink:
-            sink.send([m for ev in events for m in engine.handle(ev)])
+        if sink:
+            sink.send(messages)
             sink.close()
         if out not in (None, sys.stdout):
             out.close()
 
-    stats = {**analyzer.stats.to_dict(), "invalid_records": invalid}
+    stats = {**pipeline.analyzer.stats.to_dict(), "invalid_records": invalid}
     if sink:
         stats.update(sink.counts)
     if args.stats:
         args.stats.write_text(json.dumps(stats, indent=2) + "\n")
     print("rfanalytics: " + ", ".join(f"{k}={v}" for k, v in stats.items()), file=sys.stderr)
     return 0
+
+
+def _build_pipeline(args: argparse.Namespace):
+    from rfanalytics.alerts import AlertEngine, load_rules
+    from rfanalytics.analyzer import Analyzer, AnalyzerConfig
+    from rfanalytics.friendly import FriendlyList, load_friendly
+    from rfanalytics.pipeline import Pipeline
+    from rfanalytics.site import load_site
+
+    site = load_site(args.site)
+    friendly = load_friendly(args.friendly) if args.friendly else FriendlyList()
+    analyzer = Analyzer(site, friendly, AnalyzerConfig(method=args.method))
+    engine = None
+    if args.rules:
+        rules, tz = load_rules(args.rules)
+        engine = AlertEngine(rules, node_ids=sorted(site.nodes), tz=tz)
+    return Pipeline(analyzer, engine)
+
+
+def _open_out(path: str | None, mode: str = "w") -> IO[str] | None:
+    if path in (None, "", "none"):
+        return None
+    return sys.stdout if path == "-" else open(path, mode)
 
 
 class _MessageSink:
@@ -274,12 +310,18 @@ def _score(args: argparse.Namespace) -> int:
     return 0
 
 
-def _kismet(args: argparse.Namespace) -> int:
-    import os
-    import time
+def _add_kismet_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--kismet-url", required=True, help="Kismet base URL, e.g. http://127.0.0.1:2501")
+    p.add_argument("--user", default=None, help="Kismet username (or set KISMET_USER)")
+    p.add_argument("--password", default=None, help="Kismet password (prefer --password-env)")
+    p.add_argument("--password-env", default=None, help="read Kismet password from this environment variable")
+    p.add_argument("--poll", type=float, default=5.0, help="poll interval seconds (default: 5)")
 
-    from rfanalytics.kismet import KismetIngestError, KismetPoller
-    from rfanalytics.observation import ObservationError, parse_observation
+
+def _kismet_poller(args: argparse.Namespace):
+    import os
+
+    from rfanalytics.kismet import KismetPoller
 
     password = args.password
     if args.password_env:
@@ -289,8 +331,111 @@ def _kismet(args: argparse.Namespace) -> int:
     user = args.user or os.environ.get("KISMET_USER")
     if password is None and os.environ.get("KISMET_PASSWORD"):
         password = os.environ.get("KISMET_PASSWORD")
+    return KismetPoller(args.kismet_url, username=user, password=password)
 
-    poller = KismetPoller(args.kismet_url, username=user, password=password)
+
+def _live(args: argparse.Namespace) -> int:
+    """Kismet -> analytics -> alert engine -> MQTT, in one process.
+
+    Time-based rules are ticked on the wall clock after every poll, so node
+    offline and loiter alerts fire even when no observations arrive. Kismet
+    timestamps are server time; run this close to the Kismet server (or keep
+    clocks in sync with NTP).
+    """
+    import signal
+    import time
+
+    from rfanalytics.kismet import KismetIngestError
+    from rfanalytics.observation import ObservationError, parse_observation
+
+    poller = _kismet_poller(args)
+    pipeline = _build_pipeline(args)
+    sink = _MessageSink(args)
+    # Append: a restarted live service keeps its earlier archive.
+    events_out = _open_out(args.events_out, "a")
+    obs_out = _open_out(args.observations_out, "a")
+
+    def _stop(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _stop)  # docker stop -> clean flush and outbox drain
+
+    # Negative "last-time" values are relative to now on the Kismet server.
+    since: float = -abs(args.backfill_s) if args.backfill_s else 0.0
+    deadline = time.time() + args.duration if args.duration else None
+    counts = {"polls": 0, "poll_errors": 0, "observations": 0, "stale": 0, "invalid": 0, "events": 0}
+    print(
+        f"rfanalytics live: polling {args.kismet_url} every {args.poll:g}s; "
+        f"publishing to {args.publish_host or '(no broker)'} under {args.topic_prefix}/ (Ctrl+C to stop)",
+        file=sys.stderr,
+    )
+    try:
+        while deadline is None or time.time() < deadline:
+            started = time.time()
+            try:
+                records, max_t = poller.poll(since=since or None)
+            except KismetIngestError as exc:
+                counts["poll_errors"] += 1
+                print(f"rfanalytics live: {exc}", file=sys.stderr)
+                records, max_t = [], 0.0
+            else:
+                counts["polls"] += 1
+                if max_t > 0:
+                    since = max_t - 1  # overlap so boundary updates are not missed
+            # A device heard now can carry a node's seenby entry from long ago.
+            # Processing those would replay history (e.g. "node offline" in the
+            # past) and feed the analyzer out of order, so only recent ones pass.
+            max_age = args.backfill_s if counts["polls"] <= 1 else args.max_age_s
+            cutoff = started - max(max_age, args.poll)
+            for rec in records:
+                try:
+                    obs = parse_observation(rec)
+                except ObservationError as exc:
+                    counts["invalid"] += 1
+                    print(f"rfanalytics live: dropping invalid observation: {exc}", file=sys.stderr)
+                    continue
+                if obs.t < cutoff:
+                    counts["stale"] += 1
+                    continue
+                counts["observations"] += 1
+                if obs_out:
+                    obs_out.write(json.dumps(rec, separators=(",", ":")) + "\n")
+                events, messages = pipeline.process(obs)
+                counts["events"] += len(events)
+                _write(events_out, events)
+                sink.send(messages)
+            if obs_out and records:
+                obs_out.flush()
+            sink.send(pipeline.tick(time.time()))
+            if args.stats_every and (counts["polls"] == 1 or counts["polls"] % args.stats_every == 0):
+                _live_stats(counts, pipeline, sink)
+            time.sleep(max(0.2, args.poll - (time.time() - started)))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        events, messages = pipeline.flush()
+        _write(events_out, events)
+        sink.send(messages)
+        _live_stats(counts, pipeline, sink)
+        sink.close()
+        for f in (events_out, obs_out):
+            if f not in (None, sys.stdout):
+                f.close()
+    return 0
+
+
+def _live_stats(counts: dict[str, int], pipeline, sink: "_MessageSink") -> None:
+    stats = {**counts, "open_visits": len(pipeline.analyzer.open_visits()), **sink.counts}
+    print("rfanalytics live: " + " ".join(f"{k}={v}" for k, v in stats.items()), file=sys.stderr)
+
+
+def _kismet(args: argparse.Namespace) -> int:
+    import time
+
+    from rfanalytics.kismet import KismetIngestError
+    from rfanalytics.observation import ObservationError, parse_observation
+
+    poller = _kismet_poller(args)
     out = sys.stdout if args.out == "-" else open(args.out, "w")
     publisher = None
     if args.publish_host:

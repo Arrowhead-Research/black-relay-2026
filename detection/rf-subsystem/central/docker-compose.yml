@@ -43,7 +43,42 @@ services:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - mqtt-data:/mosquitto/data
 
+  # Live analytics: polls kismet-server, runs alert rules, publishes alerts,
+  # camera cues and node status to the broker. Opt in with
+  #   docker compose --profile analytics up -d --build
+  # Site, rules and friendly files come from ../analytics/config (mounted
+  # read-only); point RF_SITE / RF_RULES / RF_FRIENDLY at your real files in .env.
+  # It reuses the Kismet admin login from .env (read-only use: REST polling).
+  rf-analytics:
+    profiles: [analytics]
+    build:
+      context: ../analytics
+    image: black-relay/rf-analytics:dev
+    restart: unless-stopped
+    depends_on:
+      kismet-server:
+        condition: service_healthy
+      mqtt:
+        condition: service_started
+    environment:
+      KISMET_USER: ${KISMET_ADMIN_USER:-}
+      KISMET_PASSWORD: ${KISMET_ADMIN_PASSWORD:-}
+    command:
+      - live
+      - --kismet-url=http://kismet-server:2501
+      - --site=/config/${RF_SITE:-site.wbt-nodes.example.yaml}
+      - --rules=/config/${RF_RULES:-rules.wbt-live.example.yaml}
+      - --friendly=/config/${RF_FRIENDLY:-friendly.wbt-nodes.example.yaml}
+      - --publish-host=mqtt
+      - --topic-prefix=${RF_TOPIC_PREFIX:-detection/rf}
+      - --outbox=/data/rf-outbox.jsonl
+      - --events-out=/data/events.jsonl
+    volumes:
+      - ../analytics/config:/config:ro
+      - rf-analytics-data:/data
+
 volumes:
   kismet-logs:
   kismet-home:
   mqtt-data:
+  rf-analytics-data:

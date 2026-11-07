@@ -73,3 +73,58 @@ def test_outbox_resends_in_flight_after_disconnect(tmp_path):
     assert len(broker.sent) == 2
     box.acknowledge(broker.sent[1][0])
     assert len(box) == 0
+
+
+def test_ack_during_publish_does_not_deadlock(tmp_path):
+    """Regression: paho calls on_publish (-> acknowledge) while holding the
+    mutex that publish() needs. Holding the outbox lock across publish()
+    deadlocked the live service when two alerts were sent back to back."""
+    import threading
+    import time
+
+    box = Outbox(tmp_path / "out.jsonl")
+    client_mutex = threading.Lock()  # stands in for paho's _out_message_mutex
+    holding = threading.Event()
+    mids = iter(range(1, 100))
+
+    class PahoLike:
+        def publish(self, topic, payload):
+            with client_mutex:
+                mid = next(mids)
+            if mid == 1:
+                threading.Thread(target=network_thread_ack, args=(mid,), daemon=True).start()
+                holding.wait(1)
+            return mid
+
+    def network_thread_ack(mid):
+        with client_mutex:  # PUBACK handled under the client mutex
+            holding.set()
+            time.sleep(0.2)  # main thread starts the next publish meanwhile
+            box.acknowledge(mid)
+
+    def send_two():
+        box.add("a", "t", {"n": 1})
+        box.send_pending(PahoLike())
+        box.add("b", "t", {"n": 2})
+        box.send_pending(PahoLike())
+
+    worker = threading.Thread(target=send_two, daemon=True)
+    worker.start()
+    worker.join(3)
+    assert not worker.is_alive(), "send_pending deadlocked against an acknowledgement"
+    assert len(box) == 1  # "a" acknowledged, "b" still in flight
+    box.acknowledge(2)
+    assert len(box) == 0
+
+
+def test_ack_before_mid_registered_is_applied(tmp_path):
+    box = Outbox(tmp_path / "out.jsonl")
+
+    class InstantAck:
+        def publish(self, topic, payload):
+            box.acknowledge(7)  # broker acks before publish() returns the mid
+            return 7
+
+    box.add("a", "t", {"n": 1})
+    box.send_pending(InstantAck())
+    assert len(box) == 0

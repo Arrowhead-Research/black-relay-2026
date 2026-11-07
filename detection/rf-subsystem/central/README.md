@@ -6,8 +6,11 @@ The Docker Compose stack for the WBT central service (see [`../DESIGN.md`](../DE
 |---|---|---|
 | `kismet-server` | Kismet `2026-10-R1` (server and log tools only). Receives remote captures from WBT nodes and provides the REST API. | 2501 (web UI, REST, WebSocket remote capture), 3501 (legacy TCP remote capture) |
 | `mqtt` | Mosquitto 2.0.22. A development stand-in for the fusion broker. | 1883 |
+| `rf-analytics` | **Opt-in (profile `analytics`).** Runs `rfanalytics live`: polls `kismet-server`, runs alert rules, publishes alerts, camera cues and node status to `mqtt`. Image built from [`../analytics`](../analytics). | none |
 
-`rf-analytics` and its database will be added to this stack when they are built.
+The analytics database is not part of the stack yet.
+
+`kismet/kismet_site.conf` sets `keep_per_datasource_stats=true`. Without it, Kismet leaves every node's per-device signal (`seenby` signal) empty and analytics cannot tell which node heard a device loudest. It costs some RAM per device per node.
 
 ## Start
 
@@ -17,6 +20,19 @@ docker compose up -d --build --wait
 ```
 
 Open `http://<BIND_ADDR>:2501` and log in with the credentials from `.env`. The credentials are written into the `kismet-home` volume **on first start only**. To change them later, use the Kismet UI, or run `docker compose down -v` (this also deletes the logs) and start again.
+
+## Live analytics (Kismet → alerts → MQTT)
+
+```sh
+docker compose --profile analytics up -d --build      # starts rf-analytics as well
+docker compose --profile analytics logs -f rf-analytics
+docker compose exec mqtt mosquitto_sub -t 'detection/rf/#' -v   # watch what fusion would receive
+docker compose --profile analytics stop rf-analytics  # stop only the analytics service
+```
+
+`rf-analytics` reads its site, rules and friendly files from `../analytics/config` (mounted read-only). Choose them with `RF_SITE`, `RF_RULES` and `RF_FRIENDLY` in `.env`; the defaults are the `*.example.yaml` files for `wbt-1`–`wbt-4`, and the example site geometry is a placeholder. Analytics events (`/data/events.jsonl`) and the durable outbox (`/data/rf-outbox.jsonl`) live in the `rf-analytics-data` volume. It logs a stats line every minute: `observations`, `stale` (old per-node entries dropped), `alerts`, `node_status` and so on.
+
+> `docker compose up` for this stack recreates `mqtt` when the compose file changes, which disconnects subscribers. Messages already accepted by the broker are not lost, but a subscriber that reconnects only sees new messages.
 
 ## Verify
 

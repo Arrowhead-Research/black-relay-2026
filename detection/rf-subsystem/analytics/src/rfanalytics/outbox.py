@@ -32,6 +32,8 @@ class Outbox:
         self._lock = threading.RLock()
         self._pending: dict[str, tuple[str, str]] = {}  # message id -> (topic, payload)
         self._in_flight: dict[int, str] = {}  # broker mid -> message id
+        self._sending: set[str] = set()  # message ids handed to the publisher, mid not yet known
+        self._early_acks: set[int] = set()  # acks that arrived before their mid was registered
         if self.path.exists():
             for line in self.path.read_text().splitlines():
                 if line.strip():
@@ -50,28 +52,48 @@ class Outbox:
     def send_pending(self, publisher: Publisher) -> None:
         """(Re)send every pending message that is not already in flight.
 
-        The lock is held across publish and registration so a fast broker
-        acknowledgement cannot arrive before the message id is recorded.
+        ``publisher.publish`` is called *without* holding the outbox lock.
+        paho-mqtt runs ``on_publish`` (and so ``acknowledge``) while holding its
+        own message mutex, which ``publish`` also takes; holding our lock across
+        ``publish`` deadlocks when an acknowledgement arrives mid-send. An ack
+        can therefore arrive before its mid is registered: it is parked in
+        ``_early_acks`` and applied on registration.
         """
         with self._lock:
-            in_flight = set(self._in_flight.values())
-            for msg_id, (topic, payload) in list(self._pending.items()):
-                if msg_id in in_flight:
-                    continue
+            busy = set(self._in_flight.values()) | self._sending
+            batch = [(msg_id, t, p) for msg_id, (t, p) in self._pending.items() if msg_id not in busy]
+            self._sending.update(msg_id for msg_id, _, _ in batch)
+        for msg_id, topic, payload in batch:
+            try:
                 mid = publisher.publish(topic, payload)
-                if mid is not None:
+            except Exception:
+                mid = None
+            with self._lock:
+                self._sending.discard(msg_id)
+                if mid is None:
+                    continue
+                if mid in self._early_acks:
+                    self._early_acks.discard(mid)
+                    if self._pending.pop(msg_id, None) is not None:
+                        self._save()
+                else:
                     self._in_flight[mid] = msg_id
 
     def acknowledge(self, mid: int) -> None:
         with self._lock:
             msg_id = self._in_flight.pop(mid, None)
-            if msg_id is not None and self._pending.pop(msg_id, None) is not None:
+            if msg_id is None:
+                if self._sending:
+                    self._early_acks.add(mid)
+                return
+            if self._pending.pop(msg_id, None) is not None:
                 self._save()
 
     def connection_lost(self) -> None:
         """Forget in-flight state so everything pending is resent on reconnect."""
         with self._lock:
             self._in_flight.clear()
+            self._early_acks.clear()
 
     def _save(self) -> None:
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")

@@ -9,7 +9,8 @@
 | Visit building: confirmation threshold, gap bridging, per-type gaps | 7.3.5, CEN-08 | Done |
 | Zone localization: windowed medians, strongest-node or centroid, hysteresis, staleness | 7.3.4, CEN-04 | Done |
 | Scoring against `rfsim` ground truth | Phase 3 exit criteria | Done |
-| Kismet ingest adapter (polling REST, v1) | 7.3.1 | v1 (maps Kismet devices -> `rf.observation.v0`; see below) |
+| Kismet ingest adapter (polling REST) with per-node RSSI | 7.3.1 | Done; validated on live nodes |
+| Live pipeline `rfanalytics live` (Kismet → analytics → alerts → MQTT), compose service | 7.3.1, 7.3.8 | Done; validated on live nodes |
 | Alert rules: loiter, new device, repeat visitor, watchlist, node offline | 7.3.8, CEN-09 | Done |
 | TPMS camera cues | 7.3.7, CEN-07 | Done |
 | MQTT output with a durable outbox (replayed after a broker outage or restart) | 7.3.8, CEN-13 | Done |
@@ -18,23 +19,49 @@
 | Identity linking, pattern of life, co-travelers | 7.3.2, 7.3.5, 7.3.6 | Later |
 | Persistence (database), config web UI | 7.1, 7.3.9 | Later |
 
-## Kismet live ingest (v1)
+## Live pipeline: Kismet → alerts → MQTT
 
-`rfanalytics kismet` polls a Kismet server (tested against 2026-10-R1) and emits validated `rf.observation.v0` records, one per (emitter, seeing node/datasource) with a newer `last_time` than previously emitted.
+`rfanalytics live` is the end-to-end live path in one process: it polls Kismet's REST API, turns devices into `rf.observation.v0` records, runs them through friendly exclusion, the analyzer and the alert rules, and publishes alerts, camera cues and node status over MQTT through the durable outbox. On the central server it runs as the `rf-analytics` compose service (see [`../central/README.md`](../central/README.md#live-analytics-kismet--alerts--mqtt)).
 
 ```sh
-# Fetch once (read-only) and inspect observations
+uv sync --extra mqtt
+uv run rfanalytics live --kismet-url http://<kismet-host>:2501 \
+    --user "$KISMET_USER" --password-env KISMET_PASSWORD \
+    --site config/site.wbt-nodes.example.yaml --rules config/rules.wbt-live.example.yaml \
+    --friendly config/friendly.wbt-nodes.example.yaml \
+    --publish-host 127.0.0.1 --events-out events.jsonl
+```
+
+| Option | Default | Notes |
+|---|---|---|
+| `--poll` | 5 s | Kismet poll interval. |
+| `--backfill-s` | 120 | On start, only devices Kismet heard in the last N seconds (Kismet's relative `last-time`). |
+| `--max-age-s` | 30 | Drop observations older than this. Kismet keeps each node's last-heard time per device, which can be minutes older than the device's own; processing those would replay history out of order (for example "node offline" in the past). Counted as `stale`. |
+| `--events-out`, `--observations-out`, `--alerts-out` | none | Optional JSONL archives (appended). |
+| `--publish-host`, `--topic-prefix`, `--outbox` | none, `detection/rf`, `./rf-outbox.jsonl` | MQTT output, QoS 1, replayed from the outbox after an outage or restart. |
+| `--duration` | run forever | Stop after N seconds (tests). |
+
+Time-based rules (loiter, node offline) are also ticked on the wall clock after every poll, so they fire when the site goes quiet. Kismet timestamps are server time: run `live` on (or NTP-synced with) the Kismet host. `SIGTERM` (`docker stop`) flushes open visits and drains the outbox.
+
+### Kismet ingest adapter
+
+`rfanalytics kismet` runs just the adapter: it emits validated `rf.observation.v0` records, one per (emitter, seeing node) whose per-node `last_time` advanced. Use it to inspect or archive what Kismet produces.
+
+```sh
 uv run rfanalytics kismet --once --kismet-url http://<kismet-host>:2501 \
   --user "$KISMET_USER" --password-env KISMET_PASSWORD -o observations.jsonl
-
-# Poll continuously and feed analytics (example)
-uv run rfanalytics kismet --kismet-url http://<kismet-host>:2501 --user "$KISMET_USER" --password-env KISMET_PASSWORD -o - \
-  | uv run rfanalytics run --site ../simulator/sites/dev-site.yaml -o events.jsonl --input - --rules config/rules.example.yaml
 ```
 
 Node IDs are derived from Kismet datasource names (e.g. `wbt-1:wifi` -> `wbt-1`), matching the naming used when starting remote capture helpers. **Do not pass credentials on the command line in shared environments;** prefer `--password-env` or `KISMET_PASSWORD`/`KISMET_USER`.
 
-**v1 limitations (validate on your deployment):** per-seenby (per-node) RSSI may not be populated by Kismet/capture; when absent the adapter falls back to aggregate device RSSI and sets `attributes.rssi_is_aggregate=true`, which reduces per-node localization fidelity. RTL433/TPMS mapping is best-effort until verified with live TPMS decodes. Event-bus streaming, richer per-source signal, and field-verified TPMS attributes are follow-ups.
+**Per-node RSSI needs `keep_per_datasource_stats=true` in Kismet** (set in `central/kismet/kismet_site.conf`). With Kismet's default, every per-node signal is empty; the adapter then falls back to the device's aggregate RSSI and sets `attributes.rssi_is_aggregate=true`, which gives every node the same RSSI and makes zone estimates meaningless. RTL433/TPMS mapping is still best-effort until verified with live TPMS decodes.
+
+### Live results (2026-11-07, `wbt-1`–`wbt-4`, placeholder site geometry)
+
+- About 100 observations per 5 s poll from Wi-Fi and BLE; no TPMS (no vehicles moved). With per-node RSSI enabled, all observations carried true per-node signal (none aggregate), and the same device often differed by 30–60 dB between nodes.
+- Each node's own `wlan0` backhaul was heard by all four nodes and localized to its own node. Without a friendly list these show up as loitering Wi-Fi clients; see `config/friendly.wbt-nodes.example.yaml`.
+- With test rules (watchlist on a nearby AP, 120 s loiter), alerts reached a subscriber on `detection/rf/alerts` within a poll of the rule condition, located in all four zones, with no pending outbox messages.
+- Alerts from `watchlist` (and other visit-start rules) carry `location.zone: null`: they fire on the visit's confirmation, before the first zone estimate.
 
 ## Events (`rf.analytics-event.v0`)
 
@@ -147,5 +174,7 @@ uv run pytest
 | `test_friendly.py` | ID and SSID matching, expiry, entry validation, YAML round-trip. |
 | `test_analyzer.py` | Business rules: noise threshold, gap bridging, TPMS parking, hysteresis, dwell, staleness, exclusion, calibration. |
 | `test_alerts.py` | Each rule type's business rules: thresholds, filters, cooldowns, learning period, hours, staleness, node recovery, and config validation. |
-| `test_outbound.py` | The wire envelope and topics; the outbox acknowledging, surviving a restart, and resending after a disconnect. |
+| `test_outbound.py` | The wire envelope and topics; the outbox acknowledging, surviving a restart, resending after a disconnect, and not deadlocking when an acknowledgement arrives during a publish (paho-mqtt calls back under its own lock). |
+| `test_kismet.py` | Kismet device JSON → observations: node IDs, emitter types, TPMS IDs, aggregate-RSSI fallback, deduplication. |
+| `test_live.py` | Per-node RSSI from Kismet into zone estimates and alerts on the wire; wall-clock ticks for silent nodes; `rfanalytics live` against a fake Kismet REST server, including dropping stale per-node entries. |
 | `test_scenarios.py` | End-to-end quality on rfsim scenarios: the ≥80% phase 3 localization target, visit detection, no stable friendly leakage, no dwell by passers-by, no alerts in quiet scenarios, loiter and repeat-visitor alerts only for subjects, and a camera cue on every subject arrival. |

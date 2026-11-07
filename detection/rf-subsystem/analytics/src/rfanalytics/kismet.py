@@ -1,17 +1,15 @@
 """Kismet 2026-10-R1 REST ingest adapter -> ``rf.observation.v0``.
 
 This polls Kismet's device views and normalizes devices into the observation
-contract consumed by ``rfanalytics run`` (DESIGN 7.3.1). It is intentionally
-small and stateful only for deduplication: live analytics still happens in
-``rfanalytics run``.
+contract consumed by ``rfanalytics run`` and ``rfanalytics live`` (DESIGN
+7.3.1). It is intentionally small and stateful only for deduplication.
 
 Notes / current limitations (validate against your Kismet build and capture):
-- **Per-node RSSI:** Kismet's aggregate device signal is widely populated, but
-  per-seenby (per datasource/node) RSSI may be absent. When per-seenby RSSI is
-  unavailable, this adapter emits one observation per seeing node using the
-  aggregate ``last_signal`` and sets ``attributes.rssi_is_aggregate=true``.
-  Zone localization benefits from true per-node RSSI; improve this when
-  per-source signal is available.
+- **Per-node RSSI:** Kismet only fills per-seenby (per datasource/node) signal
+  when ``keep_per_datasource_stats=true`` (set in ``central/kismet/kismet_site.conf``;
+  the packaged default is false). If it is missing anyway, this adapter emits
+  one observation per seeing node using the aggregate ``last_signal`` and sets
+  ``attributes.rssi_is_aggregate=true``, which makes zone localization unreliable.
 - **TPMS:** RTL433/TPMS device field shapes vary by Kismet/rtl_433 version.
   Mapping is best-effort and should be verified with real TPMS decodes.
 - **Auth/config:** credentials are read from CLI args or environment variables;
@@ -58,8 +56,9 @@ class KismetPoller:
     def fetch_devices(self, since: float | None = None) -> list[dict[str, Any]]:
         path = "/devices/views/all/devices.json"
         params = {"fields": ",".join(_FIELDS)}
-        if since is not None and since > 0:
-            path = f"/devices/last-time/{since}/devices.json"
+        if since:
+            # Kismet treats a negative last-time as relative to now (seconds ago).
+            path = f"/devices/last-time/{since:g}/devices.json"
         url = self.base_url.rstrip("/") + path + "?" + urllib.parse.urlencode(params)
         req = urllib.request.Request(url)
         if self.username is not None or self.password is not None:
