@@ -1,34 +1,16 @@
 "use strict";
 /*
- * WBT Console map: per-node RSSI -> estimated position of each device
- * (Wi-Fi, Bluetooth, TPMS). Site menu, modes, node placement and sign-in:
- * console.js.
+ * WBT Console map: draws each device where the server places it (Wi-Fi,
+ * Bluetooth, TPMS). Site menu, modes, node placement and sign-in: console.js.
  *
- * Model (log-distance path loss): predicted RSSI at node k for a transmitter
- * at p is  P0 - 10 n log10(d_k(p) in m).  For every grid cell we compare the
- * observed per-node medians with the prediction:
- *   cost(p) = sum_k (e_k - offset)^2,  e_k = rssi_k - predicted_k(p)
- * where offset is the device's unknown transmit-power difference from the
- * model. It is not left free: with a Gaussian prior of spread tau (default
- * +-8 dB) the best offset is sum(e)/(K + sigma^2/tau^2), giving
- *   cost = sum(e^2) - sum(e)^2 / (K + sigma^2/tau^2).
- * Walls (walls.js): predicted RSSI also loses W dB per wall the straight
- * node-to-cell path crosses (W = the band's wall loss, fitted in calibration).
- * A free offset (tau -> infinity) makes the surface nearly flat along a
- * far-away "mirror" valley, which the grid search can pick over the true spot. Likelihood is
- * exp(-cost / 2 sigma^2). Each band (Wi-Fi, Bluetooth, TPMS) has its own
- * path-loss parameters.
+ * Positions are computed on the server (console/locate.py) from per-node
+ * RSSI with the site's calibrated model, walls and time smoothing, and arrive
+ * with each device in /api/state (``position``: x, y in ft, node count,
+ * transmit-power offset, residual, and lat/lon once the site has node GPS
+ * points). The grid here (buildGrid) is still used by calibration (calib.js).
  *
- * Smoothing: the server already averages each node's per-second RSSI. Here,
- * each device's cost surface is also averaged over time (exponentially, time
- * constant "Smoothing", scaled per type: a fixed AP is smoothed more, a
- * vehicle's TPMS less), and only when new samples arrive. The dot is the
- * likelihood-weighted mean around the most likely cell, so it does not hop
- * between near-equal peaks.
- *
- * No error radius is drawn: the model's parameters are guessed and the node
- * layout is unverified, so a model-derived radius (CEP) would not be a real
- * accuracy figure. A real CEP needs measured errors against known positions.
+ * No model-derived error radius is drawn: accuracy is calibration's measured
+ * leave-one-out error at the spots.
  */
 
 const FT_PER_M = 3.28084;
@@ -40,9 +22,6 @@ const TYPES = {
   tpms: "TPMS",
 };
 const BAND_OF = { wifi_ap: "wifi", wifi_client: "wifi", ble: "bt", bt_classic: "bt", tpms: "tpms" };
-// Smoothing time constant multiplier per type: static APs smooth more, fast
-// and sparse TPMS (a passing car) much less so it does not lag behind.
-const TAU_SCALE = { wifi_ap: 2, wifi_client: 1, ble: 1, bt_classic: 1, tpms: 0.25 };
 const LOCAL_MEAN_FT = 4;  // dot = weighted mean of the likelihood within this radius of the peak
 const NODE_COLORS = ["#ffd166", "#06d6a0", "#ef476f", "#118ab2", "#f78c6b", "#c77dff"];
 const css = getComputedStyle(document.documentElement);
@@ -65,10 +44,7 @@ const S = {
     tpms: { n: 2.2, p0: -45, sigma: 7 },
   },
   band: "wifi",          // band whose sliders are shown
-  // Fixed processing settings (not model parameters; those come from calibration).
-  model: { minNodes: 2, tau: 15 },
-  version: 0,            // bumps when the model or layout changes; resets filters
-  filt: new Map(),       // id -> { cost, key, version }
+  version: 0,            // bumps when the model or layout changes
   offsets: { wifi: {}, bt: {}, tpms: {} },  // per band, per node dB correction from live calibration
   walls: [],             // floor-plan walls [{x1, y1, x2, y2, draft?}] (ft)
   nodesMode: { on: false, placing: null },
@@ -132,92 +108,14 @@ function buildGrid() {
   S.version++;  // geometry changed: restart smoothing
 }
 
-// Raw cost surface for one device from its current per-node RSSI.
-function costSurface(dev) {
-  const g = S.grid, M = S.models[dev.band] || S.models.wifi;
-  const ids = Object.keys(dev.nodes).filter((k) => g.logd[k]);
-  if (ids.length < Math.max(1, S.model.minNodes)) return null;
-  const K = ids.length, N = g.nx * g.ny, tenN = 10 * M.n;
-  const div = K + txLambda(M.sigma, M.txSpread || 8);  // K + sigma^2/tau^2
-  const off = S.offsets[dev.band] || {};
-  const r = ids.map((k) => dev.nodes[k].rssi - M.p0 - (off[k] || 0));
-  const W = M.wall || 0, Wk = ids.map((k) => (W && g.walls[k]) || null);
-  const L = ids.map((k) => g.logd[k]);
-  const cost = new Float32Array(N);
-  for (let c = 0; c < N; c++) {
-    let s = 0, s2 = 0;
-    for (let k = 0; k < K; k++) { const e = r[k] + tenN * L[k][c] + (Wk[k] ? W * Wk[k][c] : 0); s += e; s2 += e * e; }
-    cost[c] = s2 - (s * s) / div;
-  }
-  return { cost, ids, K, r, L, tenN, div, W, Wk };
-}
 
 // sigma^2 / tau^2 for the transmit-power prior (tau = the band's fitted spread).
 function txLambda(sigma, spread) {
   return (sigma * sigma) / (spread * spread);
 }
 
-// Blend the new surface into the device's running average (only on new data).
-function filtered(dev, raw) {
-  const key = Math.max(...Object.values(dev.nodes).map((n) => n.last));
-  const f = S.filt.get(dev.id);
-  const tau = S.model.tau * (TAU_SCALE[dev.type] || 1);
-  if (!f || f.version !== S.version || tau <= 0 || f.cost.length !== raw.cost.length) {
-    const nf = { cost: raw.cost, key, version: S.version, updated: true };
-    S.filt.set(dev.id, nf);
-    return nf;
-  }
-  if (key <= f.key) { f.updated = false; return f; }
-  const a = 1 - Math.exp(-Math.min(key - f.key, 10 * tau) / tau);
-  const old = f.cost, nw = raw.cost;
-  for (let c = 0; c < old.length; c++) old[c] += a * (nw[c] - old[c]);
-  f.key = key; f.updated = true;
-  return f;
-}
 
-function localize(dev) {
-  if (Object.keys(dev.nodes).length === 1 && S.model.minNodes <= 1) return proximity(dev);
-  const raw = costSurface(dev);
-  if (!raw || raw.K < 2) return raw ? proximity(dev) : null;
-  const g = S.grid, N = g.nx * g.ny;
-  const M = S.models[dev.band] || S.models.wifi;
-  const cost = filtered(dev, raw).cost;
-  let minC = Infinity, best = 0;
-  for (let c = 0; c < N; c++) if (cost[c] < minC) { minC = cost[c]; best = c; }
-  const inv = 1 / (2 * M.sigma * M.sigma);
-  const bx = g.x0 + ((best % g.nx) + 0.5) * g.cell, by = g.y0 + (Math.floor(best / g.nx) + 0.5) * g.cell;
-  let ls = 0, lx = 0, ly = 0;
-  const r2 = LOCAL_MEAN_FT * LOCAL_MEAN_FT;
-  const ri = Math.ceil(LOCAL_MEAN_FT / g.cell), bi = best % g.nx, bj = Math.floor(best / g.nx);
-  for (let j = Math.max(0, bj - ri); j <= Math.min(g.ny - 1, bj + ri); j++) {
-    for (let i = Math.max(0, bi - ri); i <= Math.min(g.nx - 1, bi + ri); i++) {
-      const x = g.x0 + (i + 0.5) * g.cell, y = g.y0 + (j + 0.5) * g.cell;
-      if ((x - bx) ** 2 + (y - by) ** 2 > r2) continue;
-      const v = Math.exp(-(cost[j * g.nx + i] - minC) * inv);
-      ls += v; lx += v * x; ly += v * y;
-    }
-  }
-  // Offset (unknown transmit power) and residual from the current data at the estimate.
-  const ex = lx / ls, ey = ly / ls;
-  const ec = Math.min(N - 1, Math.max(0, Math.floor((ey - g.y0) / g.cell) * g.nx + Math.floor((ex - g.x0) / g.cell)));
-  let s = 0, s2 = 0;
-  for (let k = 0; k < raw.K; k++) { const e = raw.r[k] + raw.tenN * raw.L[k][ec] + (raw.Wk[k] ? raw.W * raw.Wk[k][ec] : 0); s += e; s2 += e * e; }
-  const offset = s / raw.div;
-  const res = Math.sqrt(Math.max(0, (s2 - (s * s) / raw.div) / raw.K));
-  return {
-    kind: "fix", x: ex, y: ey, K: raw.K, ids: raw.ids, offset, res,
-    updated: S.filt.get(dev.id).updated,
-  };
-}
 
-// Heard by a single node: only a distance from that node is known.
-function proximity(dev) {
-  const M = S.models[dev.band] || S.models.wifi;
-  const [id, rec] = Object.entries(dev.nodes).sort((a, b) => b[1].rssi - a[1].rssi)[0];
-  if (!S.nodes[id]) return null;
-  const dFt = Math.pow(10, (M.p0 - rec.rssi) / (10 * M.n)) * FT_PER_M;
-  return { kind: "proximity", node: id, dFt, x: S.nodes[id][0], y: S.nodes[id][1], K: 1, ids: [id], offset: 0 };
-}
 
 function visible(dev) {
   if (!S.types.has(dev.type)) return false;
@@ -226,22 +124,21 @@ function visible(dev) {
   return [dev.id, dev.name, dev.manufacturer, S.selfRadio[dev.id]].some((v) => v && String(v).toLowerCase().includes(q));
 }
 
+// Server positions -> the page's estimates (S.est).
 function recompute() {
-  if (!S.data || !S.grid) return;
-  const g = S.grid, N = g.nx * g.ny;
+  if (!S.data) return;
   const prev = S.est;
   S.est = new Map();
   for (const dev of S.data.devices) {
-    const isSel = dev.id === S.selected;
-    if (!visible(dev) && !isSel) continue;
-    const e = localize(dev);
-    if (!e) continue;
+    const p = dev.position;
+    if (!p) continue;
+    const e = { kind: "fix", x: p.x, y: p.y, K: p.nodes, ids: p.ids, offset: p.offset_db, res: p.res_db,
+                t: p.t, lat: p.lat, lon: p.lon, errM: p.err_m };
     S.est.set(dev.id, e);
-    if (e.kind !== "fix") continue;
-    const p = prev.get(dev.id);
-    if (p && p.kind === "fix" && e.updated) {
+    const q = prev.get(dev.id);
+    if (q && q.t !== e.t) {
       const st = S.steps.get(dev.id) || [];
-      st.push(Math.hypot(e.x - p.x, e.y - p.y));
+      st.push(Math.hypot(e.x - q.x, e.y - q.y));
       if (st.length > 20) st.shift();
       S.steps.set(dev.id, st);
     }
@@ -462,6 +359,12 @@ function renderSelected() {
   $("sel-pos").textContent = radioOf ? radioOf : fix ? `${e.x.toFixed(1)}, ${e.y.toFixed(1)} ft` : e ? `~${e.dFt.toFixed(0)} ft from ${e.node}` : "—";
   $("sel-nodes").textContent = `${Object.keys(dev.nodes).length} / ${S.nodeOrder.length}`;
   $("sel-res").textContent = fix ? `${e.res.toFixed(1)} dB` : "—";
+  const geo = fix && e.lat != null && !radioOf;
+  $("sel-geo-box").hidden = !geo;
+  if (geo) {
+    $("sel-geo").textContent = `${e.lat.toFixed(6)}, ${e.lon.toFixed(6)}`;
+    $("sel-geo-box").title = e.errM != null ? `Median error ±${e.errM} m (calibration and node GPS fit)` : "Not calibrated: no measured accuracy yet";
+  }
   const truth = dev.truth || (radioOf ? S.nodes[radioOf] : null);  // demo truth, or a node radio's node
   $("sel-truth-box").hidden = !(truth && fix);
   if (truth && fix) $("sel-truth").textContent = `${Math.hypot(e.x - truth[0], e.y - truth[1]).toFixed(1)} ft`;
@@ -567,6 +470,7 @@ function refresh() {
   renderStatus();
   renderModelCard();
   renderLiveCal();
+  renderGeoStatus();
   S.needsDraw = true;
 }
 

@@ -181,6 +181,10 @@ def test_samples_endpoint_returns_raw_per_node_history(tmp_path):
         httpd.shutdown()
 
 
+def _get(base, path):
+    return json.load(urlopen(base + path))
+
+
 def _post(base, path, body):
     from urllib.request import Request
     return json.load(urlopen(Request(base + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})))
@@ -517,3 +521,40 @@ def test_source_health_flags_running_sources_without_packets():
     h.update([src("wbt-3:bt", 12)], now=SOURCE_SILENT_S + 50)
     h.update([src("wbt-3:bt", 40)], now=2 * SOURCE_SILENT_S + 60)
     assert {r["name"]: r["status"] for r in h.report(now=2 * SOURCE_SILENT_S + 60)}["wbt-3:bt"] == "ok"
+
+
+def test_positions_history_and_geo(tmp_path):
+    """The server places devices, stores their positions per site and adds lat/lon once node GPS is set."""
+    import time
+    from sites import SiteManager
+    template = load_layout(LAYOUT)
+    sites = SiteManager(tmp_path / "data", template, CalibrationStore)
+    poller = FakePoller()
+    app = App(poller, None, window_s=60, poll_s=3, sites=sites)
+    httpd, base = _serve(app)
+    try:
+        app.poll_once()
+        dev_state = _get(base, "/api/state")["devices"][0]
+        pos = dev_state["position"]
+        assert pos["nodes"] == 3 and not pos["calibrated"] and "lat" not in pos
+        hist = _get(base, f"/api/history?id={dev_state['id']}&since=0")["points"]
+        assert len(hist) == 1 and (hist[0]["x"], hist[0]["y"]) == (pos["x"], pos["y"])
+        app.poll_once()                                           # within HISTORY_MIN_S: not stored again
+        assert len(_get(base, f"/api/history?id={dev_state['id']}&since=0")["points"]) == 1
+        nodes = sites.layout()["nodes"]
+        n1, n2 = list(nodes)[:2]
+        _post(base, "/api/site/geo", {"node": n1, "lat": 45.0, "lon": 10.0})
+        assert _get(base, "/api/state")["geo"] is None             # one point and no heading: not enough
+        _post(base, "/api/site/geo", {"heading_deg": 0})
+        app.poll_once()
+        st = _get(base, "/api/state")
+        assert st["geo"]["method"] == "heading" and "lat" in st["devices"][0]["position"]
+        # heading 0: page "up" is north, so a device north of wbt-1 on the page is north of it on the map
+        p = st["devices"][0]["position"]
+        assert (p["lat"] > 45.0) == (p["y"] < nodes[n1][1])
+        with pytest.raises(Exception):
+            _post(base, "/api/site/geo", {"node": "wbt-99", "lat": 1, "lon": 2})
+        assert (tmp_path / "data" / "sites").exists()
+        assert any(f.name.endswith("-positions.jsonl") for f in (tmp_path / "data" / "sites").glob("*/history/*"))
+    finally:
+        httpd.shutdown()

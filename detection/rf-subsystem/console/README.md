@@ -1,6 +1,6 @@
 # WBT Console
 
-The operator web page for the RF subsystem. It shows where Wi-Fi, Bluetooth and TPMS devices are from the RSSI each WBT node hears, smoothed so estimates don't jump around. Each building the system is set up in is a **site** with its own node layout, walls, calibration and history, which can be exported, cleared or wiped when the team moves on. The path-loss model is fitted automatically from **live calibration** (a carried device recorded at known spots), and its accuracy is the **measured** error at those spots. It runs as a container (`rf-console`) next to the central Kismet server and reads Kismet's per-node signal history and packet log through the `rfanalytics` Kismet adapter. It does not publish alerts yet: see *Roadmap*.
+The operator web page for the RF subsystem. It shows where Wi-Fi, Bluetooth and TPMS devices are from the RSSI each WBT node hears, smoothed so estimates don't jump around. Each building the system is set up in is a **site** with its own node layout, walls, calibration and history, which can be exported, cleared or wiped when the team moves on. The path-loss model is fitted automatically from **live calibration** (a carried device recorded at known spots), and its accuracy is the **measured** error at those spots. It runs as a container (`rf-console`) next to the central Kismet server and reads Kismet's per-node signal history and packet log through the `rfanalytics` Kismet adapter. Positions are computed on the server, stored per site, and get latitude/longitude once node GPS points are set. It does not publish alerts or positions yet: see *Roadmap*.
 
 ## Start
 
@@ -19,7 +19,7 @@ Kismet must have `keep_per_datasource_stats=true` (already set in `central/kisme
 
 - **Header:** the site menu (site name ▾), Kismet and device counts, capture-source warnings, the **Live / Setup** switch and Pause.
 - **Live** (default): the map, the selected device, the model card and the device list. Nothing on the map can be changed by accident.
-- **Setup:** a toolbar on the map with **Nodes** (drag nodes to where they are; place nodes Kismet knows that are not on the map yet; remove nodes), **Walls** and **Calibrate**. One tool is active at a time.
+- **Setup:** a toolbar on the map with **Nodes** (drag nodes to where they are; place nodes Kismet knows that are not on the map yet; remove nodes; set node GPS points, see *Latitude and longitude*), **Walls** and **Calibrate**. One tool is active at a time.
 
 ## Sites (moving between buildings)
 
@@ -51,8 +51,10 @@ Set or change the passwords with `central/set-console-passwords.sh` on the host 
    | Wi-Fi, Bluetooth | 60 s | 12 s | 30 s |
    | TPMS (sparse bursts) | 180 s | 60 s | 120 s |
 
-2. **Likelihood (browser).** Log-distance path loss with walls: predicted RSSI at node *k* is `P0 + c_k − 10·n·log10(d_k in m) − W·E[walls_k]` (`c_k` = per-node offset, `W` = wall loss, both from calibration, else 0 and the default). For each grid cell, `cost = Σ (e_k − o)²` with `e_k = rssi_k − predicted_k`, where `o` is the device's unknown transmit-power difference. `o` has a Gaussian prior of spread τ (fitted by calibration from ±4/8/16 dB, default ±8 dB), so `cost = Σe² − (Σe)²/(K + σ²/τ²)`. **Why not a free offset:** with `o` unconstrained, the surface has a far-away "mirror" valley almost as good as the true spot; on noise-free test data the grid picked it for spots up to 32 ft from the truth. With the prior, the same test gives ≤ 0.3 ft (≤ 6 ft for a device 6 dB louder than the model). Likelihood = `exp(−cost / 2σ²)`. Two nodes only constrain a curve; three or more give a point.
-3. **Temporal smoothing (browser).** Each device's cost surface is averaged over time (fixed time constant 15 s, scaled by type: fixed APs ×2, TPMS ×0.25 so a passing car is not dragged behind), updated only when new samples arrive. A model or layout change restarts it.
+Steps 2-4 run on the server (`locate.py`, every poll) for every device; the page only draws the result.
+
+2. **Likelihood.** Log-distance path loss with walls: predicted RSSI at node *k* is `P0 + c_k − 10·n·log10(d_k in m) − W·E[walls_k]` (`c_k` = per-node offset, `W` = wall loss, both from calibration, else 0 and the default). For each grid cell, `cost = Σ (e_k − o)²` with `e_k = rssi_k − predicted_k`, where `o` is the device's unknown transmit-power difference. `o` has a Gaussian prior of spread τ (fitted by calibration from ±4/8/16 dB, default ±8 dB), so `cost = Σe² − (Σe)²/(K + σ²/τ²)`. **Why not a free offset:** with `o` unconstrained, the surface has a far-away "mirror" valley almost as good as the true spot; on noise-free test data the grid picked it for spots up to 32 ft from the truth. With the prior, the same test gives ≤ 0.3 ft (≤ 6 ft for a device 6 dB louder than the model). Likelihood = `exp(−cost / 2σ²)`. Two nodes only constrain a curve; three or more give a point.
+3. **Temporal smoothing.** Each device's cost surface is averaged over time (fixed time constant 15 s, scaled by type: fixed APs ×2, TPMS ×0.25 so a passing car is not dragged behind), updated only when new samples arrive. A model or layout change restarts it.
 4. **Position.** The dot is the likelihood-weighted mean within 4 ft of the most likely cell, so it does not hop between near-equal peaks; on screen it eases toward new estimates.
 
 No error circle is drawn around estimates: a radius derived from the model would look rigorous without being an accuracy figure. The accuracy reported is the calibration's **measured** error (leave-one-out median at the recorded spots, an empirical CEP50 for those spots).
@@ -106,6 +108,18 @@ Press **Calibrate** in the header.
 
 **Good reference devices:** a phone with its **hotspot on** (select the hotspot network: it beacons about 10 times a second at a fixed power and address), a laptop with steady traffic, or a BLE beacon. Avoid anything that stays put, and devices that rotate their MAC mid-session.
 
+`locate.py` is a port of the page's former localization code, checked against it: `tests/parity/golden.json` holds the page code's own results (run under node by `make_golden.mjs`), and the server matches them to 1e-4 ft. On a live snapshot of the first site (10 walls, 29 devices placed) the two agreed to 1e-13 ft.
+
+**History:** every position is appended to `history/<date>-positions.jsonl` in the site's directory (a device at most every 10 s, and only every 60 s while it stays within 3 ft); `GET /api/history?id=<device>&since=<unix s>` reads it back. It is purged with the rest of the site's history.
+
+## Latitude and longitude
+
+Positions are in the site's own feet. Give the server node GPS points and every position also gets `lat`/`lon` (and `err_m`, the calibration's measured median error combined with how well the GPS points fit the floor plan).
+
+- *Setup → Nodes → GPS*: pick a node, paste `lat, lon` (decimal degrees, as map apps copy them), *Set*. **Two or more nodes** fix the floor plan's rotation and position. With **one node**, also enter *Up*: the compass bearing of the map's up direction.
+- Take coordinates outdoors or from a satellite map, not from a receiver inside the building (often 5-15 m off). The status line shows the fit (`±m`, rms of the GPS points against the floor plan) and warns when the points disagree by more than 3 m or their spacing differs from the floor plan's by more than 10 %.
+- The coordinates are site data: stored only in the site's `site.json` (journaled), exported and wiped with the site, never in git.
+
 The fit maths was checked on synthetic spots generated from known parameters (n = 2.3, P0 = −52 dBm, offsets +3/−2/0/−1 dB): it recovers them exactly. With `CONSOLE_DEMO=1`, the *demo calibration beacon* hops between six known spots every 45 s, so the whole workflow can be practised without walking around.
 
 ## Site files
@@ -114,7 +128,7 @@ Everything about a particular location stays out of the repository:
 
 | What | Where |
 |---|---|
-| Node positions, walls, calibration spots, fitted models, history, change journals | `rf-console-data` volume, `/data/sites/<id>/` (Site menu: export, clear, wipe) |
+| Node positions, node GPS points, walls, calibration spots, fitted models, position history, change journals | `rf-console-data` volume, `/data/sites/<id>/` (Site menu: export, clear, wipe) |
 | Team template: node radio MACs, first site's layout and model defaults | `console/site/layout.yaml` (gitignored) |
 | Notes on a site | `console/site/NOTES.md` (gitignored) |
 
@@ -140,10 +154,10 @@ The older `DFVIZ_*` names are still read. Data from the earlier single-site layo
 
 ```sh
 # from detection/rf-subsystem (no uv on the host? use the uv container as for analytics)
-cd analytics && uv run pytest ../console/tests
+cd analytics && uv sync --extra console && uv run pytest ../console/tests
 ```
 
-`tests/test_server.py` covers RSSI smoothing (outlier rejection, time weighting), live readings from the Kismet log (each read once, new log files followed, fallback to `signal_rrd`), per-second history from `signal_rrd`, per-band windows (TPMS kept longer), calibration pairs, the demo source, `/api/state` and the page (no-cache headers) against a fake Kismet; the calibration API (per-spot add/delete/restore, journal, two-page race, fits, position-accuracy fields); recording and rebuilding spots from a Kismet-format SQLite log, including retrying while the log is write-locked; and walls (one operation at a time, stale-page race, persistent version). `tests/test_sites.py` covers site workspaces (first start, legacy migration, new site copies nodes but nothing learned, node validation, retention purge by whole days, export, clear, wipe guards) and sign-in (tokens, expiry, tampering, role checks over HTTP, JSON-only posts, slow wrong-password replies). The browser-side fit maths (path-loss, wall loss, offsets, weighted by position accuracy) was checked by recovering known parameters from synthetic spots in the page.
+`tests/test_server.py` covers RSSI smoothing (outlier rejection, time weighting), live readings from the Kismet log (each read once, new log files followed, fallback to `signal_rrd`), per-second history from `signal_rrd`, per-band windows (TPMS kept longer), calibration pairs, the demo source, `/api/state` and the page (no-cache headers) against a fake Kismet; the calibration API (per-spot add/delete/restore, journal, two-page race, fits, position-accuracy fields); recording and rebuilding spots from a Kismet-format SQLite log, including retrying while the log is write-locked; and walls (one operation at a time, stale-page race, persistent version). `tests/test_locate.py` checks server localization against the page's former code (golden values), restarts of smoothing on layout or model changes, and geo-referencing (two points, one point plus heading, a wrong coordinate flagged). `tests/test_server.py` also covers positions in `/api/state`, history throttling and `/api/site/geo`. `tests/test_sites.py` covers site workspaces (first start, legacy migration, new site copies nodes but nothing learned, node validation, retention purge by whole days, export, clear, wipe guards) and sign-in (tokens, expiry, tampering, role checks over HTTP, JSON-only posts, slow wrong-password replies). The browser-side fit maths (path-loss, wall loss, offsets, weighted by position accuracy) was checked by recovering known parameters from synthetic spots in the page.
 
 ## Lessons learned (apply to any site)
 
@@ -169,7 +183,7 @@ Agreed plan (2026-11-07). The TAK, camera and fusion message formats are still t
 | Phase | Delivers | Done when |
 |---|---|---|
 | **1. Console + site workspaces** (done) | Rename; sites (new, switch, rename, export, clear, wipe, retention); node placement; Live/Setup; sign-in with operator/admin roles | A building can be set up from the page and wiped with nothing left over |
-| **2. Server positions + history** | Localizer ported to Python (must match the page on recorded data); one Kismet feed for map and analytics; SQLite baseline and visits per site; replay of recorded data for tuning | The page shows server positions; the baseline survives a restart; analytics can be re-run on a past day |
+| **2. Server positions + history** (positions, position history and lat/lon done 2026-11-08) | Localizer ported to Python (must match the page on recorded data); one Kismet feed for map and analytics; SQLite baseline and visits per site; replay of recorded data for tuning | The page shows server positions; the baseline survives a restart; analytics can be re-run on a past day |
 | **3. Marking + alerting** | Friendly (team or site scope) and priority marks from the device card; alert areas drawn on the map; new-device-in-range and priority alerts; alert feed; the alert pipeline runs inside the console; MQTT alerts with lat/lon | A new phone walked into the inner area alerts within seconds; a marked device alerts wherever it is heard |
 | **4. Cameras + TAK** | Cameras placed with heading, field of view and range; cues only to cameras that can see the target; snapshot results; TAK config topic | A simulated vehicle in view cues only that camera; a test TAK message marks a device |
 | **5. Co-travelers + vehicles** | TPMS sensors grouped into vehicles; co-arrival scoring against chance; "arrived with" alerts | Precision/recall measured on the simulator, then a live test |

@@ -130,6 +130,57 @@ function renderNodesBar() {
     b.onclick = () => { S.nodesMode.placing = S.nodesMode.placing === b.dataset.place ? null : b.dataset.place; renderNodesBar(); };
   });
   $("nodes-hint").textContent = S.nodesMode.placing ? `Click the map where ${S.nodesMode.placing} is.` : "";
+  renderGeo();
+}
+
+// ---------- node GPS (geo-reference) ----------
+function geoDoc() { return (S.data && S.data.layout.geo) || { points: {}, heading_deg: null }; }
+
+function renderGeo() {
+  const geo = geoDoc(), pts = Object.entries(geo.points || {});
+  $("nodes-geo").innerHTML = `<span class="muted">GPS</span>
+    <select id="geo-node">${S.nodeOrder.map((n) => `<option>${escapeHtml(n)}</option>`).join("")}</select>
+    <input id="geo-ll" placeholder="lat, lon" size="24" autocomplete="off">
+    <button class="btn small" id="geo-set">Set</button>
+    ${pts.map(([n, [la, lo]]) => `<span class="nchip">${escapeHtml(n)} ${la.toFixed(6)}, ${lo.toFixed(6)}<button data-geo-rm="${escapeHtml(n)}" title="Remove">×</button></span>`).join("")}
+    <label class="muted" title="Compass bearing of the map's up direction (needed with one GPS point)">Up <input id="geo-heading" size="4" value="${geo.heading_deg ?? ""}" placeholder="—">°</label>
+    <span id="geo-status"></span>`;
+  $("geo-set").onclick = () => {
+    const m = $("geo-ll").value.trim().match(/^(-?\d+(?:\.\d+)?)[,\s]+(-?\d+(?:\.\d+)?)$/);
+    if (!m) { $("nodes-hint").textContent = "Enter decimal degrees: lat, lon"; return; }
+    geoSave({ node: $("geo-node").value, lat: +m[1], lon: +m[2] });
+  };
+  $("nodes-geo").querySelectorAll("[data-geo-rm]").forEach((b) => { b.onclick = () => geoSave({ node: b.dataset.geoRm, remove: true }); });
+  $("geo-heading").onchange = () => {
+    const v = $("geo-heading").value.trim();
+    geoSave({ heading_deg: v === "" ? null : +v });
+  };
+  renderGeoStatus();
+}
+
+function renderGeoStatus() {
+  const el = $("geo-status");
+  if (!el) return;
+  const st = S.data && S.data.geo, n = Object.keys(geoDoc().points || {}).length;
+  if (!st) {
+    el.className = "muted";
+    el.textContent = n ? "needs a second node or Up" : "";
+    return;
+  }
+  el.className = st.warnings.length ? "warn" : "muted";
+  el.textContent = (st.method === "points" ? `fit ±${st.rms_m} m · up ${st.heading_deg}°` : `up ${st.heading_deg}°`) +
+    (st.warnings.length ? ` · ⚠ ${st.warnings.join("; ")}` : "");
+}
+
+async function geoSave(body) {
+  try {
+    const out = await api("api/site/geo", body);
+    if (S.data) S.data.layout.geo = out.geo;
+    $("nodes-hint").textContent = "";
+    renderGeo();
+  } catch (err) {
+    $("nodes-hint").textContent = `Failed: ${err.message}`;
+  }
 }
 
 function nodesClick(x, y) {

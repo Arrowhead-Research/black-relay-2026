@@ -7,9 +7,9 @@ WORKDIR /app
 
 COPY analytics/pyproject.toml analytics/README.md /src/analytics/
 COPY analytics/src /src/analytics/src
-RUN pip install --no-cache-dir /src/analytics && rm -rf /src
+RUN pip install --no-cache-dir "/src/analytics[console]" && rm -rf /src
 
-COPY console/server.py console/sites.py console/auth.py console/demo.py console/layout.example.yaml ./
+COPY console/server.py console/sites.py console/auth.py console/demo.py console/locate.py console/layout.example.yaml ./
 COPY console/static ./static
 
 EXPOSE 8080

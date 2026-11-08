@@ -3,10 +3,10 @@
 Every building the system is set up in is a *site*. Each site has its own
 directory under ``<root>/sites/<id>/``, holding everything learned there:
 
-    site.json                  name, node positions, retention, active periods
+    site.json                  name, node positions, node GPS points (geo), retention, active periods
     site.journal.jsonl         every change to site.json (who/when/before/after)
     calibration.json(+journal) calibration spots, fitted models, walls
-    history/                   per-day analytics history (purged after retention)
+    history/                   per-day history, e.g. <date>-positions.jsonl (purged after retention)
 
 Nothing site-specific lives outside that directory, so wiping a site removes
 it completely. Node hardware (each node's own radio addresses) belongs to
@@ -189,6 +189,8 @@ class SiteManager:
             "self_emitters": dict(self.template.get("self_emitters", {})),
             "node_sd_ft": float(lay.get("node_sd_ft", 2.0)),
             "models": lay["models"],
+            # GPS of some nodes (and optionally the floor plan's heading): positions get lat/lon.
+            "geo": json.loads(json.dumps(site.doc.get("geo") or {"points": {}, "heading_deg": None})),
         }
 
     # ---------- changes ----------
@@ -272,6 +274,36 @@ class SiteManager:
             self._save(site.dir, site.doc, {"op": "node", "node": node_id, "before": before,
                                             "after": nodes.get(node_id), "user": user})
             return nodes
+
+    def set_geo(self, body: dict[str, Any], user: str | None = None) -> dict[str, Any]:
+        """Geo-reference the active site: ``{node, lat, lon}`` sets a node's GPS
+        point, ``{node, remove: true}`` removes it, ``{heading_deg}`` (or null)
+        sets the compass bearing of the floor plan's "up" direction."""
+        with self.lock:
+            site = self.active()
+            geo = site.doc.setdefault("geo", {"points": {}, "heading_deg": None})
+            before = json.loads(json.dumps(geo))
+            if "heading_deg" in body:
+                h = body["heading_deg"]
+                if h is not None and not (isinstance(h, (int, float)) and not isinstance(h, bool) and 0 <= h < 360):
+                    raise ValueError("heading_deg must be 0-360 or null")
+                geo["heading_deg"] = None if h is None else round(float(h), 1)
+            elif "node" in body:
+                node = str(body["node"])
+                if node not in site.doc["layout"]["nodes"]:
+                    raise ValueError(f"{node} is not placed on this site")
+                if body.get("remove"):
+                    geo["points"].pop(node, None)
+                else:
+                    lat, lon = body.get("lat"), body.get("lon")
+                    ok = all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (lat, lon))
+                    if not ok or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                        raise ValueError("lat must be -90..90 and lon -180..180 (decimal degrees)")
+                    geo["points"][node] = [round(float(lat), 7), round(float(lon), 7)]
+            else:
+                raise ValueError("send {node, lat, lon}, {node, remove: true} or {heading_deg}")
+            self._save(site.dir, site.doc, {"op": "geo", "before": before, "after": geo, "user": user})
+            return geo
 
     def clear_history(self, site_id: str, user: str | None = None) -> int:
         """Delete the site's analytics history; keeps its map, walls and calibration."""

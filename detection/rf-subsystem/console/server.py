@@ -24,6 +24,10 @@ buildings and wipe what it learned. Sign-in and roles: ``auth.py``.
     GET  /api/sites/<id>/export              zip of everything stored for it (admin)
     POST /api/site/nodes                     {node, x, y} place/move a node on the
                                              active site, or {node, remove: true}
+    POST /api/site/geo                       {node, lat, lon} | {node, remove: true} |
+                                             {heading_deg}: geo-reference the site
+    GET  /api/history?id=<emitter>&since=<unix s>
+                                             stored positions of one device (active site)
     GET  /api/calibration                    {points, fits, version}
     POST /api/calibration/record             {device, x, y, t0, seconds, ...}:
                         record a spot from Kismet's packet log (every packet,
@@ -55,7 +59,10 @@ it is used for TPMS (not in the log yet) and when the log can't be read.
 Samples are kept per (device, node) for a per-band window; outliers beyond
 3 MAD of the median are dropped and the rest is averaged with exponential
 time weights.
-Localization (and its temporal filter) runs in the browser for now.
+Positions are computed here (``locate.py``, a verified port of the page's
+localization) on every poll, served with each device in /api/state, and
+stored per site (``history/<date>-positions.jsonl``). With node GPS points
+(``POST /api/site/geo``) each position also gets lat/lon.
 
 Environment (CONSOLE_*; the older DFVIZ_* names still work):
     KISMET_URL       default http://kismet-server:2501
@@ -96,6 +103,7 @@ from rfanalytics.kismet import KismetIngestError, KismetPoller, describe_device,
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from auth import COOKIE, Auth  # noqa: E402
+from locate import M_PER_FT, Locator, band_models, georeference, to_latlon  # noqa: E402
 from sites import SiteManager  # noqa: E402
 
 
@@ -668,6 +676,10 @@ class LogTail:
         return self.log._read(path, go, retries=self.RETRIES)
 
 
+HISTORY_MIN_S = 10         # stored positions: at most one per device this often,
+HISTORY_MAX_S = 60         # and while a device stays within HISTORY_MOVE_FT only this often
+HISTORY_MOVE_FT = 3.0
+
 LOG_STALE_S = 30            # log unreadable this long: fall back to Kismet's per-second history
 LOG_PENDING_S = 15          # keep readings for devices Kismet's REST hasn't listed yet this long
 
@@ -733,6 +745,10 @@ class App:
         self.last_source_poll = 0.0
         self.last_purge = 0.0
         self.log_tail = LogTail(self.kismet_log) if self.kismet_log.dir else None
+        self.locator = Locator()
+        self.positions: dict[str, dict[str, Any]] = {}
+        self.geo: dict[str, Any] | None = None
+        self.hist_last: dict[str, tuple[float, float, float, str]] = {}
         self.log_ok_at = 0.0
         self.log_pending: list[tuple[str, str, float, int]] = []
 
@@ -788,6 +804,85 @@ class App:
             self.tracker.prune(now)
             self.status.update(ok=error is None, error=error, last_poll=now, devices_polled=len(devices) + len(demo),
                                demo=bool(self.extra_sources), rssi_source="log" if log_live else "kismet")
+            snapshot = self.tracker.snapshot(now)
+        self.locate(snapshot, now)
+
+    def locate(self, devices: list[dict[str, Any]], now: float) -> None:
+        """Positions of all devices (poller thread), with lat/lon when the site is geo-referenced."""
+        layout, cal = self.layout, self.cal
+        models = band_models(layout, cal.data.get("fits", {}))
+        self.locator.configure(layout["nodes"], cal.data.get("walls", []), models)
+        estimates = self.locator.locate_all(devices, layout["nodes"])
+        tf = georeference(layout["nodes"], layout.get("geo"))
+        by_id = {d["id"]: d for d in devices}
+        positions = {}
+        for eid, e in estimates.items():
+            if e["kind"] != "fix":
+                continue
+            dev, m = by_id[eid], models.get(by_id[eid]["band"]) or models["wifi"]
+            p = {"x": round(e["x"], 2), "y": round(e["y"], 2), "nodes": e["K"], "ids": e["ids"],
+                 "offset_db": round(e["offset"], 2), "res_db": round(e["res"], 2), "updated": e["updated"],
+                 "t": max(n["last"] for n in dev["nodes"].values()), "calibrated": m["calibrated"],
+                 "err_ft": m["loo_median_ft"]}
+            if tf:
+                lat, lon = to_latlon(tf, e["x"], e["y"])
+                p["lat"], p["lon"] = round(lat, 7), round(lon, 7)
+                # Accuracy: calibration's measured median error, plus how well the node GPS fits the plan.
+                if m["loo_median_ft"] is not None:
+                    p["err_m"] = round(math.hypot(m["loo_median_ft"] * M_PER_FT, tf["rms_m"]), 1)
+            positions[eid] = p
+        geo = None if tf is None else {k: tf[k] for k in ("method", "nodes", "rms_m", "scale", "heading_deg", "warnings")}
+        with self.lock:
+            self.positions, self.geo = positions, geo
+        self.record_history(positions, by_id, now)
+
+    def record_history(self, positions: dict[str, dict[str, Any]], by_id: dict[str, dict[str, Any]], now: float) -> None:
+        """Append positions to the active site's history: a device at most every
+        HISTORY_MIN_S, and while it stays put only every HISTORY_MAX_S."""
+        if not self.sites:
+            return
+        site = self.sites.active()
+        lines = []
+        for eid, p in positions.items():
+            last = self.hist_last.get(eid)
+            if last and last[3] == site.id:
+                dt, moved = now - last[0], math.hypot(p["x"] - last[1], p["y"] - last[2])
+                if dt < HISTORY_MIN_S or (dt < HISTORY_MAX_S and moved < HISTORY_MOVE_FT):
+                    continue
+            rec = {"t": round(now, 1), "id": eid, "band": by_id[eid]["band"], "x": p["x"], "y": p["y"], "k": p["nodes"]}
+            if "lat" in p:
+                rec.update(lat=p["lat"], lon=p["lon"])
+            lines.append(json.dumps(rec, separators=(",", ":")))
+            self.hist_last[eid] = (now, p["x"], p["y"], site.id)
+        for eid in [k for k, v in self.hist_last.items() if now - v[0] > 3600]:
+            del self.hist_last[eid]
+        if lines:
+            site.history_dir.mkdir(parents=True, exist_ok=True)
+            day = time.strftime("%Y-%m-%d", time.gmtime(now))
+            with open(site.history_dir / f"{day}-positions.jsonl", "a") as f:
+                f.write("\n".join(lines) + "\n")
+
+    def history(self, emitter_id: str, since: float, limit: int = 5000) -> list[dict[str, Any]]:
+        """Stored positions of one device on the active site since ``since``."""
+        if not self.sites:
+            return []
+        hdir = self.sites.active().history_dir
+        first_day = time.strftime("%Y-%m-%d", time.gmtime(since))
+        out: list[dict[str, Any]] = []
+        for f in sorted(hdir.glob("*-positions.jsonl")) if hdir.exists() else []:
+            if f.name[:10] < first_day:
+                continue
+            with open(f) as fh:
+                for line in fh:
+                    if f'"id":"{emitter_id}"' not in line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    if rec.get("id") == emitter_id and rec.get("t", 0) >= since:
+                        out.append(rec)
+        return out[-limit:]
 
     def run_poller(self) -> None:
         while True:
@@ -805,6 +900,10 @@ class App:
                     "version": self.sites.version}
         with self.lock:
             sources = self.health.report(now)
+            devices = self.tracker.snapshot(now)
+            for d in devices:
+                if d["id"] in self.positions:
+                    d["position"] = self.positions[d["id"]]
             return {
                 "now": now,
                 "site": site,
@@ -812,7 +911,8 @@ class App:
                 "timing": BAND_TIMING,
                 "layout": layout,
                 "kismet": dict(self.status),
-                "devices": self.tracker.snapshot(now),
+                "devices": devices,
+                "geo": self.geo,
                 "calibration": calibration_samples(self.tracker, layout, now),
                 "calibration_fits": cal.data.get("fits", {}),
                 "calibration_version": cal.version,
@@ -930,6 +1030,16 @@ class Handler(SimpleHTTPRequestHandler):
             if not emitter_id:
                 return self._json({"error": "id is required"}, 400)
             return self._json(self.app.samples(emitter_id, since))
+        if url.path == "/api/history":
+            q = parse_qs(url.query)
+            try:
+                since = float(q.get("since", ["0"])[0])
+            except ValueError:
+                return self._json({"error": "since must be a number"}, 400)
+            emitter_id = (q.get("id") or [""])[0].lower()
+            if not emitter_id:
+                return self._json({"error": "id is required"}, 400)
+            return self._json({"id": emitter_id, "points": self.app.history(emitter_id, since)})
         return self._json({"error": "not found"}, 404)
 
     def _body(self) -> Any:
@@ -960,7 +1070,7 @@ class Handler(SimpleHTTPRequestHandler):
         if role is None:
             return None
         try:
-            if path.startswith("/api/sites") or path == "/api/site/nodes":
+            if path.startswith("/api/sites") or path in ("/api/site/nodes", "/api/site/geo"):
                 return self._sites_post(path, body, role)
             return self._cal_post(path, body)
         except KeyError as exc:
@@ -985,6 +1095,8 @@ class Handler(SimpleHTTPRequestHandler):
             node = str(body.get("node", ""))
             xy = None if body.get("remove") else [body.get("x"), body.get("y")]
             return self._json({"nodes": sites.set_node(node, xy, user=role), "version": sites.version})
+        if path == "/api/site/geo":
+            return self._json({"geo": sites.set_geo(body, user=role), "version": sites.version})
         parts = path.split("/")   # /api/sites/<id>/<action>
         if len(parts) != 5:
             return self._json({"error": "not found"}, 404)

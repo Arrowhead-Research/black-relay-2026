@@ -7,6 +7,7 @@
 !console/sites.py
 !console/auth.py
 !console/demo.py
+!console/locate.py
 !console/layout.example.yaml
 !console/static
 **/__pycache__
