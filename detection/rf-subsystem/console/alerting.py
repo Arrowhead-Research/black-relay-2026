@@ -17,8 +17,11 @@
   | ``linger`` | it stays in the area longer than the area's linger time; or a device with its own linger alarm (``linger_s`` on its mark) is heard that long; once per visit | medium (high if priority) |
   | ``node_offline`` | a node's capture stops (all its sources down, or its agent silent with no sources) | high |
 
-  A visit ends after VISIT_GAP_S away (from the area, or unheard), so position
-  jitter at an area's edge does not repeat alerts.
+  Per device visit (heard without a VISIT_GAP_S gap) there is one first alert
+  (area entry, or priority heard; a priority device entering an area gives one
+  high area_entry) and then at most one linger alert; nothing more until the
+  device has been gone VISIT_GAP_S. An area's linger clock restarts only after
+  VISIT_GAP_S outside it, so jitter at its edge does not reset it.
 
 - **Alerts** (``AlertLog``) are kept per site in ``history/<date>-alerts.jsonl``
   (purged with the site's history), shown in the page, acknowledged by
@@ -178,20 +181,20 @@ class Areas:
 
 
 class AlertEngine:
-    """Priority device appears; area entry and linger; a device's own linger alarm; node offline."""
+    """Per device visit (heard without a VISIT_GAP_S gap): one first alert (area entry, or a
+    priority device heard), then at most one linger alert, then nothing until a new visit.
+    Node offline alerts are separate."""
 
     def __init__(self) -> None:
         self.site: str | None = None
-        self.heard: dict[str, float] = {}      # priority device -> last heard
-        self.visits: dict[str, list[float]] = {}   # device with a linger alarm -> [visit start, last heard, alerted]
-        self.area_visits: dict[tuple[str, str], list[float]] = {}   # (device, area) -> [since, last, lingered]
-        self.nodes: dict[str, str] = {}        # node -> last state
+        self.devs: dict[str, dict[str, Any]] = {}   # device -> {start, last, alerted, lingered, areas: {id: since}}
+        self.nodes: dict[str, str] = {}             # node -> last state
 
     def evaluate(self, site: str, now: float, devices: dict[str, dict[str, Any]], positions: dict[str, dict[str, Any]],
                  marks: dict[str, dict[str, Any]], areas: list[dict[str, Any]], node_states: dict[str, dict[str, Any]],
                  friendly_ids: set[str]) -> list[dict[str, Any]]:
         if site != self.site:              # another site: nothing carries over
-            self.site, self.heard, self.visits, self.area_visits, self.nodes = site, {}, {}, {}, {}
+            self.site, self.devs, self.nodes = site, {}, {}
         out: list[dict[str, Any]] = []
 
         def alert(rule: str, dev_id: str | None, context: dict[str, Any], severity: str = "high",
@@ -200,42 +203,43 @@ class AlertEngine:
                         "area": area and {"id": area["id"], "name": area["name"]}, "context": context, "t": now})
 
         for dev_id, dev in devices.items():
-            mark = marks.get(dev_id) or {}
             if dev_id in friendly_ids:         # the nodes' own radios
                 continue
+            mark = marks.get(dev_id) or {}
             friendly = mark.get("kind") == "friendly"     # silences area alerts; an explicit linger alarm still applies
-            sev = "high" if mark.get("kind") == "priority" else "medium"
+            priority = mark.get("kind") == "priority"
+            sev = "high" if priority else "medium"
+            st = self.devs.get(dev_id)
+            if st is None or now - st["last"] > VISIT_GAP_S:
+                st = self.devs[dev_id] = {"start": now, "last": now, "alerted": False, "lingered": False, "areas": {}}
+            st["last"] = now
             p = positions.get(dev_id)
+            inside = []
             if p and p["nodes"] >= AREA_MIN_NODES and not friendly:
-                for area in areas:
-                    if not point_in_polygon(p["x"], p["y"], area["points"]):
-                        continue
-                    key = (dev_id, area["id"])
-                    v = self.area_visits.get(key)
-                    if v is None or now - v[1] > VISIT_GAP_S:
-                        v = self.area_visits[key] = [now, now, 0.0]
-                        alert("area_entry", dev_id, {}, sev, area)
-                    v[1] = now
-                    if not v[2] and now - v[0] >= area["linger_s"]:
-                        v[2] = 1.0
-                        alert("linger", dev_id, {"dwell_s": round(now - v[0])}, sev, area)
-            if mark.get("kind") == "priority":
-                last = self.heard.get(dev_id)
-                if last is None or now - last > VISIT_GAP_S:
+                inside = [a for a in areas if point_in_polygon(p["x"], p["y"], a["points"])]
+            for a in inside:
+                st["areas"].setdefault(a["id"], [now, now])[1] = now     # [since, last inside]
+            for aid in [k for k, (_, last) in st["areas"].items() if now - last > VISIT_GAP_S]:
+                del st["areas"][aid]           # out of the area that long: its linger clock restarts
+            # 1. the first alert of the visit
+            if not st["alerted"]:
+                if inside:
+                    st["alerted"] = True
+                    alert("area_entry", dev_id, {}, sev, inside[0])
+                elif priority:
+                    st["alerted"] = True
                     alert("priority_heard", dev_id, {"nodes": sorted(dev["nodes"])})
-                self.heard[dev_id] = now
-            if mark.get("linger_s"):
-                v = self.visits.get(dev_id)
-                if v is None or now - v[1] > VISIT_GAP_S:
-                    v = self.visits[dev_id] = [now, now, 0.0]
-                v[1] = now
-                if not v[2] and now - v[0] >= mark["linger_s"]:
-                    v[2] = 1.0
-                    alert("linger", dev_id, {"dwell_s": round(now - v[0]), "linger_s": mark["linger_s"]}, sev)
-        for dev_id in [k for k, v in self.visits.items() if now - v[1] > VISIT_GAP_S]:
-            del self.visits[dev_id]
-        for key in [k for k, v in self.area_visits.items() if now - v[1] > VISIT_GAP_S]:
-            del self.area_visits[key]
+            # 2. one linger alert: an area's linger time, or the device's own alarm
+            if not st["lingered"]:
+                hit = next((a for a in inside if now - st["areas"][a["id"]][0] >= a["linger_s"]), None)
+                if hit is not None:
+                    st["lingered"] = st["alerted"] = True
+                    alert("linger", dev_id, {"dwell_s": round(now - st["areas"][hit["id"]][0])}, sev, hit)
+                elif mark.get("linger_s") and now - st["start"] >= mark["linger_s"]:
+                    st["lingered"] = st["alerted"] = True
+                    alert("linger", dev_id, {"dwell_s": round(now - st["start"]), "linger_s": mark["linger_s"]}, sev)
+        for dev_id in [k for k, v in self.devs.items() if now - v["last"] > VISIT_GAP_S]:
+            del self.devs[dev_id]
 
         for node, st in node_states.items():
             prev = self.nodes.get(node)

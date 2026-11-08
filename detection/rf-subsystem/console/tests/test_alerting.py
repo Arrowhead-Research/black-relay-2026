@@ -39,6 +39,20 @@ def test_area_entry_once_per_visit_then_linger():
     assert run(2000, pos(5, 5, k=2)) == []               # two nodes: no area alerts
 
 
+def test_one_first_alert_then_one_linger_per_visit():
+    """Once a device alerts, it alerts again only when it meets a linger time; then not until a new visit."""
+    eng = AlertEngine()
+    room2 = {**ROOM, "id": "a2", "name": "Lot", "points": [[20, 0], [30, 0], [30, 10], [20, 10]], "linger_s": 600}
+    run = lambda t, p: [a["rule_id"] for a in eng.evaluate("s", t, {"d1": DEV}, {"d1": p}, {}, [ROOM, room2], {}, set())]
+    assert run(0, pos(5, 5)) == ["area_entry"]
+    assert run(10, pos(25, 5)) == []                     # a second area: no second entry alert
+    assert run(20, pos(5, 5)) == []                      # back in the first: still nothing
+    assert run(70, pos(5, 5)) == ["linger"]              # Inner's linger time (60 s) since first entering it
+    assert run(300, pos(25, 5)) == [] and run(500, pos(25, 5)) == []   # still heard (no 10-min gap)
+    assert run(700, pos(25, 5)) == []                    # Lot's linger time met too, but one linger per visit
+    assert run(700 + VISIT_GAP_S + 1, pos(5, 5)) == ["area_entry"]   # gone 10 min: a new visit
+
+
 def test_friendly_and_node_radios_are_never_alerted_priority_always():
     eng = AlertEngine()
     marks = {"d1": {"kind": "friendly"}, "d2": {"kind": "priority"}}
@@ -46,7 +60,7 @@ def test_friendly_and_node_radios_are_never_alerted_priority_always():
     ps = {k: pos(5, 5) for k in devs}
     out = eng.evaluate("s", 0, devs, ps, marks, [ROOM], {}, {"radio"})
     assert sorted((a["rule_id"], a["device"], a["severity"]) for a in out) == [
-        ("area_entry", "d2", "high"), ("priority_heard", "d2", "high")]
+        ("area_entry", "d2", "high")]                    # a priority device entering an area: one alert, high
     assert eng.evaluate("s", 5, devs, ps, marks, [ROOM], {}, {"radio"}) == []      # still heard: no repeat
 
 
@@ -70,8 +84,8 @@ def test_device_linger_alarm():
     assert run(400 + VISIT_GAP_S + 1) == [] and run(400 + VISIT_GAP_S + 302) == [("linger", "medium", 301)]   # new visit
     eng2 = AlertEngine()
     prio = {"d1": {"kind": "priority", "linger_s": 60}}
-    out = [(a["rule_id"], a["severity"]) for t in (0, 61) for a in eng2.evaluate("s", t, devs, {}, prio, [], {}, set())]
-    assert out == [("priority_heard", "high"), ("linger", "high")]
+    out = [(a["rule_id"], a["severity"]) for t in (0, 30, 61, 90) for a in eng2.evaluate("s", t, devs, {}, prio, [], {}, set())]
+    assert out == [("priority_heard", "high"), ("linger", "high")]       # heard, then only the linger
     eng3 = AlertEngine()                                           # an explicit linger alarm applies to a friendly device too
     fr = {"d1": {"kind": "friendly", "linger_s": 60}}
     assert [a["rule_id"] for t in (0, 61) for a in eng3.evaluate("s", t, devs, {"d1": pos(5, 5)}, fr, [ROOM], {}, set())] == ["linger"]
@@ -132,10 +146,10 @@ def test_console_alerts_end_to_end(tmp_path):
         app.poll_once()
         st = _get(base, "/api/state")
         assert st["marks"]["aa:bb:cc:00:00:09"]["kind"] == "priority"
-        assert sorted(a["rule_id"] for a in st["alerts"]["recent"]) == ["area_entry", "priority_heard"]
-        assert st["alerts"]["unacked"] == 2
+        assert sorted(a["rule_id"] for a in st["alerts"]["recent"]) == ["area_entry"]   # one alert, high (priority)
+        assert st["alerts"]["unacked"] == 1
         alerts = [pl for t, pl in durable.sent if t == "detection/rf/alerts"]
-        assert len(alerts) == 2
+        assert len(alerts) == 1
         for pl in alerts:
             ALERT.validate(pl)
         entry = next(pl for pl in alerts if pl["rule_id"] == "area_entry")
@@ -144,7 +158,7 @@ def test_console_alerts_end_to_end(tmp_path):
         # stored per site and reloaded after a restart
         app2 = App(FakePoller(), None, window_s=60, poll_s=3, sites=sites, data_dir=tmp_path / "data")
         view = app2.alert_log.view(*app2.site_paths()[:1], app2.history_dir())
-        assert len(view["recent"]) == 2 and view["unacked"] == 0
+        assert len(view["recent"]) == 1 and view["unacked"] == 0
     finally:
         httpd.shutdown()
 
