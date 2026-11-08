@@ -137,6 +137,71 @@ class KismetPoller:
         return obs, max_t
 
 
+def describe_device(device: dict[str, Any]) -> tuple[str, str, dict[str, Any]] | None:
+    """(emitter_type, emitter_id, attributes) for a Kismet device, or None if unmapped."""
+    phy = device.get("kismet.device.base.phyname") or ""
+    mac = str(device.get("kismet.device.base.macaddr") or "").lower()
+    emitter_type = _emitter_type(phy, str(device.get("kismet.device.base.type") or ""), device)
+    if emitter_type is None:
+        return None
+    emitter_id = _emitter_id(emitter_type, mac, device)
+    if emitter_id is None:
+        return None
+    return emitter_type, emitter_id, _attributes(emitter_type, device, mac)
+
+
+def seenby_signals(device: dict[str, Any]) -> list[tuple[str, float, int | None]]:
+    """(node_id, last_time, rssi_dbm or None) for each node that heard the device.
+
+    RSSI is the node's own last signal (needs ``keep_per_datasource_stats=true``).
+    """
+    out: list[tuple[str, float, int | None]] = []
+    for sb in device.get("kismet.device.base.seenby") or []:
+        source = sb.get("kismet.common.seenby.source") or {}
+        node_id = _node_id(str(source.get("kismet.datasource.name") or source.get("kismet.datasource.interface") or ""))
+        if not node_id:
+            continue
+        t = float(sb.get("kismet.common.seenby.last_time") or 0)
+        out.append((node_id, t, _last_signal(sb.get("kismet.common.seenby.signal"))))
+    return out
+
+
+def seenby_history(device: dict[str, Any]) -> list[tuple[str, list[tuple[float, int]]]]:
+    """Per-node RSSI history: [(node_id, [(time, rssi_dbm), ...] ascending)].
+
+    Uses each seenby entry's per-second ``signal_rrd`` (the last 60 seconds,
+    slot = time % 60, 0 = no sample), which Kismet keeps when
+    ``keep_per_datasource_stats=true``. Falls back to the single last signal.
+    """
+    out: list[tuple[str, list[tuple[float, int]]]] = []
+    for sb in device.get("kismet.device.base.seenby") or []:
+        source = sb.get("kismet.common.seenby.source") or {}
+        node_id = _node_id(str(source.get("kismet.datasource.name") or source.get("kismet.datasource.interface") or ""))
+        if not node_id:
+            continue
+        sig = sb.get("kismet.common.seenby.signal") or {}
+        rrd = sig.get("kismet.common.signal.signal_rrd") if isinstance(sig, dict) else None
+        samples: list[tuple[float, int]] = []
+        if isinstance(rrd, dict):
+            last = int(rrd.get("kismet.common.rrd.last_time") or 0)
+            vec = rrd.get("kismet.common.rrd.minute_vec") or []
+            blank = rrd.get("kismet.common.rrd.blank_val", 0)
+            if last > 0 and len(vec) == 60:
+                for age in range(59, -1, -1):
+                    t = last - age
+                    v = vec[t % 60]
+                    if isinstance(v, (int, float)) and v not in (0, blank) and -130 <= v < 0:
+                        samples.append((float(t), int(v)))
+        if not samples:
+            t = float(sb.get("kismet.common.seenby.last_time") or 0)
+            rssi = _last_signal(sig)
+            if t > 0 and rssi is not None:
+                samples.append((t, rssi))
+        if samples:
+            out.append((node_id, samples))
+    return out
+
+
 _FIELDS = [
     "kismet.device.base.key",
     "kismet.device.base.macaddr",

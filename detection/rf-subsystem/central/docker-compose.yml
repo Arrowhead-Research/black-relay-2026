@@ -77,8 +77,39 @@ services:
       - ../analytics/config:/config:ro
       - rf-analytics-data:/data
 
+  # RSSI direction-finding heat map (web UI). Opt in with
+  #   docker compose --profile dfviz up -d --build
+  # then open http://<BIND_ADDR>:8080. Site files (node layout) live in
+  # ../dfviz/site/ (local, not committed); calibration and walls are stored per
+  # DFVIZ_SITE in the rf-dfviz-data volume, so each deployment site starts clean.
+  rf-dfviz:
+    profiles: [dfviz]
+    build:
+      context: ..
+      dockerfile: dfviz/Dockerfile
+    image: black-relay/rf-dfviz:dev
+    restart: unless-stopped
+    depends_on:
+      kismet-server:
+        condition: service_healthy
+    environment:
+      KISMET_URL: http://kismet-server:2501
+      KISMET_USER: ${KISMET_ADMIN_USER:-}
+      KISMET_PASSWORD: ${KISMET_ADMIN_PASSWORD:-}
+      DFVIZ_DEMO: ${DFVIZ_DEMO:-}   # 1 = add synthetic emitters with known positions
+      DFVIZ_LAYOUT: /site/layout.yaml          # missing: falls back to the bundled example
+      DFVIZ_CAL_FILE: /data/${DFVIZ_SITE:-default}/calibration.json   # spots, fits, walls: per site
+      DFVIZ_KISMET_LOGS: /kismet-data/logs      # read-only: rebuild spots from packet logs
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${DFVIZ_PORT:-8080}:8080"
+    volumes:
+      - ../dfviz/site:/site:ro
+      - rf-dfviz-data:/data
+      - kismet-logs:/kismet-data:ro
+
 volumes:
   kismet-logs:
   kismet-home:
   mqtt-data:
   rf-analytics-data:
+  rf-dfviz-data:

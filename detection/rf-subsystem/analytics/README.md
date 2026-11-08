@@ -56,12 +56,11 @@ Node IDs are derived from Kismet datasource names (e.g. `wbt-1:wifi` -> `wbt-1`)
 
 **Per-node RSSI needs `keep_per_datasource_stats=true` in Kismet** (set in `central/kismet/kismet_site.conf`). With Kismet's default, every per-node signal is empty; the adapter then falls back to the device's aggregate RSSI and sets `attributes.rssi_is_aggregate=true`, which gives every node the same RSSI and makes zone estimates meaningless. RTL433/TPMS mapping is still best-effort until verified with live TPMS decodes.
 
-### Live results (2026-11-07, `wbt-1`–`wbt-4`, placeholder site geometry)
+### Notes from live use
 
-- About 100 observations per 5 s poll from Wi-Fi and BLE; no TPMS (no vehicles moved). With per-node RSSI enabled, all observations carried true per-node signal (none aggregate), and the same device often differed by 30–60 dB between nodes.
-- Each node's own `wlan0` backhaul was heard by all four nodes and localized to its own node. Without a friendly list these show up as loitering Wi-Fi clients; see `config/friendly.wbt-nodes.example.yaml`.
-- With test rules (watchlist on a nearby AP, 120 s loiter), alerts reached a subscriber on `detection/rf/alerts` within a poll of the rule condition, located in all four zones, with no pending outbox messages.
-- Alerts from `watchlist` (and other visit-start rules) carry `location.zone: null`: they fire on the visit's confirmation, before the first zone estimate.
+- With per-node RSSI enabled, every observation should carry true per-node signal (`rssi_is_aggregate` absent). Nearby devices typically differ by tens of dB between nodes.
+- Each node's own onboard Wi-Fi is heard by the other nodes. Without a friendly list it shows up as a loitering Wi-Fi client; list it in a friendly file (see `config/friendly.wbt-nodes.example.yaml`).
+- Alerts from visit-start rules (`watchlist`, `new_device`, `repeat_visitor`) carry `location.zone: null`: they fire on the visit's confirmation, before the first zone estimate.
 
 ## Events (`rf.analytics-event.v0`)
 

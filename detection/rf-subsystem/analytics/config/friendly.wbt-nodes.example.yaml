@@ -1,25 +1,24 @@
 # Friendly list for the WBT nodes' own radios (DESIGN.md 6.6, NODE-05).
 #
-# These four Raspberry Pi Wi-Fi clients were heard by every node during the
-# 2026-11-07 live test. Each was loudest at a different node, so they are the
-# nodes' onboard wlan0 backhaul interfaces. Without this list they show up as
-# loitering Wi-Fi clients. The node mapping is inferred from per-node RSSI:
-# confirm it with `ip link show wlan0` on each node and fix the labels.
-# Replace with node self-registration when rf-node-agent exists.
+# Each node's onboard Wi-Fi (wlan0) is heard by the other nodes and would
+# otherwise show up as a loitering Wi-Fi client. These MACs belong to the node
+# hardware, not to a site: keep them when the nodes move, update them if nodes
+# are swapped. Confirm with `ip link show wlan0` on each node. Replace with node
+# self-registration when rf-node-agent exists.
 
 entries:
-  - label: wbt-1 onboard Wi-Fi (wlan0, inferred)
+  - label: wbt-1 onboard Wi-Fi (wlan0)
     source: node-registration
     emitter_id: 2c:cf:67:c0:76:71
 
-  - label: wbt-2 onboard Wi-Fi (wlan0, inferred)
+  - label: wbt-2 onboard Wi-Fi (wlan0)
     source: node-registration
     emitter_id: 2c:cf:67:c0:76:1b
 
-  - label: wbt-3 onboard Wi-Fi (wlan0, inferred)
+  - label: wbt-3 onboard Wi-Fi (wlan0)
     source: node-registration
     emitter_id: 2c:cf:67:c0:76:dd
 
-  - label: wbt-4 onboard Wi-Fi (wlan0, inferred)
+  - label: wbt-4 onboard Wi-Fi (wlan0)
     source: node-registration
     emitter_id: 2c:cf:67:c0:72:98

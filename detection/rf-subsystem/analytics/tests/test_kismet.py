@@ -120,3 +120,20 @@ def test_tpms_observation_contract():
     assert r["emitter_type"] == "tpms"
     assert r["emitter_id"] == "tpms:1a2b3c4d"
     parse_observation(r)
+
+
+def test_seenby_history_reads_per_second_rrd():
+    from rfanalytics.kismet import seenby_history
+
+    vec = [0] * 60
+    for t, v in [(1_700_000_058, -61), (1_700_000_059, -63), (1_700_000_020, -70)]:
+        vec[t % 60] = v
+    d = _ble()
+    d["kismet.device.base.seenby"][0]["kismet.common.seenby.signal"] = {
+        "kismet.common.signal.type": "dbm", "kismet.common.signal.last_signal": -63,
+        "kismet.common.signal.signal_rrd": {"kismet.common.rrd.last_time": 1_700_000_059,
+                                            "kismet.common.rrd.minute_vec": vec, "kismet.common.rrd.blank_val": 0},
+    }
+    assert seenby_history(d) == [("wbt-3", [(1_700_000_020.0, -70), (1_700_000_058.0, -61), (1_700_000_059.0, -63)])]
+    # Without an RRD it falls back to the last signal (none here: type "none").
+    assert seenby_history(_ble()) == []

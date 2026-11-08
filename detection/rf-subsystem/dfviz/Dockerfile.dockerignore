@@ -1,0 +1,10 @@
+# Build context is rf-subsystem/; send only what the image needs (never central/.env).
+*
+!analytics/pyproject.toml
+!analytics/README.md
+!analytics/src
+!dfviz/server.py
+!dfviz/demo.py
+!dfviz/layout.example.yaml
+!dfviz/static
+**/__pycache__

@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RF Direction Finding</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="logo" aria-hidden="true"></span>
+    <h1>RF Direction Finding</h1>
+  </div>
+  <div class="status">
+    <span class="pill" id="kismet-pill"><i></i><span>connecting…</span></span>
+    <span class="pill subtle" id="count-pill">0 devices</span>
+    <button id="calibrate" class="btn">Calibrate</button>
+    <button id="pause" class="btn">Pause</button>
+  </div>
+</header>
+
+<main>
+  <section class="map-wrap">
+    <canvas id="map"></canvas>
+    <div class="overlay top-left"></div>
+    <div class="overlay bottom-right" id="cursor-readout"></div>
+    <div id="tooltip" hidden></div>
+  </section>
+
+  <aside>
+    <section class="card" id="calib-card" hidden>
+      <h2>Calibration</h2>
+      <div class="cal-row"><span class="muted">Device</span> <span id="cal-ref">select in list</span></div>
+      <div class="cal-row"><span class="muted">Spot</span> <span id="cal-spot">click map</span>
+        <select id="cal-acc" class="cal-acc"><option value="0.5">exact</option><option value="2" selected>±2 ft</option><option value="5">±5 ft</option></select></div>
+      <div class="cal-row"><button id="cal-record" class="btn" disabled>Record</button> <span id="cal-progress" class="muted"></span></div>
+      <div id="cal-quality" class="cal-quality"></div>
+      <div id="cal-suggest" class="cal-suggest"></div>
+      <div id="cal-live" class="cal-live"></div>
+      <div class="cal-sub">RSSI, 60 s</div>
+      <canvas id="cal-trace" height="90"></canvas>
+      <div id="cal-warn" class="cal-warn" hidden></div>
+      <details id="cal-points-box" class="cal-points-box" hidden><summary id="cal-points-sum">Spots</summary><table id="cal-points"></table></details>
+      <div class="cal-sub">RSSI vs distance</div>
+      <canvas id="cal-scatter" height="130"></canvas>
+      <div id="cal-fit" class="cal-fit muted"></div>
+      <details id="cal-cands-box" class="cands" hidden><summary id="cal-cands-sum">Candidates</summary><table id="cal-cands"></table></details>
+      <div class="row">
+        <button id="cal-clear" class="btn small">Delete spots</button>
+      </div>
+      <details id="cal-deleted-box" class="cal-deleted" hidden><summary id="cal-deleted-sum">Deleted</summary><div id="cal-deleted"></div></details>
+    </section>
+    <section class="card" id="selected-card" hidden>
+      <div id="selected">
+        <div class="sel-head">
+          <span class="type-dot" id="sel-dot"></span>
+          <div>
+            <div class="sel-name" id="sel-name"></div>
+            <div class="mono muted" id="sel-id"></div>
+          </div>
+        </div>
+        <div class="kv">
+          <div><span>Position</span><b id="sel-pos">—</b></div>
+          <div><span>Nodes</span><b id="sel-nodes">—</b></div>
+          <div><span>Residual</span><b id="sel-res">—</b></div>
+          <div id="sel-truth-box" hidden><span>Error</span><b id="sel-truth">—</b></div>
+          <div id="sel-step-box"><span>Jitter</span><b id="sel-step">—</b></div>
+        </div>
+        <div id="sel-bars" class="bars"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Model</h2>
+      <table id="model-card" class="model-card"></table>
+      <div class="row">
+        <label class="toggle"><input type="checkbox" id="rings" checked><span>Rings</span></label>
+        <label class="toggle"><input type="checkbox" id="trail" checked><span>Trail</span></label>
+        <label class="toggle"><input type="checkbox" id="labels"><span>Labels</span></label>
+      </div>
+    </section>
+
+    <section class="card grow">
+      <div class="list-head">
+        <h2>Devices</h2>
+        <input id="search" type="search" placeholder="Filter">
+      </div>
+      <div class="chips" id="type-chips"></div>
+      <ul id="device-list"></ul>
+    </section>
+  </aside>
+</main>
+<script src="app.js"></script>
+<script src="calib.js"></script>
+<script src="walls.js"></script>
+</body>
+</html>

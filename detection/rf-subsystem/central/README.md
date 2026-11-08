@@ -6,6 +6,7 @@ The Docker Compose stack for the WBT central service (see [`../DESIGN.md`](../DE
 |---|---|---|
 | `kismet-server` | Kismet `2026-10-R1` (server and log tools only). Receives remote captures from WBT nodes and provides the REST API. | 2501 (web UI, REST, WebSocket remote capture), 3501 (legacy TCP remote capture) |
 | `mqtt` | Mosquitto 2.0.22. A development stand-in for the fusion broker. | 1883 |
+| `rf-dfviz` | **Opt-in (profile `dfviz`).** Live RSSI direction finding with live calibration: `http://<BIND_ADDR>:8080`. Calibration is saved in the `rf-dfviz-data` volume. See [`../dfviz/README.md`](../dfviz/README.md). | 8080 |
 | `rf-analytics` | **Opt-in (profile `analytics`).** Runs `rfanalytics live`: polls `kismet-server`, runs alert rules, publishes alerts, camera cues and node status to `mqtt`. Image built from [`../analytics`](../analytics). | none |
 
 The analytics database is not part of the stack yet.
