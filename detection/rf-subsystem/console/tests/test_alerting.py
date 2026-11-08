@@ -50,12 +50,31 @@ def test_friendly_and_node_radios_are_never_alerted_priority_always():
     assert eng.evaluate("s", 5, devs, ps, marks, [ROOM], {}, {"radio"}) == []      # still heard: no repeat
 
 
-def test_node_offline_and_back():
+def test_node_offline_only():
     eng = AlertEngine()
     st = lambda s: {"wbt-1": {"state": s, "sources": {"wifi": "ok" if s == "online" else "stopped"}}}
     assert eng.evaluate("s", 0, {}, {}, {}, [], st("online"), set()) == []
     assert [a["rule_id"] for a in eng.evaluate("s", 1, {}, {}, {}, [], st("offline"), set())] == ["node_offline"]
-    assert [a["rule_id"] for a in eng.evaluate("s", 2, {}, {}, {}, [], st("online"), set())] == ["node_online"]
+    assert eng.evaluate("s", 2, {}, {}, {}, [], st("online"), set()) == []          # no "back online" alert
+    assert eng.evaluate("s", 3, {}, {}, {}, [], st("degraded"), set()) == []        # degraded is not offline
+
+
+def test_device_linger_alarm():
+    eng = AlertEngine()
+    devs = {"d1": DEV}
+    marks = {"d1": {"kind": None, "linger_s": 300}}
+    run = lambda t, m=marks: [(a["rule_id"], a["severity"], a["context"].get("dwell_s")) for a in eng.evaluate("s", t, devs, {}, m, [], {}, set())]
+    assert run(0) == [] and run(200) == []
+    assert run(301) == [("linger", "medium", 301)]
+    assert run(400) == []                                          # once per visit
+    assert run(400 + VISIT_GAP_S + 1) == [] and run(400 + VISIT_GAP_S + 302) == [("linger", "medium", 301)]   # new visit
+    eng2 = AlertEngine()
+    prio = {"d1": {"kind": "priority", "linger_s": 60}}
+    out = [(a["rule_id"], a["severity"]) for t in (0, 61) for a in eng2.evaluate("s", t, devs, {}, prio, [], {}, set())]
+    assert out == [("priority_heard", "high"), ("linger", "high")]
+    eng3 = AlertEngine()                                           # an explicit linger alarm applies to a friendly device too
+    fr = {"d1": {"kind": "friendly", "linger_s": 60}}
+    assert [a["rule_id"] for t in (0, 61) for a in eng3.evaluate("s", t, devs, {"d1": pos(5, 5)}, fr, [ROOM], {}, set())] == ["linger"]
 
 
 def test_marks_team_and_site_scope(tmp_path):
@@ -69,6 +88,18 @@ def test_marks_team_and_site_scope(tmp_path):
         m.set("s1", None, {"device": "x", "kind": "enemy"}, None)
     m.set("s1", tmp_path / "s1.json", {"device": "aa:bb:cc:00:00:02", "remove": True}, None)
     assert "aa:bb:cc:00:00:02" not in m.merged("s1", tmp_path / "s1.json")
+    # a linger alarm alone, then with a mark, then the mark cleared (the alarm stays), then the alarm cleared
+    p = tmp_path / "s1.json"
+    m.set("s1", p, {"device": "cc:00:00:00:00:03", "linger_s": 900}, None)
+    assert m.merged("s1", p)["cc:00:00:00:00:03"]["linger_s"] == 900 and m.merged("s1", p)["cc:00:00:00:00:03"]["kind"] is None
+    m.set("s1", p, {"device": "cc:00:00:00:00:03", "kind": "priority"}, None)
+    assert m.merged("s1", p)["cc:00:00:00:00:03"]["kind"] == "priority" and m.merged("s1", p)["cc:00:00:00:00:03"]["linger_s"] == 900
+    m.set("s1", p, {"device": "cc:00:00:00:00:03", "kind": None}, None)
+    assert m.merged("s1", p)["cc:00:00:00:00:03"]["kind"] is None
+    m.set("s1", p, {"device": "cc:00:00:00:00:03", "linger_s": None}, None)
+    assert "cc:00:00:00:00:03" not in m.merged("s1", p)
+    with pytest.raises(ValueError):
+        m.set("s1", p, {"device": "cc:00:00:00:00:03", "linger_s": 5}, None)
 
 
 def test_areas_validation(tmp_path):

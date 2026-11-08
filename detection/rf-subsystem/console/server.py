@@ -132,7 +132,6 @@ from publish import Publisher, node_states  # noqa: E402
 from alerting import AlertEngine, AlertLog, Areas, Marks  # noqa: E402
 from calfit import Calibrator, fit_signature, fit_to_save  # noqa: E402
 from baseline import Baseline  # noqa: E402
-from alerting import arrivals  # noqa: E402
 import cotravel  # noqa: E402
 from nodehealth import NodeHealth  # noqa: E402
 from sites import SiteManager  # noqa: E402
@@ -881,7 +880,6 @@ class App:
         self._fit_sigs: dict[tuple[str, str], str] = {}     # (site, band) -> inputs last evaluated
         self._baselines: dict[str, Baseline] = {}
         self._cot: dict[str, dict[str, Any]] = {}            # site -> co-traveler analysis
-        self._cot_last: dict[str, float] = {}                # arrived_with dedup
         self._cot_at = 0.0
         self._links: dict[str, dict[str, Any]] = {}     # site id -> node links doc
         self.positions: dict[str, dict[str, Any]] = {}
@@ -983,12 +981,9 @@ class App:
         radios = set(layout.get("self_emitters", {}).values())
         key, mpath = self.site_file("marks.json")
         marks = self.marks.merged(key, mpath)
-        events = self.baseline().observe(devices, now)
+        self.baseline().observe(devices, now)          # history for vehicles and co-travelers (no alerts)
         alerts = self.engine.evaluate(key, now, by_id, positions, marks, self.areas.get(*self.site_file("areas.json")),
-                                      node_states(report, health), radios, events)
-        b = self.baseline()
-        alerts += arrivals(now, events, by_id, marks, radios, self._cot.get(key, {}),
-                           {k: v[0] for k, v in b.open.items()}, self._cot_last)
+                                      node_states(report, health), radios)
         alerts = [self._alert_record(a, by_id, positions, marks, site) for a in alerts]
         if alerts:
             self.alert_log.add(key, self.history_dir(), alerts)

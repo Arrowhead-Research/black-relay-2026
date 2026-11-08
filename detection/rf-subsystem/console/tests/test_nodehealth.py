@@ -56,7 +56,7 @@ def test_restart_queue():
     assert h.heartbeat(beat(), now=60) == {"restart": []}
 
 
-def test_node_status_carries_health_and_alerts_on_new_problems():
+def test_node_status_carries_health_without_alerts():
     h = NodeHealth()
     h.heartbeat(beat(), now=0)
     sources = [{"name": "wbt-1:wifi", "status": "ok"}, {"name": "wbt-1:bt", "status": "ok"}]
@@ -67,8 +67,7 @@ def test_node_status_carries_health_and_alerts_on_new_problems():
     h.heartbeat(beat(throttled=0x1), now=10)
     st = node_states(sources, h.report(15))
     assert st["wbt-1"]["state"] == "degraded"
-    out = eng.evaluate("s", 15, {}, {}, {}, [], st, set())
-    assert [(a["rule_id"], a["context"]["problems"]) for a in out] == [("node_health", ["undervoltage"])]
+    assert eng.evaluate("s", 15, {}, {}, {}, [], st, set()) == []      # health problems: node status only, no alert
     durable = FakeDurable()
     Publisher(FakeLive(), durable).nodes(sources, {"id": "s", "name": "S"}, 15, h.report(15))
     NODE_STATUS.validate(durable.sent[0][1])

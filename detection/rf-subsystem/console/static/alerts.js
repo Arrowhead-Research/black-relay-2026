@@ -17,19 +17,15 @@ const AL = {
   hideFriendly: store.get("hideFriendly", false),
   markScope: store.get("markScope", "site"),
   seen: null,              // alert ids already shown (new ones flash the pill)
+  acking: new Set(),       // alert ids acknowledged here, hidden before the server confirms
 };
 const markOf = (id) => (S.data && S.data.marks && S.data.marks[id]) || null;
 const isFriendly = (id) => !!S.selfRadio[id] || (markOf(id) || {}).kind === "friendly";
 const RULE_TEXT = {
   area_entry: (a) => `entered ${a.area ? a.area.name : "an area"}`,
-  linger: (a) => `in ${a.area ? a.area.name : "an area"} for ${Math.round(((a.context || {}).dwell_s || 0) / 60)} min`,
+  linger: (a) => `${a.area ? `in ${a.area.name}` : "here"} for ${Math.round(((a.context || {}).dwell_s || 0) / 60)} min`,
   priority_heard: () => "priority device heard",
-  new_device: () => "new at this site",
-  repeat_visitor: (a) => `back (visit ${(a.context || {}).visits})`,
-  arrived_with: (a) => `arrived with ${((a.context || {}).with || []).length} known co-traveler(s)`,
   node_offline: (a) => `${(a.context || {}).node_id} offline`,
-  node_online: (a) => `${(a.context || {}).node_id} back online`,
-  node_health: (a) => `${(a.context || {}).node_id}: ${((a.context || {}).problems || []).join(", ")}`,
 };
 
 async function alertsApi(path, body) {
@@ -49,18 +45,19 @@ function renderAlerts() {
   const v = S.data && S.data.alerts;
   if (!v) return;
   const pill = $("alert-pill");
-  pill.hidden = !v.unacked;
-  pill.textContent = `${v.unacked} alert${v.unacked === 1 ? "" : "s"}`;
   const ids = new Set(v.recent.map((a) => a.id));
   if (AL.seen && v.recent.some((a) => !AL.seen.has(a.id) && !a.acked)) {
     pill.classList.remove("flash"); void pill.offsetWidth; pill.classList.add("flash");
   }
   AL.seen = ids;
-  $("alerts-card").hidden = !v.recent.length;
-  const key = JSON.stringify(v.recent.slice(0, 40).map((a) => [a.id, a.acked, alertWho(a)]));
+  const open = v.recent.filter((a) => !a.acked && !AL.acking.has(a.id));   // acknowledged alerts leave the list
+  $("alerts-card").hidden = !open.length;
+  pill.hidden = !open.length;
+  pill.textContent = `${open.length} alert${open.length === 1 ? "" : "s"}`;
+  const key = JSON.stringify(open.slice(0, 40).map((a) => [a.id, alertWho(a)]));
   if (key === AL.listKey) return;      // unchanged: keep the rows (re-rendering would eat clicks)
   AL.listKey = key;
-  $("alert-list").innerHTML = v.recent.slice(0, 40).map((a) => {
+  $("alert-list").innerHTML = open.slice(0, 40).map((a) => {
     const t = new Date(a.t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     const what = (RULE_TEXT[a.rule_id] || (() => a.rule_id))(a);
     const who = alertWho(a);
@@ -73,7 +70,13 @@ function renderAlerts() {
 }
 
 $("alerts-ack").onclick = async () => {
-  try { const out = await alertsApi("api/alerts/ack", {}); if (S.data) S.data.alerts = out.alerts; renderAlerts(); } catch { /* next poll */ }
+  // hide them at once; a poll answered before the server recorded the ack must not bring them back
+  const ids = ((S.data && S.data.alerts && S.data.alerts.recent) || []).filter((a) => !a.acked).map((a) => a.id);
+  ids.forEach((i) => AL.acking.add(i));
+  renderAlerts();
+  try { const out = await alertsApi("api/alerts/ack", { ids }); if (S.data) S.data.alerts = out.alerts; }
+  catch { ids.forEach((i) => AL.acking.delete(i)); }
+  renderAlerts();
 };
 $("alert-pill").onclick = () => $("alerts-card").scrollIntoView({ behavior: "smooth" });
 
@@ -86,16 +89,28 @@ function renderMarkButtons(dev) {
   if (key === AL.markKey && box.innerHTML) return;   // unchanged: keep the buttons (re-rendering would eat clicks)
   AL.markKey = key;
   const btn = (kind, label) => `<button class="btn small ${m && m.kind === kind ? "active" : ""}" data-mark="${kind}">${label}</button>`;
+  const lingerOpts = [[0, "no linger alarm"], [300, "linger 5 min"], [900, "linger 15 min"], [1800, "linger 30 min"], [3600, "linger 1 h"]];
+  if (m && m.linger_s && !lingerOpts.some(([v]) => v === m.linger_s)) lingerOpts.push([m.linger_s, `linger ${Math.round(m.linger_s / 60)} min`]);
   box.innerHTML = btn("friendly", "Friendly") + btn("priority", "Priority") +
+    `<select id="mark-linger" title="Alert when this device stays this long">${lingerOpts.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>` +
     `<select id="mark-scope" title="Team marks apply at every site"><option value="site">this site</option><option value="team">team</option></select>` +
-    (m ? `<button class="btn small" data-mark="">Clear</button><span class="muted">${escapeHtml(m.label || "")}${m.scope === "team" ? " · team" : ""}</span>` : "");
+    (m ? `<button class="btn small" data-mark="">Clear</button>` : "");
   $("mark-scope").value = m ? m.scope : AL.markScope;
+  $("mark-linger").value = String((m && m.linger_s) || 0);
+  $("mark-linger").onchange = async () => {
+    const v = +$("mark-linger").value, scope = m ? m.scope : $("mark-scope").value;
+    try { const out = await alertsApi("api/marks", { device: dev.id, scope, linger_s: v || null }); S.data.marks = out.marks; refresh(); }
+    catch (err) { box.insertAdjacentHTML("beforeend", `<span class="warn">${escapeHtml(err.message)}</span>`); }
+  };
   $("mark-scope").onchange = () => { AL.markScope = $("mark-scope").value; store.set("markScope", AL.markScope); };
   box.querySelectorAll("[data-mark]").forEach((b) => {
     b.onclick = async () => {
       const kind = b.dataset.mark, scope = m && !kind ? m.scope : $("mark-scope").value;
       try {
-        const out = await alertsApi("api/marks", kind ? { device: dev.id, kind, scope } : { device: dev.id, scope, remove: true });
+        // a mark button toggles: clicking the active one clears the mark (a linger alarm stays)
+        const body = !kind ? { device: dev.id, scope, remove: true }
+          : { device: dev.id, scope, kind: m && m.kind === kind ? null : kind };
+        const out = await alertsApi("api/marks", body);
         S.data.marks = out.marks;
         refresh();
       } catch (err) { box.insertAdjacentHTML("beforeend", `<span class="warn">${escapeHtml(err.message)}</span>`); }

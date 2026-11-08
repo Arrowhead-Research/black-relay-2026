@@ -10,7 +10,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
-from alerting import AlertEngine  # noqa: E402
 from baseline import LEARN_S, VISIT_GAP_S, Baseline, hour_of_week  # noqa: E402
 
 
@@ -45,17 +44,6 @@ def test_cleared_history_starts_a_fresh_baseline(tmp_path):
     assert b.get("x") is None and b.summary()["devices"] == 0
 
 
-def test_new_device_and_repeat_visitor_rules():
-    eng = AlertEngine()
-    devs = {"a": d("a"), "r": d("r", randomized=True), "one": d("one", nodes=("wbt-1",)), "f": d("f")}
-    events = [{"kind": "new", "device": k, "visits": 1} for k in devs] + \
-             [{"kind": "visit", "device": "a", "visits": 2}, {"kind": "visit", "device": "f", "visits": 3}]
-    out = eng.evaluate("s", 0, devs, {}, {"f": {"kind": "friendly"}}, [], {}, set(), events)
-    assert [(x["rule_id"], x["device"]) for x in out] == [("new_device", "a")]     # randomized, 1-node, friendly: no
-    out = eng.evaluate("s", 1, devs, {}, {}, [], {}, set(), [{"kind": "visit", "device": "a", "visits": 3, "away_s": 900}])
-    assert [(x["rule_id"], x["context"]["visits"]) for x in out] == [("repeat_visitor", 3)]
-
-
 def test_replay_runs_the_pipeline_on_a_log(tmp_path):
     from replay import replay
     from server import CalibrationStore, load_layout
@@ -75,7 +63,7 @@ def test_replay_runs_the_pipeline_on_a_log(tmp_path):
     db.execute("create table devices (devmac text, phyname text, device blob)")
     names = list(nodes)
     db.executemany("insert into datasources values (?, ?)", [(f"U{i}", f"{n}:wifi") for i, n in enumerate(names)])
-    phone = "00:1a:11:00:00:77"   # globally unique (not randomized): new_device applies
+    phone = "00:1a:11:00:00:77"
     db.execute("insert into devices values (?, 'IEEE802.11', ?)", (phone, json.dumps(dev(phone, 1000, {}, kind="Wi-Fi Client"))))
     rows = []
     for t in range(1000, 1120):
@@ -86,5 +74,5 @@ def test_replay_runs_the_pipeline_on_a_log(tmp_path):
     db.close()
     res = replay(site_dir, tmp_path / "data", logs, 1010, 1110, template, learn_s=0)
     assert res["devices_placed"] == 1 and res["positions"] and res["polls"] == 34
-    assert res["alerts_by_rule"] == {"area_entry": 1, "new_device": 1, "linger": 1}
+    assert res["alerts_by_rule"] == {"area_entry": 1, "linger": 1}
     assert {p["id"] for p in res["positions"]} == {phone}

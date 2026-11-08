@@ -11,10 +11,9 @@ Reads site data only; writes only to --out.
         --start 2026-11-08T18:00:00Z --end 2026-11-08T20:00:00Z --out /data/replay
 
 Writes ``positions.jsonl`` (each placed device per poll, when its estimate
-had new readings), ``alerts.jsonl`` and ``summary.json``. The baseline starts
-empty at --start (its learning period is the first --learn-s of the window),
-so ``new_device`` means new within the replayed window. TPMS (not in the log)
-and node-offline alerts (need live capture-source state) are not replayed.
+had new readings), ``alerts.jsonl`` and ``summary.json``. TPMS (not in the
+log) and node-offline alerts (need live capture-source state) are not
+replayed.
 """
 
 from __future__ import annotations
@@ -144,8 +143,8 @@ def replay(site_dir: Path, data_dir: Path | None, logs: Path, start: float, end:
             if e["updated"]:
                 positions_out.append({"t": round(now, 1), "id": k, "band": by_id[k]["band"], **{q: p[q] for q in p if q != "updated"}})
                 placed.add(k)
-        events = base.observe(snap, now)
-        for a in engine.evaluate(site["id"], now, by_id, pos, marks, areas, {}, radios, events):
+        base.observe(snap, now)
+        for a in engine.evaluate(site["id"], now, by_id, pos, marks, areas, {}, radios):
             alerts_out.append({**a, "name": (by_id.get(a["device"]) or {}).get("name") if a["device"] else None})
         now += POLL_S
         polls += 1

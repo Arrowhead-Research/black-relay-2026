@@ -1,28 +1,25 @@
-"""Marks, alert areas and alerts for the WBT Console.
+"""Marks and alerts for the WBT Console.
 
 - **Marks** (``Marks``): a device is *friendly* (team phones, laptops,
-  vehicles; dimmed on the map, never alerted on) or *priority* (a device of
-  interest; alerted wherever it is heard). Team-scope marks live in
-  ``<data>/marks.json`` and follow the team to every site; site-scope marks
-  live in the site's ``marks.json`` and are wiped with it. A site mark
-  overrides a team mark. The nodes' own radios are always friendly.
-- **Areas** (``Areas``): polygons on the site's floor plan (feet), e.g. an
-  inner perimeter or the parking area, each with a linger time.
-- **Rules** (``AlertEngine``), evaluated on every poll from server positions:
+  vehicles; dimmed on the map) or *priority* (a device of interest), and/or
+  has a linger alarm (``linger_s``). Team-scope
+  marks live in ``<data>/marks.json`` and follow the team to every site;
+  site-scope marks live in the site's ``marks.json`` and are wiped with it. A
+  site mark overrides a team mark. The nodes' own radios are always friendly.
+- **Areas** (``Areas``): polygons on the site's floor plan (feet), each with a
+  linger time.
+- **Rules** (``AlertEngine``), evaluated on every poll:
 
   | rule | fires when | severity |
   |---|---|---|
-  | ``priority_heard`` | a priority device is heard (again after VISIT_GAP_S) | high |
-  | ``area_entry`` | a non-friendly device placed by 3+ nodes enters an area (once per visit) | medium (high if priority) |
-  | ``linger`` | it stays in the area longer than the area's linger time | medium (high if priority) |
-  | ``node_offline`` / ``node_online`` | a node's capture stops / comes back | high / info |
-  | ``node_health`` | the node agent reports a new problem (hot, undervoltage, unit down, adapter missing...) | medium |
-  | ``new_device`` | a stable address (not randomized) first seen at this site after its learning period (baseline.py), heard by 2+ nodes | low |
-  | ``repeat_visitor`` | a stable address starts its 3rd (or later) visit to this site | low |
-  | ``arrived_with`` | a device (or vehicle) arrives with its known co-travelers (cotravel.py) | low (high if priority) |
+  | ``priority_heard`` | a priority-marked device is heard (again after VISIT_GAP_S unheard) | high |
+  | ``area_entry`` | a non-friendly device placed by 3+ nodes enters an alert area (once per visit) | medium (high if priority) |
+  | ``linger`` | it stays in the area longer than the area's linger time; or a device with its own linger alarm (``linger_s`` on its mark) is heard that long; once per visit | medium (high if priority) |
+  | ``node_offline`` | a node's capture stops (all its sources down, or its agent silent with no sources) | high |
 
-  A visit ends after VISIT_GAP_S without the device in the area, so position
+  A visit ends after VISIT_GAP_S away (from the area, or unheard), so position
   jitter at an area's edge does not repeat alerts.
+
 - **Alerts** (``AlertLog``) are kept per site in ``history/<date>-alerts.jsonl``
   (purged with the site's history), shown in the page, acknowledged by
   operators, and published as rf.alert.v0 (``publish.py``).
@@ -41,13 +38,11 @@ from typing import Any
 
 MARK_KINDS = ("friendly", "priority")
 MARK_SCOPES = ("team", "site")
+VISIT_GAP_S = 600.0        # a priority device unheard this long alerts again when it reappears
 MAX_AREAS = 50
 MAX_AREA_POINTS = 64
 DEFAULT_LINGER_S = 300.0
-VISIT_GAP_S = 600.0        # a device away (from the area, or unheard) this long starts a new visit
 AREA_MIN_NODES = 3         # two nodes fix a curve, not a point: no area alerts from them
-REPEAT_VISITS = 3          # repeat_visitor from this visit on
-TPMS_GROUP_S = 30.0        # new TPMS sensors of one model within this time are one car
 RECENT_ALERTS = 300
 
 
@@ -105,11 +100,23 @@ class Marks:
             if body.get("remove"):
                 store.pop(device, None)
             else:
-                kind = body.get("kind")
-                if kind not in MARK_KINDS:
-                    raise ValueError(f"kind must be one of {MARK_KINDS}")
-                label = str(body.get("label") or "").strip()[:60] or None
-                store[device] = {"kind": kind, "label": label, "t": round(time.time(), 1), "user": user}
+                entry = dict(store.get(device) or {})
+                if "kind" in body:          # friendly | priority | null (clear the mark, keep a linger alarm)
+                    if body["kind"] is not None and body["kind"] not in MARK_KINDS:
+                        raise ValueError(f"kind must be one of {MARK_KINDS} or null")
+                    entry["kind"] = body["kind"]
+                if "linger_s" in body:      # seconds, or null for no linger alarm
+                    v = body["linger_s"]
+                    if v is not None and not (isinstance(v, (int, float)) and not isinstance(v, bool) and 60 <= v <= 86400):
+                        raise ValueError("linger_s must be 60-86400 seconds or null")
+                    entry["linger_s"] = None if v is None else float(v)
+                if "label" in body:
+                    entry["label"] = str(body.get("label") or "").strip()[:60] or None
+                if not entry.get("kind") and not entry.get("linger_s"):
+                    store.pop(device, None)
+                else:
+                    store[device] = {"kind": entry.get("kind"), "linger_s": entry.get("linger_s"), "label": entry.get("label"),
+                                     "t": round(time.time(), 1), "user": user}
             _write_json(spath, store, {"op": "mark", "device": device, "before": before, "after": store.get(device), "user": user})
         return self.merged(key, path)
 
@@ -171,113 +178,71 @@ class Areas:
 
 
 class AlertEngine:
-    """Rules over server positions; keeps visit state per site."""
+    """Priority device appears; area entry and linger; a device's own linger alarm; node offline."""
 
     def __init__(self) -> None:
         self.site: str | None = None
-        self.visits: dict[tuple[str, str], dict[str, float]] = {}   # (device, area id) -> since, last, flags
-        self.heard: dict[str, float] = {}                            # priority device -> last heard
-        self.nodes: dict[str, str] = {}
-        self.new_tpms: dict[str, float] = {}                         # TPMS model -> last new_device alert
-        self.node_problems: dict[str, set[str]] = {}
+        self.heard: dict[str, float] = {}      # priority device -> last heard
+        self.visits: dict[str, list[float]] = {}   # device with a linger alarm -> [visit start, last heard, alerted]
+        self.area_visits: dict[tuple[str, str], list[float]] = {}   # (device, area) -> [since, last, lingered]
+        self.nodes: dict[str, str] = {}        # node -> last state
+
     def evaluate(self, site: str, now: float, devices: dict[str, dict[str, Any]], positions: dict[str, dict[str, Any]],
                  marks: dict[str, dict[str, Any]], areas: list[dict[str, Any]], node_states: dict[str, dict[str, Any]],
-                 friendly_ids: set[str], events: list[dict[str, Any]] = ()) -> list[dict[str, Any]]:
+                 friendly_ids: set[str]) -> list[dict[str, Any]]:
         if site != self.site:              # another site: nothing carries over
-            self.site, self.visits, self.heard, self.nodes = site, {}, {}, {}
+            self.site, self.heard, self.visits, self.area_visits, self.nodes = site, {}, {}, {}, {}
         out: list[dict[str, Any]] = []
 
-        def alert(rule: str, severity: str, dev_id: str | None, context: dict[str, Any], area: dict[str, Any] | None = None):
+        def alert(rule: str, dev_id: str | None, context: dict[str, Any], severity: str = "high",
+                  area: dict[str, Any] | None = None) -> None:
             out.append({"rule_id": rule, "rule_type": rule, "severity": severity, "device": dev_id,
                         "area": area and {"id": area["id"], "name": area["name"]}, "context": context, "t": now})
 
         for dev_id, dev in devices.items():
-            mark = (marks.get(dev_id) or {}).get("kind")
-            if dev_id in friendly_ids or mark == "friendly":
+            mark = marks.get(dev_id) or {}
+            if dev_id in friendly_ids:         # the nodes' own radios
                 continue
-            if mark == "priority":
+            friendly = mark.get("kind") == "friendly"     # silences area alerts; an explicit linger alarm still applies
+            sev = "high" if mark.get("kind") == "priority" else "medium"
+            p = positions.get(dev_id)
+            if p and p["nodes"] >= AREA_MIN_NODES and not friendly:
+                for area in areas:
+                    if not point_in_polygon(p["x"], p["y"], area["points"]):
+                        continue
+                    key = (dev_id, area["id"])
+                    v = self.area_visits.get(key)
+                    if v is None or now - v[1] > VISIT_GAP_S:
+                        v = self.area_visits[key] = [now, now, 0.0]
+                        alert("area_entry", dev_id, {}, sev, area)
+                    v[1] = now
+                    if not v[2] and now - v[0] >= area["linger_s"]:
+                        v[2] = 1.0
+                        alert("linger", dev_id, {"dwell_s": round(now - v[0])}, sev, area)
+            if mark.get("kind") == "priority":
                 last = self.heard.get(dev_id)
                 if last is None or now - last > VISIT_GAP_S:
-                    alert("priority_heard", "high", dev_id, {"nodes": sorted(dev["nodes"])})
+                    alert("priority_heard", dev_id, {"nodes": sorted(dev["nodes"])})
                 self.heard[dev_id] = now
-            p = positions.get(dev_id)
-            if not p or p["nodes"] < AREA_MIN_NODES:
-                continue
-            for area in areas:
-                if not point_in_polygon(p["x"], p["y"], area["points"]):
-                    continue
-                key = (dev_id, area["id"])
-                v = self.visits.get(key)
-                sev = "high" if mark == "priority" else "medium"
-                if v is None or now - v["last"] > VISIT_GAP_S:
-                    v = self.visits[key] = {"since": now, "last": now, "lingered": 0.0}
-                    alert("area_entry", sev, dev_id, {}, area)
-                v["last"] = now
-                if not v["lingered"] and now - v["since"] >= area["linger_s"]:
-                    v["lingered"] = 1.0
-                    alert("linger", sev, dev_id, {"dwell_s": round(now - v["since"])}, area)
-        for key in [k for k, v in self.visits.items() if now - v["last"] > VISIT_GAP_S]:
-            del self.visits[key]
-
-        for ev in events:                  # baseline: new at this site, or back again
-            dev = devices.get(ev["device"])
-            if not dev or dev.get("randomized") or ev["device"] in friendly_ids \
-                    or (marks.get(ev["device"]) or {}).get("kind") == "friendly":
-                continue
-            if ev["kind"] == "new" and dev.get("type") == "tpms":
-                # a new car's 4 sensors arrive together: one alert per car (same model within TPMS_GROUP_S)
-                model = dev.get("name") or "tpms"
-                prev = next((x for x in out if x["rule_id"] == "new_device" and x["context"].get("model") == model), None)
-                if prev is not None:
-                    prev["context"]["sensors"].append(ev["device"])
-                elif now - self.new_tpms.get(model, -1e18) > TPMS_GROUP_S:
-                    alert("new_device", "low", ev["device"], {"model": model, "sensors": [ev["device"]]})
-                self.new_tpms[model] = now
-            elif ev["kind"] == "new" and len(dev["nodes"]) >= 2:
-                alert("new_device", "low", ev["device"], {"nodes": sorted(dev["nodes"])})
-            elif ev["kind"] == "visit" and ev["visits"] >= REPEAT_VISITS:
-                alert("repeat_visitor", "low", ev["device"], {"visits": ev["visits"], "away_s": ev.get("away_s")})
+            if mark.get("linger_s"):
+                v = self.visits.get(dev_id)
+                if v is None or now - v[1] > VISIT_GAP_S:
+                    v = self.visits[dev_id] = [now, now, 0.0]
+                v[1] = now
+                if not v[2] and now - v[0] >= mark["linger_s"]:
+                    v[2] = 1.0
+                    alert("linger", dev_id, {"dwell_s": round(now - v[0]), "linger_s": mark["linger_s"]}, sev)
+        for dev_id in [k for k, v in self.visits.items() if now - v[1] > VISIT_GAP_S]:
+            del self.visits[dev_id]
+        for key in [k for k, v in self.area_visits.items() if now - v[1] > VISIT_GAP_S]:
+            del self.area_visits[key]
 
         for node, st in node_states.items():
             prev = self.nodes.get(node)
             if st["state"] == "offline" and prev not in (None, "offline"):
-                alert("node_offline", "high", None, {"node_id": node, "sources": st["sources"]})
-            elif st["state"] != "offline" and prev == "offline":
-                alert("node_online", "info", None, {"node_id": node, "sources": st["sources"]})
+                alert("node_offline", None, {"node_id": node, "sources": st["sources"]})
             self.nodes[node] = st["state"]
-            probs = set((st.get("health") or {}).get("problems") or [])
-            new = sorted(probs - self.node_problems.get(node, set()))
-            if new and node in self.node_problems:        # not on the first report after a start
-                alert("node_health", "medium", None, {"node_id": node, "problems": new})
-            self.node_problems[node] = probs
         return out
-
-
-def arrivals(now: float, events: list[dict[str, Any]], devices: dict[str, dict[str, Any]], marks: dict[str, dict[str, Any]],
-             friendly_ids: set[str], cot: dict[str, Any], open_starts: dict[str, float], last: dict[str, float],
-             window: float = 120.0) -> list[dict[str, Any]]:
-    """``arrived_with``: a visit starts and a known co-traveler's visit started within ``window``.
-    ``cot``: {"entity_of": device -> vehicle id, "partners": entity -> set, "members": entity -> devices};
-    ``last``: group -> last alert time (deduplication, kept by the caller)."""
-    out = []
-    ent_of, partners, members = cot.get("entity_of", {}), cot.get("partners", {}), cot.get("members", {})
-    for ev in events:
-        dev_id = ev["device"]
-        ent = ent_of.get(dev_id, dev_id)
-        mine = partners.get(ent)
-        if not mine or dev_id in friendly_ids or (marks.get(dev_id) or {}).get("kind") == "friendly":
-            continue
-        with_ = sorted(p for p in mine if any(abs(open_starts.get(m, -1e18) - now) <= window for m in members.get(p, {p})))
-        if not with_:
-            continue
-        group = "|".join(sorted([ent, *with_]))
-        if now - last.get(group, -1e18) <= VISIT_GAP_S:
-            continue
-        last[group] = now
-        prio = any((marks.get(m) or {}).get("kind") == "priority" for e in [ent, *with_] for m in members.get(e, {e}))
-        out.append({"rule_id": "arrived_with", "rule_type": "arrived_with", "severity": "high" if prio else "low",
-                    "device": dev_id, "area": None, "context": {"entity": ent, "with": with_}, "t": now})
-    return out
 
 
 class AlertLog:

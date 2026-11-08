@@ -1,5 +1,4 @@
-"""Vehicles and co-travelers (cotravel.py), the arrived_with rule, and the
-simulator measurements (cotravel_eval.py) as regression thresholds."""
+"""Vehicles and co-travelers (cotravel.py) and the simulator measurements (cotravel_eval.py) as regression thresholds."""
 
 from __future__ import annotations
 
@@ -11,7 +10,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from alerting import AlertEngine, arrivals  # noqa: E402
 from cotravel import analyze, poisson_sf, vehicles  # noqa: E402
 
 DAY = 86400.0
@@ -54,27 +52,6 @@ def test_two_cars_of_the_same_make_together_are_split():
     visits += [(k, 5000 + i, 5010) for i, k in enumerate(a)]                         # car a alone later
     groups = [v["sensors"] for v in vehicles(visits, {**a, **b})]
     assert sorted(a) in groups and all(len(g) <= 5 for g in groups)
-
-
-def test_arrived_with_rule():
-    cot = {"entity_of": {t: "vehicle:1" for t in TPMS}, "members": {"vehicle:1": set(TPMS)},
-           "partners": {"vehicle:1": {"00:11:22:00:00:01"}, "00:11:22:00:00:01": {"vehicle:1"}}}
-    devs = {"00:11:22:00:00:01": {}, "tpms:00000001": {}}
-    ev = [{"kind": "visit", "device": "00:11:22:00:00:01", "visits": 4}]
-    last: dict = {}
-    out = arrivals(1000, ev, devs, {}, set(), cot, {"tpms:00000002": 950}, last)
-    assert [(a["rule_id"], a["context"]["with"], a["severity"]) for a in out] == [("arrived_with", ["vehicle:1"], "low")]
-    assert arrivals(1010, ev, devs, {}, set(), cot, {"tpms:00000002": 950}, last) == []        # once per arrival
-    assert arrivals(5000, ev, devs, {}, set(), cot, {"tpms:00000002": 950}, {}) == []          # partner not arriving now
-    prio = arrivals(1000, ev, devs, {"tpms:00000003": {"kind": "priority"}}, set(), cot, {"tpms:00000002": 990}, {})
-    assert prio[0]["severity"] == "high"
-
-
-def test_new_car_is_one_alert():
-    eng = AlertEngine()
-    devs = {t: {"type": "tpms", "name": "Schrader", "nodes": {"wbt-1": {}}} for t in TPMS}
-    out = eng.evaluate("s", 0, devs, {}, {}, [], {}, set(), [{"kind": "new", "device": t, "visits": 1} for t in TPMS])
-    assert len(out) == 1 and sorted(out[0]["context"]["sensors"]) == sorted(TPMS)
 
 
 @pytest.mark.parametrize("scenario,expect", [
