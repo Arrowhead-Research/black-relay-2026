@@ -24,6 +24,9 @@ const RULE_TEXT = {
   area_entry: (a) => `entered ${a.area ? a.area.name : "an area"}`,
   linger: (a) => `in ${a.area ? a.area.name : "an area"} for ${Math.round(((a.context || {}).dwell_s || 0) / 60)} min`,
   priority_heard: () => "priority device heard",
+  new_device: () => "new at this site",
+  repeat_visitor: (a) => `back (visit ${(a.context || {}).visits})`,
+  arrived_with: (a) => `arrived with ${((a.context || {}).with || []).length} known co-traveler(s)`,
   node_offline: (a) => `${(a.context || {}).node_id} offline`,
   node_online: (a) => `${(a.context || {}).node_id} back online`,
 };
@@ -196,12 +199,15 @@ function renderDeviceHistory(dev) {
   if (AL.hist.id !== dev.id || Date.now() - AL.hist.at > 30000) {
     AL.hist = { id: dev.id, at: Date.now(), data: AL.hist.id === dev.id ? AL.hist.data : null };
     fetch(`api/device?id=${encodeURIComponent(dev.id)}`, { cache: "no-store" }).then((r) => r.json()).then((d) => {
-      if (AL.hist.id === dev.id) { AL.hist.data = d.baseline; renderDeviceHistory(dev); }
+      if (AL.hist.id === dev.id) { AL.hist.data = d.baseline; AL.hist.vehicle = d.vehicle; AL.hist.travels = d.travels_with; renderDeviceHistory(dev); }
     }).catch(() => {});
   }
   const b = AL.hist.data;
   box.hidden = !b;
   if (!b) return;
-  const hours = usualHours(b.presence);
-  $("sel-seen").textContent = `first seen ${ago(b.first_seen)} · visit ${b.visits}${b.background ? " · background" : ""}${hours ? ` · usually ${hours}` : ""}`;
+  const hours = usualHours(b.presence), h = AL.hist;
+  const veh = h.vehicle ? ` · part of a vehicle (${h.vehicle.sensors.length} TPMS)` : "";
+  const tw = (h.travels || []).map((t) => `${t.label}${t.together ? ` ×${t.together}` : ""}`).join(", ");
+  $("sel-seen").textContent = `first seen ${ago(b.first_seen)} · visit ${b.visits}${b.background ? " · background" : ""}` +
+    `${hours ? ` · usually ${hours}` : ""}${veh}${tw ? ` · travels with ${tw}` : ""}`;
 }

@@ -9,7 +9,7 @@ COPY analytics/pyproject.toml analytics/README.md /src/analytics/
 COPY analytics/src /src/analytics/src
 RUN pip install --no-cache-dir "/src/analytics[console,mqtt]" && rm -rf /src
 
-COPY console/server.py console/sites.py console/auth.py console/demo.py console/locate.py console/publish.py console/alerting.py console/calfit.py console/baseline.py console/replay.py console/layout.example.yaml ./
+COPY console/server.py console/sites.py console/auth.py console/demo.py console/locate.py console/publish.py console/alerting.py console/calfit.py console/baseline.py console/replay.py console/cotravel.py console/layout.example.yaml ./
 COPY console/static ./static
 
 EXPOSE 8080

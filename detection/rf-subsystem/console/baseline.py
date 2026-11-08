@@ -7,6 +7,7 @@ history, wiped with the site):
             last_seen, visits, heard_s)
     presence(id, how, n)    how = UTC hour of the week (0 = Monday 00:00);
                             n = visits that included that hour
+    visits(id, start, end)  every finished visit (co-travelers: cotravel.py)
     meta(key, value)        learning_until: devices first seen before this
                             are the site's background
 
@@ -43,6 +44,8 @@ class Baseline:
         self.presence: dict[tuple[str, int], int] = {}
         self.dirty_presence: set[tuple[str, int]] = set()
         self.last_hour: dict[str, int] = {}
+        self.open: dict[str, list[float]] = {}      # device -> [visit start, last heard]
+        self.closed: list[tuple[str, float, float]] = []
         self.last_flush = 0.0
         self.db: sqlite3.Connection | None = None
         self.learning_until: float | None = None
@@ -57,6 +60,8 @@ class Baseline:
                 randomized integer, first_seen real, last_seen real, visits integer, heard_s real);
             create table if not exists presence (id text, how integer, n integer, primary key (id, how));
             create table if not exists meta (key text primary key, value text);
+            create table if not exists visits (id text, start real, end real);
+            create index if not exists visits_start on visits (start);
         """)
         row = self.db.execute("select value from meta where key='learning_until'").fetchone()
         self.learning_until = float(row[0]) if row else None
@@ -69,7 +74,7 @@ class Baseline:
                 self.db.close()
             except Exception:  # noqa: BLE001
                 pass
-            self.dirty, self.dirty_presence, self.last_hour = set(), set(), {}
+            self.dirty, self.dirty_presence, self.last_hour, self.open, self.closed = set(), set(), {}, {}, []
             self._open()
 
     def _load(self, dev_id: str) -> dict[str, Any] | None:
@@ -103,17 +108,22 @@ class Baseline:
                     if now >= self.learning_until:
                         events.append({"kind": "new", "device": dev_id, "visits": 1})
                     self._mark_hour(dev_id, now, new_visit=True)
+                    self.open[dev_id] = [now, now]
                 else:
                     gap = now - rec["last_seen"]
                     if gap > VISIT_GAP_S:
                         rec["visits"] += 1
                         events.append({"kind": "visit", "device": dev_id, "visits": rec["visits"], "away_s": round(gap)})
                         self._mark_hour(dev_id, now, new_visit=True)
+                        if dev_id in self.open:
+                            self.closed.append((dev_id, *self.open[dev_id]))
+                        self.open[dev_id] = [now, now]
                     else:
                         rec["heard_s"] += min(max(gap, 0.0), MAX_STEP_S)
                         self._mark_hour(dev_id, now)
                     rec["last_seen"] = now
                     rec["name"] = d.get("name") or rec["name"]
+                    self.open.setdefault(dev_id, [now, now])[1] = now
                 self.dirty.add(dev_id)
             if now - self.last_flush >= FLUSH_S:
                 self._flush(now)
@@ -132,6 +142,11 @@ class Baseline:
         self.dirty_presence.add(key)
 
     def _flush(self, now: float) -> None:
+        for dev_id in [k for k, v in self.open.items() if now - v[1] > VISIT_GAP_S]:
+            self.closed.append((dev_id, *self.open.pop(dev_id)))
+        if self.closed:
+            self.db.executemany("insert into visits values (?,?,?)", self.closed)
+            self.closed = []
         recs = [self.cache[i] for i in self.dirty]
         self.db.executemany(
             "insert or replace into devices values (?,?,?,?,?,?,?,?,?,?)",
@@ -160,6 +175,21 @@ class Baseline:
             for how, n in self.db.execute("select how, n from presence where id=?", (dev_id,)):
                 pres.setdefault(how, n)
             return {**rec, "background": rec["first_seen"] < (self.learning_until or 0), "presence": dict(sorted(pres.items()))}
+
+    def visits(self, since: float = 0.0) -> tuple[list[tuple[str, float, float]], dict[str, dict[str, Any]]]:
+        """Finished and open visits since ``since``, and each device's type, band, name and randomized flag."""
+        with self.lock:
+            self._ensure()
+            self._flush(time.time())
+            rows = [tuple(r) for r in self.db.execute("select id, start, end from visits where end >= ? order by start", (since,))]
+            rows += [(k, v[0], v[1]) for k, v in self.open.items() if v[1] >= since]
+            ids = {r[0] for r in rows}
+            meta = {}
+            for i in ids:
+                rec = self._load(i)
+                if rec:
+                    meta[i] = {"type": rec["type"], "band": rec["band"], "name": rec["name"], "randomized": rec["randomized"]}
+            return rows, meta
 
     def summary(self) -> dict[str, Any]:
         with self.lock:

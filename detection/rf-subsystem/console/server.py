@@ -127,6 +127,8 @@ from publish import Publisher, node_states  # noqa: E402
 from alerting import AlertEngine, AlertLog, Areas, Marks  # noqa: E402
 from calfit import Calibrator, fit_signature, fit_to_save  # noqa: E402
 from baseline import Baseline  # noqa: E402
+from alerting import arrivals  # noqa: E402
+import cotravel  # noqa: E402
 from sites import SiteManager  # noqa: E402
 
 
@@ -789,6 +791,7 @@ HISTORY_MIN_S = 10         # stored positions: at most one per device this often
 HISTORY_MAX_S = 60         # and while a device stays within HISTORY_MOVE_FT only this often
 HISTORY_MOVE_FT = 3.0
 
+COTRAVEL_S = 300          # vehicles and co-travelers re-analyzed this often
 FIT_CHECK_S = 30           # how often the server checks whether a band's model must be re-selected
 LINK_REFRESH_S = 600       # node links (each node's own radio heard by the other nodes): re-read this often,
 LINK_WINDOW_S = 300        # as medians over this window,
@@ -868,6 +871,9 @@ class App:
         self.alert_log = AlertLog()
         self._fit_sigs: dict[tuple[str, str], str] = {}     # (site, band) -> inputs last evaluated
         self._baselines: dict[str, Baseline] = {}
+        self._cot: dict[str, dict[str, Any]] = {}            # site -> co-traveler analysis
+        self._cot_last: dict[str, float] = {}                # arrived_with dedup
+        self._cot_at = 0.0
         self._links: dict[str, dict[str, Any]] = {}     # site id -> node links doc
         self.positions: dict[str, dict[str, Any]] = {}
         self.geo: dict[str, Any] | None = None
@@ -970,6 +976,9 @@ class App:
         events = self.baseline().observe(devices, now)
         alerts = self.engine.evaluate(key, now, by_id, positions, marks, self.areas.get(*self.site_file("areas.json")),
                                       node_states(report), radios, events)
+        b = self.baseline()
+        alerts += arrivals(now, events, by_id, marks, radios, self._cot.get(key, {}),
+                           {k: v[0] for k, v in b.open.items()}, self._cot_last)
         alerts = [self._alert_record(a, by_id, positions, marks, site) for a in alerts]
         if alerts:
             self.alert_log.add(key, self.history_dir(), alerts)
@@ -1119,9 +1128,30 @@ class App:
             out[band] = "saved" if want else "removed"
         return out
 
+    def refresh_cotravel(self) -> dict[str, Any]:
+        """Vehicles and co-travelers from the active site's visits (within its retention)."""
+        key = self.site_paths()[0]
+        days = self.sites.active().doc.get("retention_days", 7) if self.sites else 7
+        visits, meta = self.baseline().visits(time.time() - days * 86400)
+        res = cotravel.analyze(visits, meta)
+        entity_of = {s: v["id"] for v in res["vehicles"] for s in v["sensors"]}
+        members = {v["id"]: set(v["sensors"]) for v in res["vehicles"]}
+        partners: dict[str, set[str]] = {}
+        for g in res["groups"]:
+            for e in g:
+                partners[e] = {x for x in g if x != e}
+        self._cot[key] = {**res, "entity_of": entity_of, "members": members, "partners": partners, "t": time.time()}
+        return self._cot[key]
+
     def run_fits(self) -> None:
         time.sleep(20)
         while True:
+            if time.time() - self._cot_at >= COTRAVEL_S:
+                self._cot_at = time.time()
+                try:
+                    self.refresh_cotravel()
+                except Exception as exc:  # noqa: BLE001
+                    print(f"console: co-traveler analysis failed: {exc}", file=sys.stderr)
             try:
                 done = {b: r for b, r in self.refresh_fits().items() if r != "unchanged"}
                 if done:
@@ -1129,6 +1159,27 @@ class App:
             except Exception as exc:  # noqa: BLE001 - keep selecting
                 print(f"console: model selection failed: {exc}", file=sys.stderr)
             time.sleep(FIT_CHECK_S)
+
+    def cotravel_of(self, dev_id: str) -> dict[str, Any]:
+        """The device's vehicle (TPMS) and co-travelers, with names."""
+        cot = self._cot.get(self.site_paths()[0]) or {}
+        ent = (cot.get("entity_of") or {}).get(dev_id, dev_id)
+        veh = next((v for v in cot.get("vehicles", []) if v["id"] == ent), None)
+        b = self.baseline()
+
+        def label(e: str) -> str:
+            v = next((v for v in cot.get("vehicles", []) if v["id"] == e), None)
+            if v:
+                return f"vehicle ({len(v['sensors'])} TPMS{', ' + v['model'] if v.get('model') else ''})"
+            rec = b.get(e) or {}
+            return rec.get("name") or e
+
+        pairs = {(p["a"], p["b"]): p for p in cot.get("pairs", [])}
+        travels = []
+        for e in sorted((cot.get("partners") or {}).get(ent, ())):
+            p = pairs.get((ent, e)) or pairs.get((e, ent)) or {}
+            travels.append({"id": e, "label": label(e), "together": p.get("together")})
+        return {"vehicle": veh, "travels_with": travels}
 
     def run_links(self) -> None:
         time.sleep(30)
@@ -1349,7 +1400,8 @@ class Handler(SimpleHTTPRequestHandler):
             emitter_id = (parse_qs(url.query).get("id") or [""])[0].lower()
             if not emitter_id:
                 return self._json({"error": "id is required"}, 400)
-            return self._json({"id": emitter_id, "baseline": self.app.baseline().get(emitter_id)})
+            return self._json({"id": emitter_id, "baseline": self.app.baseline().get(emitter_id),
+                               **self.app.cotravel_of(emitter_id)})
         if url.path == "/api/baseline":
             return self._json(self.app.baseline().summary())
         if url.path == "/api/history":
