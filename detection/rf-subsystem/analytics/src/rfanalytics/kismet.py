@@ -73,6 +73,29 @@ class KismetPoller:
             raise KismetIngestError(f"expected device list, got {type(data).__name__}")
         return data
 
+    def fetch_sources(self) -> list[dict[str, Any]]:
+        """Kismet datasources (capture sources) with their state and packet counts."""
+        url = self.base_url.rstrip("/") + "/datasource/all_sources.json"
+        req = urllib.request.Request(url)
+        if self.username is not None or self.password is not None:
+            token = base64.b64encode(f"{self.username or ''}:{self.password or ''}".encode()).decode()
+            req.add_header("Authorization", f"Basic {token}")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.load(resp)
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            raise KismetIngestError(f"Kismet request failed: {exc}") from exc
+        out = []
+        for src in data if isinstance(data, list) else []:
+            out.append({
+                "name": str(src.get("kismet.datasource.name") or ""),
+                "uuid": src.get("kismet.datasource.uuid"),
+                "running": bool(src.get("kismet.datasource.running")),
+                "error": src.get("kismet.datasource.error_reason") or None if src.get("kismet.datasource.error") else None,
+                "packets": int(src.get("kismet.datasource.num_packets") or 0),
+            })
+        return out
+
     def observations_from_device(self, device: dict[str, Any]) -> list[dict[str, Any]]:
         phy = device.get("kismet.device.base.phyname") or ""
         mac = str(device.get("kismet.device.base.macaddr") or "").lower()

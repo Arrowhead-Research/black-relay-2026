@@ -396,3 +396,25 @@ def test_kismet_log_reads_wait_for_the_write_lock(tmp_path):
         httpd.shutdown()
         writer.rollback()
         writer.close()
+
+
+def test_source_health_flags_running_sources_without_packets():
+    """Regression: three Bluetooth sources showed as running in Kismet, with no
+    error, while delivering zero packets for hours. Nothing flagged it."""
+    from server import SOURCE_SILENT_S, SourceHealth
+
+    h = SourceHealth()
+    src = lambda name, pkts, running=True, err=None: {"name": name, "uuid": name, "running": running, "error": err, "packets": pkts}
+    h.update([src("wbt-1:bt", 0), src("wbt-3:bt", 100), src("wbt-1:tpms", 0), src("wbt-2:bt", 5, running=False, err="IPC closed")], now=0)
+    assert {r["name"]: r["status"] for r in h.report(now=60)} == {"wbt-1:bt": "ok", "wbt-1:tpms": "ok", "wbt-2:bt": "error", "wbt-3:bt": "ok"}
+    h.update([src("wbt-1:bt", 0), src("wbt-3:bt", 900), src("wbt-1:tpms", 0), src("wbt-2:bt", 5, running=False, err="IPC closed")], now=SOURCE_SILENT_S + 10)
+    status = {r["name"]: r["status"] for r in h.report(now=SOURCE_SILENT_S + 10)}
+    assert status["wbt-1:bt"] == "silent"       # running, nothing new for 5+ min
+    assert status["wbt-3:bt"] == "ok"           # still growing
+    assert status["wbt-1:tpms"] == "ok"         # TPMS is quiet by nature
+    h.update([src("wbt-1:bt", 3)], now=SOURCE_SILENT_S + 40)
+    assert {r["name"]: r["status"] for r in h.report(now=SOURCE_SILENT_S + 40)}["wbt-1:bt"] == "ok"   # packets again
+    # Kismet restarted: counters start again from 0. That is activity, not silence.
+    h.update([src("wbt-3:bt", 12)], now=SOURCE_SILENT_S + 50)
+    h.update([src("wbt-3:bt", 40)], now=2 * SOURCE_SILENT_S + 60)
+    assert {r["name"]: r["status"] for r in h.report(now=2 * SOURCE_SILENT_S + 60)}["wbt-3:bt"] == "ok"

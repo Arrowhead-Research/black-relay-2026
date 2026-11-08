@@ -536,6 +536,41 @@ class KismetLog:
         return {"rssi": rssi, "n": {n: len(per[n]) for n in rssi}}
 
 
+SOURCE_SILENT_S = 300        # running but no new packets for this long: report it
+SOURCE_POLL_S = 30
+SOURCE_QUIET_OK = (":tpms",)  # TPMS sensors transmit rarely; silence there is normal
+
+
+class SourceHealth:
+    """Tracks Kismet capture sources and flags the ones that run but deliver
+    nothing (e.g. a Bluetooth dongle that stopped scanning: Kismet shows it as
+    running with no error)."""
+
+    def __init__(self) -> None:
+        self.sources: dict[str, dict[str, Any]] = {}
+
+    def update(self, sources: list[dict[str, Any]], now: float) -> None:
+        for s in sources:
+            key = s["uuid"] or s["name"]
+            prev = self.sources.get(key)
+            # Any change counts: Kismet resets counters when it restarts (a drop is activity, not silence).
+            grew = prev is None or s["packets"] != prev["packets"]
+            self.sources[key] = {**s, "first_seen": prev["first_seen"] if prev else now,
+                                 "last_growth": now if grew else prev["last_growth"]}
+
+    def report(self, now: float) -> list[dict[str, Any]]:
+        out = []
+        for s in sorted(self.sources.values(), key=lambda v: v["name"]):
+            quiet_s = now - s["last_growth"] if s["running"] else None
+            status = ("error" if s["error"] else "stopped") if not s["running"] else "ok"
+            if (s["running"] and quiet_s is not None and quiet_s >= SOURCE_SILENT_S
+                    and now - s["first_seen"] >= SOURCE_SILENT_S and not s["name"].endswith(SOURCE_QUIET_OK)):
+                status = "silent"
+            out.append({"name": s["name"], "status": status, "packets": s["packets"], "error": s["error"],
+                        "quiet_s": None if quiet_s is None else round(quiet_s)})
+        return out
+
+
 class App:
     def __init__(self, poller: Any, layout: dict[str, Any], window_s: float, poll_s: float,
                  extra_sources: list[Any] | None = None, cal_store: CalibrationStore | None = None,
@@ -549,6 +584,8 @@ class App:
         self.tracker = Tracker(window_s)
         self.lock = threading.Lock()
         self.status: dict[str, Any] = {"ok": False, "error": "not polled yet", "last_poll": None, "devices_polled": 0}
+        self.health = SourceHealth()
+        self.last_source_poll = 0.0
 
     def poll_once(self) -> None:
         devices: list[dict[str, Any]] = []
@@ -561,6 +598,14 @@ class App:
         for source in self.extra_sources:
             devices += source.fetch_devices(since=-self.tracker.window_s)
         now = time.time()
+        if self.poller is not None and hasattr(self.poller, "fetch_sources") and now - self.last_source_poll >= SOURCE_POLL_S:
+            self.last_source_poll = now
+            try:
+                sources = self.poller.fetch_sources()
+                with self.lock:
+                    self.health.update(sources, now)
+            except KismetIngestError:
+                pass
         if error and not self.extra_sources:
             with self.lock:
                 self.status.update(ok=False, error=error, last_poll=now)
@@ -589,6 +634,7 @@ class App:
                 "calibration": calibration_samples(self.tracker, self.layout, now),
                 "calibration_fits": self.cal.data.get("fits", {}),
                 "calibration_version": self.cal.version,
+                "sources": self.health.report(now),
                 "walls": self.cal.data.get("walls", []),
             }
 

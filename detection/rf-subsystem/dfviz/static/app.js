@@ -528,6 +528,13 @@ function renderStatus() {
   pill.lastElementChild.textContent = !k ? "connecting…" : k.ok ? `Kismet live · ${age}s` : `Kismet error: ${k.error}`;
   if (S.paused) pill.lastElementChild.textContent = "paused";
   const total = S.data ? S.data.devices.length : 0;
+  // Capture sources that run but deliver nothing (or are stopped) — Kismet itself shows no error for these.
+  const bad = ((S.data && S.data.sources) || []).filter((x) => x.status !== "ok");
+  $("src-pill").hidden = !bad.length;
+  if (bad.length) {
+    $("src-pill").textContent = `⚠ ${bad.length} ${bad.every((x) => x.status === "silent") ? "silent" : "sources down"}`;
+    $("src-pill").title = bad.map((x) => `${x.name}: ${x.status}${x.status === "silent" ? ` ${Math.round(x.quiet_s / 60)} min` : x.error ? ` (${x.error})` : ""}`).join("\n");
+  }
   const located = [...S.est.values()].filter((e) => e.kind === "fix").length;
   $("count-pill").textContent = `${total} devices · ${located} located`;
 }

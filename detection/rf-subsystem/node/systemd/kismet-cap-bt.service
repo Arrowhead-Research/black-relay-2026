@@ -13,7 +13,9 @@ Environment=CENTRAL_PORT=3501
 Environment=NODE_NAME=rf-node-01
 Environment=BT_IFACE=hci0
 Environment=BT_SOURCE_OPTS=
-ExecStart=/usr/bin/kismet_cap_linux_bluetooth --tcp --connect ${CENTRAL_HOST}:${CENTRAL_PORT} --source ${BT_IFACE}:name=${NODE_NAME}:bt${BT_SOURCE_OPTS}
+# Picks the adapter by BT_ADDR / BT_PREFER (see rf-node.env), waits for it,
+# keeps it awake and powered, then runs kismet_cap_linux_bluetooth.
+ExecStart=/usr/local/sbin/rf-bt-capture
 Restart=always
 RestartSec=5
 User=root

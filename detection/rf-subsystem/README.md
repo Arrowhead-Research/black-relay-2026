@@ -31,7 +31,9 @@ rf-subsystem/
 ├── dfviz/                       # rf-dfviz: live RSSI direction-finding page (web UI, container)
 │   └── site/                    # per-deployment layout and notes (local, gitignored)
 ├── node/                        # WBT node artifacts
-│   └── systemd/                 # Example Kismet remote-capture units and env template (no secrets)
+│   ├── systemd/                 # Example Kismet remote-capture units and env template (no secrets)
+│   ├── scripts/                 # rf-bt-capture (adapter by address/kind), rf-bt-doctor (diagnose/fix silent Bluetooth)
+│   └── tests/                   # Adapter-selection tests (bash, fake sysfs)
 └── simulator/                   # rfsim: multi-node observation simulator (Python, uv)
     ├── src/rfsim/               # Engine, propagation model, devices, scenario loader, CLI
     ├── sites/                   # Site layouts (zones, node positions)
@@ -193,7 +195,8 @@ Focus checks on business rules, event definitions, and contracts with connected 
 | Direction-finding page behaves like an older version | The browser kept old page code | Hard refresh (Cmd+Shift+R). The server now sends `Cache-Control: no-cache`, so this is needed only once after the change. |
 | Every device sits in the middle, nodes report the same RSSI | Kismet is not keeping per-node signal | `keep_per_datasource_stats=true` must be in `central/kismet/kismet_site.conf`; rebuild `kismet-server`. |
 | Calibration *Record* fails with "Kismet log busy" | Kismet held the packet log's write lock for the whole retry period | Record again. Reads already wait and retry up to about 10 s. |
-| Bluetooth devices only show as rings | Only one node's Bluetooth source is capturing | Restart the Bluetooth capture on the other nodes; check *Data Sources* in Kismet for packet counts. |
+| Bluetooth devices only show as rings, or the page shows *⚠ N silent* | A node's `:bt` source runs (no error in Kismet) but delivers no packets. Cause found: on TP-Link UB500 dongles a scan stays "discovering" after the capture helper exits (e.g. Kismet restarted), so every new scan gets "Busy" | Run Bluetooth capture through `kismet-cap-bt.service` (`rf-bt-capture` clears discovery at every start and reconnect). To diagnose: `sudo rf-bt-doctor`; to repair: `sudo rf-bt-doctor --fix`. See [`node/README.md`](node/README.md#bluetooth-helper-scripts). |
+| Bluetooth adapter differs between nodes (`hci0` is the onboard radio on one node, the dongle on another) | `hci` numbering follows enumeration order | Set `BT_ADDR` (exact adapter) or `BT_PREFER=usb`/`onboard` in `/etc/rf-node/rf-node.env`; `kismet-cap-bt.service` resolves it through `rf-bt-capture`. |
 | A recorded spot is flagged ⚠ | Device transmitted rarely, or RSSI did not change between distant spots (device not carried) | Delete and re-record with a phone hotspot. |
 | Wi-Fi capture drops SSH/backhaul | The helper was pointed at the backhaul interface | Capture only on the external monitor adapter (verify interface names per node). Do not put the onboard/backhaul Wi-Fi interface into monitor mode. |
 
@@ -222,6 +225,7 @@ Focus checks on business rules, event definitions, and contracts with connected 
 
 | Date | Change |
 |---|---|
+| 2026-11-08 | Bluetooth capture fixed: UB500 dongles stayed "discovering" after a helper exited, so their sources delivered nothing after Kismet restarts. `rf-bt-capture` (systemd unit) clears discovery before every start, reconnects through systemd (`--disable-retry`), and picks the adapter by address instead of `hci` index; `rf-bt-doctor` diagnoses and repairs; the direction-finding page warns about silent or stopped capture sources. Verified: all four nodes recover within 10 s of a Kismet restart. |
 | 2026-11-07 | Added `rf-dfviz`, a live direction-finding page (compose profile `dfviz`): Wi-Fi, Bluetooth and TPMS positions from per-node RSSI with smoothing; walls with uncertain positions; live calibration recorded from the Kismet packet log, with automatic model selection by measured error, suggested next spots, position-accuracy weighting and a journal with restore; demo emitters. |
 | 2026-11-07 | Added `rfanalytics live` and the `rf-analytics` compose service; enabled per-node RSSI in Kismet; validated Kismet → alerts → MQTT on the WBT nodes. Fixed an outbox deadlock with paho-mqtt and false node-offline alerts from stale per-node entries. |
 | 2026-11-07 | Added Kismet ingest v1 (`rfanalytics kismet`), example node `systemd` capture units, and validated legacy TCP remote capture on WBT nodes. |

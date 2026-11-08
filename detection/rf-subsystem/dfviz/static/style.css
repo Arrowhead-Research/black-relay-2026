@@ -200,3 +200,5 @@ aside { border-left: 1px solid var(--line); background: var(--panel); overflow-y
 
 .cal-points-box { margin-bottom: 10px; font-size: 12px; }
 .cal-points-box summary { cursor: pointer; color: var(--muted); padding: 2px 0; }
+
+.pill.warn { background: #3a2a0c; border-color: #6e5a2c; color: #ffcf70; cursor: help; }
