@@ -1,8 +1,8 @@
 """WBT Console: live RF picture of a site from the WBT nodes.
 
-Polls Kismet for each device's per-node RSSI (``seenby`` signal), keeps a
-short rolling window per (device, node), and serves the console page and its
-API. Everything learned at a building (node positions, walls, calibration,
+Polls Kismet for devices, follows Kismet's log for each node's readings of
+them, keeps a short rolling window per (device, node), and serves the console
+page and its API. Everything learned at a building (node positions, walls, calibration,
 history) is kept per *site* (``sites.py``) so the system can move between
 buildings and wipe what it learned. Sign-in and roles: ``auth.py``.
 
@@ -47,9 +47,14 @@ buildings and wipe what it learned. Sign-in and roles: ``auth.py``.
 Every POST needs ``Content-Type: application/json`` (a cross-site form cannot
 send that) and the operator role; site clear/wipe/retention/export need admin.
 
-Smoothing: each node's per-second RSSI history (Kismet ``signal_rrd``) is
-kept per (device, node) for a per-band window; outliers beyond 3 MAD of the
-median are dropped and the rest is averaged with exponential time weights.
+Live RSSI: Wi-Fi and Bluetooth come from every packet/sighting in Kismet's
+log (``LogTail``, about 2 s behind), the same measurements calibration spots
+are recorded from. Kismet's per-second ``signal_rrd`` keeps only each second's
+peak, which reads several dB strong and would not match the calibrated model;
+it is used for TPMS (not in the log yet) and when the log can't be read.
+Samples are kept per (device, node) for a per-band window; outliers beyond
+3 MAD of the median are dropped and the rest is averaged with exponential
+time weights.
 Localization (and its temporal filter) runs in the browser for now.
 
 Environment (CONSOLE_*; the older DFVIZ_* names still work):
@@ -116,6 +121,8 @@ DEFAULT_MODELS = {
     "tpms": {"ref_rssi_1m": -45.0, "path_loss_exp": 2.2, "sigma_db": 7.0, "wall_db": 3.0},
 }
 MAX_WALLS = 500
+# Bands whose live RSSI is read from Kismet's log (see LogTail).
+LOG_BANDS = frozenset({"wifi", "bt"})
 
 
 def smooth_rssi(samples: list[tuple[float, int]], now: float, tau_s: float) -> dict[str, float]:
@@ -187,7 +194,10 @@ class Tracker:
     def _timing(emitter_type: str) -> dict[str, float]:
         return BAND_TIMING[BANDS.get(emitter_type, "wifi")]
 
-    def update(self, devices: list[dict[str, Any]], now: float) -> None:
+    def update(self, devices: list[dict[str, Any]], now: float, log_bands: frozenset = frozenset(),
+               prune: bool = True) -> None:
+        """Device metadata from Kismet snapshots, and per-second RSSI history
+        except for ``log_bands`` (their samples come from ``add_log``)."""
         for dev in devices:
             described = describe_device(dev)
             if described is None:
@@ -200,6 +210,8 @@ class Tracker:
             m.attributes = attrs or m.attributes
             if "dfviz.truth" in dev:
                 m.truth = dev["dfviz.truth"]
+            if BANDS.get(emitter_type, "wifi") in log_bands:
+                continue
             for node_id, history in seenby_history(dev):
                 q = self.samples.setdefault((emitter_id, node_id), deque())
                 last = q[-1][0] if q else float("-inf")
@@ -208,7 +220,24 @@ class Tracker:
                         q.append((t, rssi))
                         last = t
                         m.last_seen = max(m.last_seen, t)
-        self.prune(now)
+        if prune:
+            self.prune(now)
+
+    def add_log(self, rows: list[tuple[str, str, float, int]], now: float) -> list[tuple[str, str, float, int]]:
+        """Add (mac, node, t, rssi) sightings from the Kismet log to known
+        Wi-Fi/Bluetooth devices; returns the rows for devices not known yet."""
+        unknown = []
+        for mac, node, t, rssi in rows:
+            m = self.meta.get(mac)
+            if m is None:
+                unknown.append((mac, node, t, rssi))
+                continue
+            timing = self._timing(m.emitter_type)
+            if BANDS.get(m.emitter_type, "wifi") not in LOG_BANDS or now - t > timing["window_s"]:
+                continue
+            self.samples.setdefault((mac, node), deque()).append((t, rssi))
+            m.last_seen = max(m.last_seen, t)
+        return unknown
 
     def prune(self, now: float) -> None:
         for key in list(self.samples):
@@ -506,11 +535,11 @@ class KismetLog:
     def _files(self) -> list[Path]:
         return sorted(self.dir.glob("*.kismet")) if self.dir and self.dir.is_dir() else []
 
-    def _read(self, path: Path, fn: Any) -> Any:
+    def _read(self, path: Path, fn: Any, retries: int | None = None) -> Any:
         import sqlite3
 
         last: Exception | None = None
-        for _ in range(self.RETRIES):
+        for _ in range(retries or self.RETRIES):
             try:
                 db = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
                 try:
@@ -576,6 +605,72 @@ class KismetLog:
         return {"rssi": rssi, "n": {n: len(per[n]) for n in rssi}}
 
 
+class LogTail:
+    """Follows the newest Kismet log and returns each new per-node signal
+    reading once, as (mac, node, t, rssi): Wi-Fi from ``packets``
+    (``sourcemac``), Bluetooth from ``data`` rows (``devmac``). A new log file
+    (Kismet restarted) is picked up on the next read."""
+
+    TABLES = {"packets": "sourcemac", "data": "devmac"}
+    MAX_ROWS = 50000       # per table per read; a backlog continues on the next read
+    RETRIES = 3            # don't stall the poller while Kismet holds the write lock
+
+    def __init__(self, log: KismetLog) -> None:
+        self.log = log
+        self.file: Path | None = None
+        self.tables: dict[str, tuple[str, bool]] = {}   # table -> (mac column, has ts_usec)
+        self.pos: dict[str, int] = {}                   # table -> last rowid read
+
+    @staticmethod
+    def _first_rowid(db: Any, table: str, cutoff: float) -> int:
+        """Rowid of the first row at or after ``cutoff`` (rows are appended in time order)."""
+        lo, hi = db.execute(f"select min(rowid), max(rowid) from {table}").fetchone()
+        if hi is None:
+            return 1
+        while lo < hi:
+            mid = (lo + hi) // 2
+            row = db.execute(f"select ts_sec from {table} where rowid=?", (mid,)).fetchone()
+            if row is None or row[0] < cutoff:
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo
+
+    def read(self, now: float, backfill_s: float) -> list[tuple[str, str, float, int]]:
+        files = self.log._files()
+        if not files:
+            raise KismetLogError("no Kismet log")
+        path = files[-1]
+
+        def go(db: Any) -> list[tuple[str, str, float, int]]:
+            if path != self.file:
+                tables, pos = {}, {}
+                for table, mac_col in self.TABLES.items():
+                    cols = {r[1] for r in db.execute(f"pragma table_info({table})")}
+                    if {mac_col, "datasource", "signal", "ts_sec"} <= cols:
+                        tables[table] = (mac_col, "ts_usec" in cols)
+                        pos[table] = self._first_rowid(db, table, now - backfill_s) - 1
+                self.file, self.tables, self.pos = path, tables, pos
+            names = {u: str(n).split(":", 1)[0].lower() for u, n in db.execute("select uuid, name from datasources")}
+            out = []
+            for table, (mac_col, usec) in self.tables.items():
+                rows = db.execute(
+                    f"select rowid, lower({mac_col}), datasource, signal, ts_sec{', ts_usec' if usec else ''} "
+                    f"from {table} where rowid > ? order by rowid limit ?", (self.pos[table], self.MAX_ROWS)).fetchall()
+                for r in rows:
+                    node, sig = names.get(r[2]), r[3]
+                    if node and isinstance(sig, int) and -130 <= sig < 0:
+                        out.append((r[1], node, r[4] + (r[5] or 0) / 1e6 if usec else float(r[4]), sig))
+                if rows:
+                    self.pos[table] = rows[-1][0]
+            return out
+
+        return self.log._read(path, go, retries=self.RETRIES)
+
+
+LOG_STALE_S = 30            # log unreadable this long: fall back to Kismet's per-second history
+LOG_PENDING_S = 15          # keep readings for devices Kismet's REST hasn't listed yet this long
+
 SOURCE_SILENT_S = 300        # running but no new packets for this long: report it
 SOURCE_POLL_S = 30
 SOURCE_QUIET_OK = (":tpms",)  # TPMS sensors transmit rarely; silence there is normal
@@ -637,6 +732,9 @@ class App:
         self.health = SourceHealth()
         self.last_source_poll = 0.0
         self.last_purge = 0.0
+        self.log_tail = LogTail(self.kismet_log) if self.kismet_log.dir else None
+        self.log_ok_at = 0.0
+        self.log_pending: list[tuple[str, str, float, int]] = []
 
     @property
     def layout(self) -> dict[str, Any]:
@@ -654,9 +752,18 @@ class App:
                 devices = self.poller.fetch_devices(since=-self.tracker.window_s)
             except KismetIngestError as exc:
                 error = str(exc)
+        demo: list[dict[str, Any]] = []
         for source in self.extra_sources:
-            devices += source.fetch_devices(since=-self.tracker.window_s)
+            demo += source.fetch_devices(since=-self.tracker.window_s)
         now = time.time()
+        rows: list[tuple[str, str, float, int]] = []
+        if self.log_tail is not None and self.poller is not None:
+            try:
+                rows = self.log_tail.read(now, self.tracker.window_s)
+                self.log_ok_at = now
+            except (KismetLogError, OSError):
+                pass
+        log_live = self.log_tail is not None and now - self.log_ok_at <= LOG_STALE_S
         if self.poller is not None and hasattr(self.poller, "fetch_sources") and now - self.last_source_poll >= SOURCE_POLL_S:
             self.last_source_poll = now
             try:
@@ -671,11 +778,16 @@ class App:
         if error and not self.extra_sources:
             with self.lock:
                 self.status.update(ok=False, error=error, last_poll=now)
+                self.log_pending = [r for r in self.log_pending + rows if now - r[2] <= LOG_PENDING_S]
             return
         with self.lock:
-            self.tracker.update(devices, now)
-            self.status.update(ok=error is None, error=error, last_poll=now, devices_polled=len(devices),
-                               demo=bool(self.extra_sources))
+            self.tracker.update(devices, now, log_bands=LOG_BANDS if log_live else frozenset(), prune=False)
+            self.tracker.update(demo, now, prune=False)
+            unknown = self.tracker.add_log(self.log_pending + rows, now) if log_live else []
+            self.log_pending = [r for r in unknown if now - r[2] <= LOG_PENDING_S]
+            self.tracker.prune(now)
+            self.status.update(ok=error is None, error=error, last_poll=now, devices_polled=len(devices) + len(demo),
+                               demo=bool(self.extra_sources), rssi_source="log" if log_live else "kismet")
 
     def run_poller(self) -> None:
         while True:

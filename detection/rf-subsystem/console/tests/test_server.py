@@ -304,6 +304,83 @@ def test_bluetooth_spot_reads_data_rows(tmp_path):
     assert klog.spot(tag.lower(), 3000, 45) == {"rssi": {"wbt-1": -61.0, "wbt-2": -75.0}, "n": {"wbt-1": 6, "wbt-2": 5}}
 
 
+def _add_bt_rows(path, rows):
+    import sqlite3
+    db = sqlite3.connect(path)
+    db.execute("create table if not exists data (ts_sec int, devmac text, datasource text, type text, signal int)")
+    db.executemany("insert or replace into datasources values (?, ?)", [("B1", "wbt-1:bt"), ("B2", "wbt-2:bt")])
+    db.executemany("insert into data values (?, ?, ?, 'linuxbthci', ?)", rows)
+    db.commit()
+    db.close()
+
+
+def test_log_tail_returns_each_reading_once_and_follows_new_logs(tmp_path):
+    import sqlite3
+    from server import LogTail
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    ap, tag = "AA:BB:CC:00:00:01", "C8:D0:83:00:00:02"
+    first = logs / "Kismet-20261108-10-00-00-1.kismet"
+    _fake_kismet_log(first, [(900, ap, "U1", -40)] + [(1000 + i, ap, "U1", -55) for i in range(5)] + [(1004, ap, "U2", 0)])
+    _add_bt_rows(first, [(1002, tag, "B2", -70)])
+    tail = LogTail(KismetLog(logs))
+    rows = tail.read(now=1005, backfill_s=60)       # 900 is older than the backfill; signal 0 skipped
+    assert sorted(set(rows)) == sorted({(ap.lower(), "wbt-1", float(1000 + i), -55) for i in range(5)} | {(tag.lower(), "wbt-2", 1002.0, -70)})
+    assert tail.read(now=1006, backfill_s=60) == []
+    db = sqlite3.connect(first)
+    db.execute("insert into packets values (1006, ?, 'U3', -66)", (ap,))
+    db.commit()
+    db.close()
+    assert tail.read(now=1007, backfill_s=60) == [(ap.lower(), "wbt-3", 1006.0, -66)]
+    # Kismet restarted: a newer log file takes over.
+    _fake_kismet_log(logs / "Kismet-20261108-11-00-00-1.kismet", [(1100, ap, "U2", -61)])
+    assert tail.read(now=1101, backfill_s=60) == [(ap.lower(), "wbt-2", 1100.0, -61)]
+
+
+class PeakPoller:
+    """Kismet REST whose per-second history holds each second's peak (-40)."""
+    base_url = "http://fake"
+
+    def __init__(self, macs):
+        self.macs = macs
+
+    def fetch_devices(self, since=None):
+        import time
+        now = int(time.time())
+        hist = {n: {now - i: -40 for i in range(10)} for n in ("wbt-1", "wbt-2")}
+        out = [dev(self.macs[0], now, {"wbt-1": -40, "wbt-2": -40}, history=hist)]
+        out.append(dev(self.macs[1], now, {"wbt-1": -40, "wbt-2": -40}, kind="BTLE", phy="BTLE", history=hist))
+        return out
+
+
+def test_live_rssi_comes_from_the_log_not_kismet_peaks(tmp_path):
+    import time
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    ap, tag = "AA:BB:CC:00:00:01", "C8:D0:83:00:00:02"
+    now = int(time.time())
+    path = logs / "Kismet-test.kismet"
+    _fake_kismet_log(path, [(now - i, ap, "U1", -60 + (i % 3) - 1) for i in range(20)]
+                     + [(now - i, ap, "U2", -72) for i in range(0, 20, 2)])
+    _add_bt_rows(path, [(now - i, tag, "B1", -66) for i in range(0, 30, 8)] + [(now - 5, tag, "B2", -80)])
+    poller = PeakPoller([ap, tag])
+    app = App(poller, load_layout(LAYOUT), window_s=180, poll_s=3, kismet_log=KismetLog(logs))
+    app.poll_once()
+    assert app.status["rssi_source"] == "log"
+    devs = {d["id"]: d for d in app.tracker.snapshot(time.time())}
+    wifi, bt = devs[ap.lower()]["nodes"], devs[tag.lower()]["nodes"]
+    assert wifi["wbt-1"]["n"] == 20 and abs(wifi["wbt-1"]["rssi"] + 60) < 1 and wifi["wbt-2"]["rssi"] == -72
+    assert bt["wbt-1"]["rssi"] == -66 and bt["wbt-1"]["n"] == 4 and bt["wbt-2"]["n"] == 1
+    # Another poll adds nothing that was already read.
+    app.poll_once()
+    assert app.tracker.snapshot(time.time())[0]["nodes"]["wbt-1"]["n"] == 20
+    # Without a readable log the console falls back to Kismet's per-second history.
+    fallback = App(poller, load_layout(LAYOUT), window_s=180, poll_s=3, kismet_log=KismetLog(tmp_path / "none"))
+    fallback.poll_once()
+    assert fallback.status["rssi_source"] == "kismet"
+    assert {d["id"]: d for d in fallback.tracker.snapshot(time.time())}[ap.lower()]["nodes"]["wbt-1"]["rssi"] == -40
+
+
 def test_record_endpoint_uses_packet_log_medians(tmp_path):
     logs = tmp_path / "logs"
     logs.mkdir()
