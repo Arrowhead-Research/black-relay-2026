@@ -36,6 +36,10 @@ buildings and wipe what it learned. Sign-in and roles: ``auth.py``.
     POST /api/areas/add                      {name, points: [[x, y], ...], linger_s?}
     POST /api/areas/delete                   {ids}
     POST /api/alerts/ack                     {ids} or {} for all
+    POST /api/nodes/heartbeat                rf-node-agent health (X-Node-Token if
+                                             CONSOLE_NODE_TOKEN is set; no sign-in)
+    POST /api/nodes/<node>/restart           {unit}: restart a capture unit on the
+                                             node's next heartbeat (admin)
     GET  /api/calibration                    {points, fits, version}
     POST /api/calibration/record             {device, x, y, t0, seconds, ...}:
                         record a spot from Kismet's packet log (every packet,
@@ -95,6 +99,7 @@ Environment (CONSOLE_*; the older DFVIZ_* names still work):
     CONSOLE_MQTT_HOST  publish positions and node status to this broker (unset: off;
                      ``publish.py``); CONSOLE_MQTT_PORT (1883), CONSOLE_TOPIC_PREFIX
                      (detection/rf)
+    CONSOLE_NODE_TOKEN  token rf-node-agent heartbeats must send (unset: accepted without)
     CONSOLE_DEMO     "1": add synthetic emitters with known positions (BLE
                      walker, passing car with TPMS, ...); "only": demo alone
 """
@@ -129,6 +134,7 @@ from calfit import Calibrator, fit_signature, fit_to_save  # noqa: E402
 from baseline import Baseline  # noqa: E402
 from alerting import arrivals  # noqa: E402
 import cotravel  # noqa: E402
+from nodehealth import NodeHealth  # noqa: E402
 from sites import SiteManager  # noqa: E402
 
 
@@ -843,7 +849,8 @@ class App:
     def __init__(self, poller: Any, layout: dict[str, Any] | None, window_s: float, poll_s: float,
                  extra_sources: list[Any] | None = None, cal_store: CalibrationStore | None = None,
                  kismet_log: KismetLog | None = None, sites: SiteManager | None = None,
-                 auth: Auth | None = None, publisher: Publisher | None = None, data_dir: Path | None = None) -> None:
+                 auth: Auth | None = None, publisher: Publisher | None = None, data_dir: Path | None = None,
+                 node_token: str | None = None) -> None:
         """With ``sites``, layout and calibration follow the active site;
         without it (tests, single-site use) the given layout and store are used."""
         self.poller = poller
@@ -865,6 +872,8 @@ class App:
         self.log_tail = LogTail(self.kismet_log) if self.kismet_log.dir else None
         self.locator = Locator()
         self.publisher = publisher
+        self.node_health = NodeHealth()
+        self.node_token = node_token or None
         self.marks = Marks(data_dir / "marks.json" if data_dir else None)
         self.areas = Areas()
         self.engine = AlertEngine()
@@ -964,6 +973,7 @@ class App:
         with self.lock:
             self.positions, self.geo = positions, geo
             report = self.health.report(now)
+        health = self.node_health.report(now)
         self.record_history(positions, by_id, now)
         if self.sites:
             s = self.sites.active()
@@ -975,7 +985,7 @@ class App:
         marks = self.marks.merged(key, mpath)
         events = self.baseline().observe(devices, now)
         alerts = self.engine.evaluate(key, now, by_id, positions, marks, self.areas.get(*self.site_file("areas.json")),
-                                      node_states(report), radios, events)
+                                      node_states(report, health), radios, events)
         b = self.baseline()
         alerts += arrivals(now, events, by_id, marks, radios, self._cot.get(key, {}),
                            {k: v[0] for k, v in b.open.items()}, self._cot_last)
@@ -984,7 +994,7 @@ class App:
             self.alert_log.add(key, self.history_dir(), alerts)
         if self.publisher is not None:
             self.publisher.positions(positions, by_id, site, radios, now, marks)
-            self.publisher.nodes(report, site, now)
+            self.publisher.nodes(report, site, now, health)
             for a in alerts:
                 self.publisher.alert(a)
 
@@ -1269,6 +1279,8 @@ class App:
                 "geo": self.geo,
                 "publish": self.publisher.status() if self.publisher else {"enabled": False},
                 "node_links": self._links_state(layout),
+                "nodes_health": self.node_health.report(now),
+                "node_token": bool(self.node_token),
                 "marks": self.marks.merged(*self.site_file("marks.json")),
                 "areas": self.areas.get(*self.site_file("areas.json")),
                 "alerts": self.alert_log.view(self.site_paths()[0], self.history_dir()),
@@ -1439,6 +1451,25 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json({"role": role}, headers=self._cookie(self.app.auth.issue(role), 12 * 3600))
         if path == "/api/logout":
             return self._json({"ok": True}, headers=self._cookie("", 0))
+        if path == "/api/nodes/heartbeat":     # node agents: their own token, not a sign-in
+            import hmac
+            token = self.app.node_token
+            if token and not hmac.compare_digest(token, self.headers.get("X-Node-Token") or ""):
+                return self._json({"error": "bad node token"}, 401)
+            try:
+                return self._json(self.app.node_health.heartbeat(body, time.time()))
+            except ValueError as exc:
+                return self._json({"error": str(exc)}, 400)
+        if path.startswith("/api/nodes/") and path.endswith("/restart"):
+            if self._need("admin") is None:
+                return None
+            try:
+                self.app.node_health.queue_restart(path.split("/")[3].lower(), str(body.get("unit", "")))
+            except KeyError:
+                return self._json({"error": "no heartbeat from that node"}, 404)
+            except ValueError as exc:
+                return self._json({"error": str(exc)}, 400)
+            return self._json({"nodes_health": self.app.node_health.report(time.time())})
         needed = "admin" if path.startswith("/api/sites/") and path.rsplit("/", 1)[1] in ADMIN_ACTIONS else "operator"
         role = self._need(needed)
         if role is None:
@@ -1610,7 +1641,9 @@ def main() -> int:
                                    env("TOPIC_PREFIX", TOPIC_PREFIX))
         print(f"console: publishing positions and node status to {env('MQTT_HOST')}", file=sys.stderr)
     app = App(poller, None, window, float(env("POLL_S", 3)), extra, None, klog, sites=sites, auth=auth,
-              publisher=publisher, data_dir=data_dir)
+              publisher=publisher, data_dir=data_dir, node_token=os.environ.get("CONSOLE_NODE_TOKEN"))
+    if not app.node_token:
+        print("console: node heartbeats accepted without a token (set CONSOLE_NODE_TOKEN)", file=sys.stderr)
     threading.Thread(target=app.run_poller, daemon=True).start()
     threading.Thread(target=app.run_links, daemon=True).start()
     threading.Thread(target=app.run_fits, daemon=True).start()

@@ -21,6 +21,17 @@
       "type": "object",
       "description": "Capture source (wifi, bt, tpms) -> its state.",
       "additionalProperties": { "enum": ["ok", "silent", "stopped", "error"] }
+    },
+    "health": {
+      "type": "object",
+      "description": "From the node agent (rf-node-agent), when it reports.",
+      "properties": {
+        "temp_c": { "type": ["number", "null"] },
+        "throttled": { "type": ["integer", "null"], "description": "vcgencmd get_throttled bits." },
+        "uptime_s": { "type": ["number", "null"] },
+        "agent_age_s": { "type": ["number", "null"], "description": "Seconds since the last heartbeat." },
+        "problems": { "type": "array", "items": { "type": "string" } }
+      }
     }
   }
 }

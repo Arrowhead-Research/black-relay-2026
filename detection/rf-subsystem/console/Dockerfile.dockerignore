@@ -14,6 +14,7 @@
 !console/baseline.py
 !console/replay.py
 !console/cotravel.py
+!console/nodehealth.py
 !console/layout.example.yaml
 !console/static
 **/__pycache__

@@ -1,0 +1,14 @@
+[Unit]
+Description=WBT node health heartbeats to the WBT Console (rf-node-agent)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/rf-node/rf-node.env
+ExecStart=/usr/bin/python3 /usr/local/sbin/rf-node-agent
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

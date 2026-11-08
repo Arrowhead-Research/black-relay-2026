@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""rf-node-agent: WBT node health heartbeats to the WBT Console.
+
+Every AGENT_INTERVAL_S (default 30) the agent POSTs the node's health to
+http://CENTRAL_HOST:CONSOLE_PORT/api/nodes/heartbeat (over the tailnet):
+temperature, throttling/undervoltage (vcgencmd), uptime, load, memory, disk,
+the capture units (kismet-cap-wifi/bt/tpms, tailscaled: state and restart
+count), whether the capture adapters are present (Wi-Fi interface,
+Bluetooth adapter, RTL-SDR), and the node's tailnet address.
+
+The reply can ask the agent to restart one of the capture units (queued by an
+admin in the console); only those three units can be restarted, and the
+result is reported in the next heartbeat.
+
+Configuration: /etc/rf-node/rf-node.env (systemd EnvironmentFile): CENTRAL_HOST,
+NODE_NAME, WIFI_IFACE, BT_ADDR, and optionally CONSOLE_PORT (8080),
+AGENT_INTERVAL_S and NODE_TOKEN (sent as X-Node-Token when the console
+requires it). Standard library only; runs as root (systemctl, vcgencmd).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+VERSION = "1"
+UNITS = ("kismet-cap-wifi", "kismet-cap-bt", "kismet-cap-tpms", "tailscaled")
+RESTARTABLE = ("kismet-cap-wifi", "kismet-cap-bt", "kismet-cap-tpms")
+RTLSDR_IDS = {("0bda", "2838"), ("0bda", "2832")}
+
+
+def run(cmd: list[str], timeout: float = 5.0) -> str:
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def read(path: str) -> str:
+    try:
+        return Path(path).read_text().strip()
+    except OSError:
+        return ""
+
+
+def unit_state(unit: str) -> dict:
+    out = run(["systemctl", "show", unit, "-p", "ActiveState", "-p", "SubState", "-p", "NRestarts"])
+    kv = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    return {"active": kv.get("ActiveState", "unknown"), "sub": kv.get("SubState", ""),
+            "restarts": int(kv["NRestarts"]) if kv.get("NRestarts", "").isdigit() else None}
+
+
+def usb_ids() -> set[tuple[str, str]]:
+    ids = set()
+    for d in Path("/sys/bus/usb/devices").glob("*"):
+        v, p = read(str(d / "idVendor")), read(str(d / "idProduct"))
+        if v and p:
+            ids.add((v.lower(), p.lower()))
+    return ids
+
+
+def bt_addresses() -> list[str]:
+    """Bluetooth adapter addresses. sysfs has none on the nodes' kernels, so ask bluez as well."""
+    addrs = [a for a in (read(f"{d}/address").lower() for d in Path("/sys/class/bluetooth").glob("hci*")) if a]
+    for line in run(["bluetoothctl", "list"]).splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "Controller":
+            addrs.append(parts[1].lower())
+    if not addrs and list(Path("/sys/class/bluetooth").glob("hci*")):
+        addrs.append("present")          # adapters exist but no address could be read
+    return addrs
+
+
+def collect(env: dict, actions: list[dict]) -> dict:
+    temp = read("/sys/class/thermal/thermal_zone0/temp")
+    thr = run(["vcgencmd", "get_throttled"]).partition("=")[2]
+    mem = {k: int(v.split()[0]) for k, v in (line.split(":", 1) for line in read("/proc/meminfo").splitlines() if ":" in line)
+           if k in ("MemTotal", "MemAvailable")}
+    disk = shutil.disk_usage("/")
+    bt_addrs = bt_addresses()
+    bt_addr = env.get("BT_ADDR", "").lower()
+    wifi = env.get("WIFI_IFACE", "wlan1")
+    return {
+        "node": env["NODE_NAME"], "agent": VERSION, "host": socket.gethostname(), "t": time.time(),
+        "uptime_s": float(read("/proc/uptime").split()[0] or 0),
+        "temp_c": round(int(temp) / 1000, 1) if temp.isdigit() else None,
+        "throttled": int(thr, 16) if thr.startswith("0x") else None,
+        "load": [round(x, 2) for x in os.getloadavg()],
+        "mem_free_pct": round(100 * mem["MemAvailable"] / mem["MemTotal"], 1) if mem.get("MemTotal") else None,
+        "disk_free_pct": round(100 * disk.free / disk.total, 1),
+        "units": {u: unit_state(u) for u in UNITS},
+        "adapters": {
+            "wifi": Path(f"/sys/class/net/{wifi}").exists(),
+            "bt": (bt_addr in bt_addrs or "present" in bt_addrs) if bt_addr else bool(bt_addrs),
+            "sdr": bool(RTLSDR_IDS & usb_ids()),
+        },
+        "tailscale_ip": run(["tailscale", "ip", "-4"]).splitlines()[0] if run(["tailscale", "ip", "-4"]) else None,
+        "actions": actions,
+    }
+
+
+def load_env(path: str = "/etc/rf-node/rf-node.env") -> dict:
+    env = {}
+    for line in read(path).splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            env[k.strip()] = v.strip().strip("'\"")
+    env.update({k: v for k, v in os.environ.items() if k in ("CENTRAL_HOST", "NODE_NAME", "CONSOLE_PORT", "NODE_TOKEN",
+                                                             "AGENT_INTERVAL_S", "WIFI_IFACE", "BT_ADDR")})
+    return env
+
+
+def main() -> int:
+    env = load_env()
+    if not env.get("CENTRAL_HOST") or not env.get("NODE_NAME"):
+        print("rf-node-agent: CENTRAL_HOST and NODE_NAME must be set in /etc/rf-node/rf-node.env", file=sys.stderr)
+        return 2
+    url = f"http://{env['CENTRAL_HOST']}:{env.get('CONSOLE_PORT', '8080')}/api/nodes/heartbeat"
+    interval = float(env.get("AGENT_INTERVAL_S", 30))
+    actions: list[dict] = []
+    failures = 0
+    while True:
+        body = json.dumps(collect(env, actions)).encode()
+        headers = {"Content-Type": "application/json"}
+        if env.get("NODE_TOKEN"):
+            headers["X-Node-Token"] = env["NODE_TOKEN"]
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, data=body, headers=headers), timeout=10) as r:
+                reply = json.loads(r.read() or b"{}")
+            actions = []
+            failures = 0
+            for unit in reply.get("restart", []):
+                if unit in RESTARTABLE:
+                    rc = subprocess.run(["systemctl", "restart", unit], capture_output=True, timeout=60).returncode
+                    actions.append({"restart": unit, "ok": rc == 0, "t": time.time()})
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            failures += 1
+            if failures in (1, 10) or failures % 120 == 0:
+                print(f"rf-node-agent: heartbeat to {url} failed ({failures}x): {exc}", file=sys.stderr)
+        time.sleep(interval)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

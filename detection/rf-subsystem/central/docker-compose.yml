@@ -110,6 +110,7 @@ services:
       CONSOLE_DEMO: ${CONSOLE_DEMO:-}             # 1 = add synthetic emitters with known positions
       CONSOLE_MQTT_HOST: ${CONSOLE_MQTT_HOST-mqtt}  # positions + node status out (set empty to turn off)
       CONSOLE_TOPIC_PREFIX: ${RF_TOPIC_PREFIX:-detection/rf}
+      CONSOLE_NODE_TOKEN: ${CONSOLE_NODE_TOKEN:-}  # rf-node-agent heartbeats must send it (empty: accepted without)
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${CONSOLE_PORT:-8080}:8080"
     volumes:

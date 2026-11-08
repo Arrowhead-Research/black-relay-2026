@@ -62,6 +62,22 @@ tailscale status && tailscale ip -4
 - Then point capture at the central server's tailnet name: set `CENTRAL_HOST` in `/etc/rf-node/rf-node.env` to its MagicDNS name and restart the `kismet-cap-*` units. Do this one node at a time and confirm its sources in Kismet before the next; LAN SSH keeps working if anything goes wrong.
 - The central server must join the tailnet too (Kismet's remote-capture port 3501 bound where tailnet clients can reach it).
 
+## Node agent (rf-node-agent)
+
+`agent/rf-node-agent` (Python standard library) runs as `rf-node-agent.service` and POSTs the node's health to the WBT Console every 30 s over the tailnet (`http://CENTRAL_HOST:8080/api/nodes/heartbeat`): temperature, throttling and undervoltage (`vcgencmd get_throttled`), uptime, load, memory, disk, the capture units (`kismet-cap-*`, `tailscaled`: state and restart count), whether the Wi-Fi, Bluetooth (`bluetoothctl list`: sysfs has no address on these kernels) and RTL-SDR adapters are present, and the node's tailnet address. The console shows it in the *Nodes* card, adds it to `rf.node-status.v0`, and raises `node_health` alerts for new problems. An admin can restart a capture unit from the card; the agent runs it on its next heartbeat (only `kismet-cap-wifi`, `-bt`, `-tpms`).
+
+```sh
+sudo install -m 755 detection/rf-subsystem/node/agent/rf-node-agent /usr/local/sbin/
+sudo install -m 644 detection/rf-subsystem/node/systemd/rf-node-agent.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now rf-node-agent
+```
+
+It reads `/etc/rf-node/rf-node.env` (`CENTRAL_HOST`, `NODE_NAME`, `WIFI_IFACE`, `BT_ADDR`; optional `CONSOLE_PORT`, `AGENT_INTERVAL_S`, `NODE_TOKEN`). Until a token is set the console accepts heartbeats without one and says so in the Nodes card. To turn authentication on (or rotate the token), run from a machine with SSH to the nodes and the central host:
+
+```sh
+detection/rf-subsystem/node/set-node-token.sh -k ~/.ssh/<node key> -c dev@<central host> <node> [<node> ...]
+```
+
 ## Install the example systemd units
 
 These units use legacy TCP remote capture (`--tcp`, port 3501), validated with Kismet 2026-10-R1 (see [`../central/README.md`](../central/README.md), DESIGN.md open question 5).

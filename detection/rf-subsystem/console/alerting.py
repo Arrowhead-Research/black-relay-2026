@@ -16,6 +16,7 @@
   | ``area_entry`` | a non-friendly device placed by 3+ nodes enters an area (once per visit) | medium (high if priority) |
   | ``linger`` | it stays in the area longer than the area's linger time | medium (high if priority) |
   | ``node_offline`` / ``node_online`` | a node's capture stops / comes back | high / info |
+  | ``node_health`` | the node agent reports a new problem (hot, undervoltage, unit down, adapter missing...) | medium |
   | ``new_device`` | a stable address (not randomized) first seen at this site after its learning period (baseline.py), heard by 2+ nodes | low |
   | ``repeat_visitor`` | a stable address starts its 3rd (or later) visit to this site | low |
   | ``arrived_with`` | a device (or vehicle) arrives with its known co-travelers (cotravel.py) | low (high if priority) |
@@ -178,7 +179,7 @@ class AlertEngine:
         self.heard: dict[str, float] = {}                            # priority device -> last heard
         self.nodes: dict[str, str] = {}
         self.new_tpms: dict[str, float] = {}                         # TPMS model -> last new_device alert
-
+        self.node_problems: dict[str, set[str]] = {}
     def evaluate(self, site: str, now: float, devices: dict[str, dict[str, Any]], positions: dict[str, dict[str, Any]],
                  marks: dict[str, dict[str, Any]], areas: list[dict[str, Any]], node_states: dict[str, dict[str, Any]],
                  friendly_ids: set[str], events: list[dict[str, Any]] = ()) -> list[dict[str, Any]]:
@@ -244,6 +245,11 @@ class AlertEngine:
             elif st["state"] != "offline" and prev == "offline":
                 alert("node_online", "info", None, {"node_id": node, "sources": st["sources"]})
             self.nodes[node] = st["state"]
+            probs = set((st.get("health") or {}).get("problems") or [])
+            new = sorted(probs - self.node_problems.get(node, set()))
+            if new and node in self.node_problems:        # not on the first report after a start
+                alert("node_health", "medium", None, {"node_id": node, "problems": new})
+            self.node_problems[node] = probs
         return out
 
 

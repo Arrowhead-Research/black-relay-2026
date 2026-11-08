@@ -56,8 +56,9 @@ class LiveClient:
         return self.client.publish(topic, payload, qos=0).rc == self._mqtt.MQTT_ERR_SUCCESS
 
 
-def node_states(report: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Per node: state and per-source status, from the console's capture-source report."""
+def node_states(report: list[dict[str, Any]], health: dict[str, dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
+    """Per node: state and per-source status from the capture-source report, with the
+    node agent's health (nodehealth.py) when it reports: problems make an online node degraded."""
     nodes: dict[str, dict[str, str]] = {}
     for s in report:
         if ":" not in s["name"]:
@@ -70,6 +71,12 @@ def node_states(report: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         running = [v in ("ok", "silent") for v in sources.values()]
         state = "online" if all(ok) else "offline" if not any(running) else "degraded"
         out[node] = {"state": state, "sources": dict(sorted(sources.items()))}
+    for node, h in (health or {}).items():
+        st = out.setdefault(node, {"state": "offline" if "agent silent" in h["problems"] else "online", "sources": {}})
+        if h["problems"] and st["state"] == "online":
+            st["state"] = "degraded"
+        st["health"] = {"temp_c": h.get("temp_c"), "throttled": h.get("throttled"), "uptime_s": h.get("uptime_s"),
+                        "agent_age_s": h.get("age_s"), "problems": h["problems"]}
     return out
 
 
@@ -78,7 +85,7 @@ class Publisher:
         """``live.publish(topic, str) -> bool``; ``durable.send(msg_id, topic, dict)`` (outbox-backed)."""
         self.live, self.durable, self.prefix = live, durable, topic_prefix
         self.last_pos: dict[str, tuple[float, float, float]] = {}    # id -> (sent at, x, y)
-        self.last_node: dict[str, tuple[float, str, dict[str, str]]] = {}
+        self.last_node: dict[str, tuple[float, str, dict[str, str], Any]] = {}
         self.stats = {"positions_sent": 0, "positions_dropped": 0, "node_status_queued": 0}
 
     @classmethod
@@ -108,13 +115,18 @@ class Publisher:
         for eid in [k for k, v in self.last_pos.items() if now - v[0] > 3600]:
             del self.last_pos[eid]
 
-    def nodes(self, report: list[dict[str, Any]], site: dict[str, str], now: float) -> None:
-        for node, st in node_states(report).items():
+    def nodes(self, report: list[dict[str, Any]], site: dict[str, str], now: float,
+              health: dict[str, dict[str, Any]] | None = None) -> None:
+        for node, st in node_states(report, health).items():
             last = self.last_node.get(node)
-            changed = last is None or last[1] != st["state"] or last[2] != st["sources"]
+            problems = (st.get("health") or {}).get("problems")
+            changed = last is None or last[1] != st["state"] or last[2] != st["sources"] or last[3] != problems
             if not changed and now - last[0] < NODE_HEARTBEAT_S:
                 continue
-            msg = Message("node_status", now, {"node_id": node, "state": st["state"], "site": site, "sources": st["sources"]})
+            body = {"node_id": node, "state": st["state"], "site": site, "sources": st["sources"]}
+            if st.get("health"):
+                body["health"] = st["health"]
+            msg = Message("node_status", now, body)
             topic, payload = to_wire(msg, self.prefix)
             try:
                 self.durable.send(msg.id, topic, payload)
@@ -122,7 +134,7 @@ class Publisher:
             except Exception as exc:  # noqa: BLE001 - never let publishing stop the poller
                 print(f"console: node status not queued: {exc}", file=sys.stderr)
                 continue
-            self.last_node[node] = (now, st["state"], st["sources"])
+            self.last_node[node] = (now, st["state"], st["sources"], problems)
 
     def alert(self, rec: dict[str, Any]) -> None:
         """One alert (AlertLog record) through the durable outbox, as rf.alert.v0."""
