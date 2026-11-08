@@ -282,6 +282,28 @@ def test_reassign_rebuilds_spot_from_kismet_log(tmp_path):
         httpd.shutdown()
 
 
+def test_bluetooth_spot_reads_data_rows(tmp_path):
+    """Bluetooth capture logs no packets: sightings are data rows (linuxbthci)."""
+    import sqlite3
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    path = logs / "Kismet-test.kismet"
+    _fake_kismet_log(path, [(3000, "11:22:33:44:55:66", "U1", -40)])   # unrelated Wi-Fi traffic
+    tag = "C8:D0:83:C6:F3:D9"
+    db = sqlite3.connect(path)
+    db.execute("create table data (ts_sec int, devmac text, datasource text, type text, signal int)")
+    db.executemany("insert into datasources values (?, ?)", [("B1", "wbt-1:bt"), ("B2", "wbt-2:bt")])
+    rows = [(3000 + i, tag, "B1", "linuxbthci", -60 - (i % 3)) for i in range(0, 45, 8)]   # 6 sightings
+    rows += [(3000 + i, tag, "B2", "linuxbthci", -75) for i in range(0, 45, 9)]            # 5 sightings
+    rows += [(3050, tag, "B1", "linuxbthci", 0)]                                           # no signal, log caught up
+    db.executemany("insert into data values (?, ?, ?, ?, ?)", rows)
+    db.commit()
+    db.close()
+    klog = KismetLog(logs)
+    assert klog.newest() == 3050
+    assert klog.spot(tag.lower(), 3000, 45) == {"rssi": {"wbt-1": -61.0, "wbt-2": -75.0}, "n": {"wbt-1": 6, "wbt-2": 5}}
+
+
 def test_record_endpoint_uses_packet_log_medians(tmp_path):
     logs = tmp_path / "logs"
     logs.mkdir()

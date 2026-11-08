@@ -522,12 +522,25 @@ class KismetLog:
                 time.sleep(self.RETRY_S)
         raise KismetLogError(f"could not read {path.name}: {last}")
 
+    @staticmethod
+    def _has_data_signal(db: Any) -> bool:
+        """Bluetooth capture logs no packets: each sighting is a ``data`` row
+        (type linuxbthci) with its own ``devmac`` and ``signal``."""
+        return {"devmac", "datasource", "signal", "ts_sec"} <= {r[1] for r in db.execute("pragma table_info(data)")}
+
     def newest(self) -> float:
-        """Time of the newest packet in the newest log (Kismet writes ~10 s behind)."""
+        """Time of the newest record in the newest log (Kismet writes ~10 s behind)."""
         files = self._files()
         if not files:
             return 0.0
-        return self._read(files[-1], lambda db: float(db.execute("select max(ts_sec) from packets").fetchone()[0] or 0))
+
+        def newest_in(db: Any) -> float:
+            t = float(db.execute("select max(ts_sec) from packets").fetchone()[0] or 0)
+            if self._has_data_signal(db):
+                t = max(t, float(db.execute("select max(ts_sec) from data").fetchone()[0] or 0))
+            return t
+
+        return self._read(files[-1], newest_in)
 
     def wait_for(self, t: float, timeout: float = 45.0) -> bool:
         deadline = time.time() + timeout
@@ -544,9 +557,14 @@ class KismetLog:
 
         def collect(db: Any) -> None:
             names = {u: n for u, n in db.execute("select uuid, name from datasources")}
+            window = (mac.lower(), int(start), int(start + seconds))
             rows = db.execute(
                 "select datasource, signal from packets where lower(sourcemac)=? and ts_sec between ? and ? and signal != 0",
-                (mac.lower(), int(start), int(start + seconds))).fetchall()
+                window).fetchall()
+            if self._has_data_signal(db):   # Bluetooth sightings
+                rows += db.execute(
+                    "select datasource, signal from data where lower(devmac)=? and ts_sec between ? and ? and signal != 0",
+                    window).fetchall()
             for src, sig in rows:
                 node = str(names.get(src, "")).split(":", 1)[0].lower()
                 if node:
@@ -904,7 +922,7 @@ class Handler(SimpleHTTPRequestHandler):
             device = str(body.get("device", "")).lower()
             if not device:
                 return self._json({"error": "device is required"}, 400)
-            rec = self.app.kismet_log.spot(device, pt["t"], float(body.get("seconds", 15)))
+            rec = self.app.kismet_log.spot(device, pt["t"], float(body.get("seconds", pt.get("seconds", 15))))
             if len(rec["rssi"]) < 2:
                 return self._json({"error": f"{device} was heard by {len(rec['rssi'])} node(s) with 3+ packets in that window"}, 422)
             changes = {"device": device, "rssi": rec["rssi"], "n": rec["n"], "source": "kismet-log",
@@ -932,7 +950,10 @@ class Handler(SimpleHTTPRequestHandler):
         cal = self.app.cal   # the site that was active when recording started
         rec = klog.spot(device, t0, seconds)
         if len(rec["rssi"]) < 2:
-            return self._json({"error": f"only {len(rec['rssi'])} node(s) heard {body.get('device_name') or device} 3+ times in the window", "rssi": rec["rssi"]}, 422)
+            heard = klog.spot(device, t0, seconds, min_packets=1)["n"]
+            counts = ", ".join(f"{n} {c}" for n, c in sorted(heard.items())) or "none"
+            return self._json({"error": f"only {len(rec['rssi'])} node(s) heard {body.get('device_name') or device} 3+ times "
+                               f"in {seconds:.0f} s (sightings: {counts})", "rssi": rec["rssi"]}, 422)
         point = {k: body[k] for k in ("band", "device_name", "device_type", "x", "y", "warn", "pos_sd_ft") if k in body}
         point.update(device=device, t=t0, seconds=seconds, rssi=rec["rssi"], n=rec["n"], source="kismet-log")
         return self._json({"point": cal.add_point(point), "version": cal.version})

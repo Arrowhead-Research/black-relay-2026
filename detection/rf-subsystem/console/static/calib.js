@@ -29,9 +29,12 @@
  * the right one from Kismet's packet log (↻).
  */
 
-const CAL_RECORD_S = 15;
+// Bluetooth capture reports each device about once per scan (every 7-10 s per
+// node), so a Bluetooth spot records longer to get enough samples per node.
+const CAL_RECORD_S = { wifi: 15, bt: 45, tpms: 15 };
+const calRecordS = (band) => CAL_RECORD_S[band] || 15;
 const CAL_MIN_SAMPLES = 3;   // per node, for a node to count in a spot
-const CAL_MIN_RATE = 0.4;    // frames/s per node below which the device is too quiet to calibrate well
+const CAL_MIN_RATE = { wifi: 0.4, bt: 0.08, tpms: 0.4 };   // per node/s below which the device is too quiet to calibrate well
 const CAL_MOVE_FT = 10;      // spots at least this far apart...
 const CAL_MOVE_DB = 3;       // ...should differ by more than this at some node
 // A candidate is rejected when implausible (the measurements, not the model, are wrong).
@@ -93,19 +96,20 @@ async function calRecord() {
   if (!dev || !spot || S.calib.recording) return;
   S.calib.recording = true;
   const t0 = S.data.now;
+  const secs = calRecordS(dev.band);
   const started = Date.now();
   const tick = setInterval(() => {
     const el = (Date.now() - started) / 1000;
-    $("cal-progress").innerHTML = el < CAL_RECORD_S
-      ? `<span class="progress"><i style="width:${(el / CAL_RECORD_S) * 100}%"></i></span> ${Math.ceil(CAL_RECORD_S - el)} s`
+    $("cal-progress").innerHTML = el < secs
+      ? `<span class="progress"><i style="width:${(el / secs) * 100}%"></i></span> ${Math.ceil(secs - el)} s`
       : "Processing…";
   }, 250);
   renderLiveCal();
   try {
-    await new Promise((r) => setTimeout(r, CAL_RECORD_S * 1000));
+    await new Promise((r) => setTimeout(r, secs * 1000));
     const out = await calApi("api/calibration/record", {
       band: dev.band, device: dev.id, device_name: displayName(dev), device_type: dev.type,
-      x: spot[0], y: spot[1], t0, seconds: CAL_RECORD_S,
+      x: spot[0], y: spot[1], t0, seconds: secs,
       pos_sd_ft: radioOf ? 0.5 : parseFloat($("cal-acc").value),   // node radios sit at their (known) node
     });
     const point = out.point;
@@ -127,9 +131,9 @@ async function calRecord() {
 // Does this spot look like a moving, chatty device?
 function calQualityWarnings(pt) {
   const warn = [];
-  const rate = Math.max(...Object.values(pt.n || { x: 0 })) / CAL_RECORD_S;
-  if (rate < CAL_MIN_RATE) {
-    warn.push(`Low rate: ${rate.toFixed(1)} frames/s`);
+  const rate = Math.max(...Object.values(pt.n || { x: 0 })) / (pt.seconds || calRecordS(pt.band));
+  if (rate < (CAL_MIN_RATE[pt.band] || 0.4)) {
+    warn.push(`Low rate: ${rate.toFixed(rate < 1 ? 2 : 1)} per s`);
   }
   const far = S.calib.points.filter((q) => q !== pt && q.device === pt.device && q.band === pt.band && Math.hypot(q.x - pt.x, q.y - pt.y) >= CAL_MOVE_FT);
   if (far.length) {
