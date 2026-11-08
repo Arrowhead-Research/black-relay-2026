@@ -21,7 +21,8 @@
  *    (per-node offsets on/off x wall loss on/off x transmit-power spread x
  *    node links on/off) is fitted and scored by its leave-one-out median
  *    error at the walked spots. The best one is used if it beats the default
- *    model at the same spots, and is saved on the server so every page uses it.
+ *    model at the same spots. The server does the selection and saves the fit
+ *    (console/calfit.py, same maths); this page shows the analysis.
  * 6. Node links (Wi-Fi): the server records each node's own radio as heard by
  *    the other nodes (known positions and walls, no walking). They are extra
  *    training spots only: accuracy is always measured at walked spots.
@@ -492,38 +493,13 @@ function calAnalyse() {
   return S.calib.view;
 }
 
-// Make the saved model for each band the best candidate (or the defaults).
-// Deterministic, so several open pages agree. Not while nodes are dragged
-// (that layout is only in this browser).
+// The server selects and saves each band's model (console/calfit.py, the same
+// maths as here); the page only recomputes the analysis it shows. Not while a
+// node is dragged (that layout is only in this browser).
 async function calAutoApply() {
-  // Never decide before the spots have loaded: with no spots every band would look
-  // uncalibrated, and the page would save "defaults" over everyone's model.
   if (!S.data || !S.grid || !S.calib.loaded) return;
-  if (JSON.stringify(S.nodes) !== JSON.stringify(S.data.layout.nodes)) return;
-  if (S.calib.autoBusy) { S.calib.autoAgain = true; return; }
-  S.calib.autoBusy = true;
-  try { await calAutoApplyOnce(); } finally { S.calib.autoBusy = false; }
-  if (S.calib.autoAgain) { S.calib.autoAgain = false; calAutoApply(); }
-}
-
-async function calAutoApplyOnce() {
   try { calSuggest(S.band || "wifi"); } catch { /* suggestions are optional */ }
-  for (const band of ["wifi", "bt", "tpms"]) {
-    const r = calBest(band);
-    const want = r.adopted ? {
-      ...r.best.fit, sig: r.sig, t: Date.now() / 1000, spots: r.spots.length,
-      loo_median_ft: r.best.median, loo_worst_ft: r.best.errs[r.best.errs.length - 1], loo_spots: r.best.errs.length,
-      default_median_ft: r.defMedian, candidates: r.candidates.length,
-    } : null;
-    const have = S.calib.fits[band] || null;
-    if ((have && have.sig) === (want && want.sig) && !!have === !!want) continue;
-    if (!want && !have) continue;
-    try {
-      await calApi(`api/calibration/fits/${band}`, { fit: want });
-    } catch { continue; }
-    if (want) S.calib.fits[band] = want; else delete S.calib.fits[band];
-    calUseFits();
-  }
+  renderLiveCal();
 }
 
 // Live model per band = saved fit, else the layout defaults.

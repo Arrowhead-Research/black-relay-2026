@@ -67,6 +67,11 @@ it is used for TPMS (not in the log yet) and when the log can't be read.
 Samples are kept per (device, node) for a per-band window; outliers beyond
 3 MAD of the median are dropped and the rest is averaged with exponential
 time weights.
+The model per band is selected here too (``calfit.py``, a verified port of
+the page's calibration fit): every FIT_CHECK_S the server re-selects a band
+whose spots, node links, nodes, walls or defaults changed and saves the fit;
+the page only shows the analysis.
+
 Positions are computed here (``locate.py``, a verified port of the page's
 localization) on every poll, served with each device in /api/state, and
 stored per site (``history/<date>-positions.jsonl``). With node GPS points
@@ -117,6 +122,7 @@ from auth import COOKIE, Auth  # noqa: E402
 from locate import M_PER_FT, Locator, band_models, georeference, to_latlon  # noqa: E402
 from publish import Publisher, node_states  # noqa: E402
 from alerting import AlertEngine, AlertLog, Areas, Marks  # noqa: E402
+from calfit import Calibrator, fit_signature, fit_to_save  # noqa: E402
 from sites import SiteManager  # noqa: E402
 
 
@@ -779,6 +785,7 @@ HISTORY_MIN_S = 10         # stored positions: at most one per device this often
 HISTORY_MAX_S = 60         # and while a device stays within HISTORY_MOVE_FT only this often
 HISTORY_MOVE_FT = 3.0
 
+FIT_CHECK_S = 30           # how often the server checks whether a band's model must be re-selected
 LINK_REFRESH_S = 600       # node links (each node's own radio heard by the other nodes): re-read this often,
 LINK_WINDOW_S = 300        # as medians over this window,
 LINK_MIN_PACKETS = 10      # from at least this many frames per receiving node;
@@ -855,6 +862,7 @@ class App:
         self.areas = Areas()
         self.engine = AlertEngine()
         self.alert_log = AlertLog()
+        self._fit_sigs: dict[tuple[str, str], str] = {}     # (site, band) -> inputs last evaluated
         self._links: dict[str, dict[str, Any]] = {}     # site id -> node links doc
         self.positions: dict[str, dict[str, Any]] = {}
         self.geo: dict[str, Any] | None = None
@@ -1071,6 +1079,43 @@ class App:
             tmp.write_text(json.dumps(doc, indent=1))
             os.replace(tmp, path)
         return doc
+
+    # ---------- model selection (server owns the saved fits) ----------
+    def refresh_fits(self) -> dict[str, str]:
+        """Re-select each band's model when its inputs (spots, node links, nodes, walls, defaults) changed.
+        Returns {band: "saved" | "removed" | "unchanged"}."""
+        layout, cal = self.layout, self.cal
+        key = self.site_paths()[0]
+        points, walls = list(cal.data.get("points", [])), list(cal.data.get("walls", []))
+        links = self.node_links().get("links", [])
+        nodes, models, node_sd = layout["nodes"], layout["models"], float(layout.get("node_sd_ft", 2.0))
+        calib, out = None, {}
+        for band in models:
+            sig = fit_signature(band, points, links, nodes, walls, models, node_sd)
+            have = cal.data.get("fits", {}).get(band)
+            if (have or {}).get("sig") == sig or self._fit_sigs.get((key, band)) == sig:
+                out[band] = "unchanged"
+                continue
+            calib = calib or Calibrator(nodes, walls, models, node_sd)
+            want = fit_to_save(calib.best_model(band, points, links), sig)
+            self._fit_sigs[(key, band)] = sig
+            if want is None and have is None:
+                out[band] = "unchanged"
+                continue
+            cal.set_fit(band, want)
+            out[band] = "saved" if want else "removed"
+        return out
+
+    def run_fits(self) -> None:
+        time.sleep(20)
+        while True:
+            try:
+                done = {b: r for b, r in self.refresh_fits().items() if r != "unchanged"}
+                if done:
+                    print(f"console: model selection: {done}", file=sys.stderr)
+            except Exception as exc:  # noqa: BLE001 - keep selecting
+                print(f"console: model selection failed: {exc}", file=sys.stderr)
+            time.sleep(FIT_CHECK_S)
 
     def run_links(self) -> None:
         time.sleep(30)
@@ -1496,6 +1541,7 @@ def main() -> int:
               publisher=publisher, data_dir=data_dir)
     threading.Thread(target=app.run_poller, daemon=True).start()
     threading.Thread(target=app.run_links, daemon=True).start()
+    threading.Thread(target=app.run_fits, daemon=True).start()
     Handler.app = app
     port = int(env("PORT", 8080))
     server = ThreadingHTTPServer(("0.0.0.0", port), partial(Handler, directory=str(HERE / "static")))

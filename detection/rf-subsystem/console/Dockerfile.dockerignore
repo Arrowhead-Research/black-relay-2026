@@ -10,6 +10,7 @@
 !console/locate.py
 !console/publish.py
 !console/alerting.py
+!console/calfit.py
 !console/layout.example.yaml
 !console/static
 **/__pycache__
