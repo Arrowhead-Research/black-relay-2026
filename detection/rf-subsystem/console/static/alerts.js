@@ -147,7 +147,7 @@ function renderAreasBar() {
       catch (err) { $("areas-hint").textContent = `Failed: ${err.message}`; }
     };
   });
-  $("areas-hint").textContent = AL.mode.pts.length ? "Click the first corner to close the area (Esc cancels)." : "Click the corners of an area.";
+  $("areas-hint").textContent = AL.mode.pts.length ? "Click the first corner to finish" : "";
 }
 
 async function areasClick(x, y) {

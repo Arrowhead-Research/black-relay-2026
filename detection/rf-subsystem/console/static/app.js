@@ -209,7 +209,7 @@ function draw() {
   H.forEach(([, x, y], i) => { const [sx, sy] = toS(x, y); i ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); });
   ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
   ctx.font = "11px system-ui"; ctx.textAlign = "center";
-  H.forEach(([, x, y], i) => {
+  if (inSetup()) H.forEach(([, x, y], i) => {   // edge lengths only while setting up
     const [, x2, y2] = H[(i + 1) % H.length];
     const [sx, sy] = toS((x + x2) / 2, (y + y2) / 2);
     const label = `${Math.hypot(x2 - x, y2 - y).toFixed(0)} ft`;
@@ -367,7 +367,6 @@ function renderSelected() {
   const radioOf = S.selfRadio[dev.id];
   $("sel-pos").textContent = radioOf ? radioOf : fix ? `${e.x.toFixed(1)}, ${e.y.toFixed(1)} ft` : e ? `~${e.dFt.toFixed(0)} ft from ${e.node}` : "—";
   $("sel-nodes").textContent = `${Object.keys(dev.nodes).length} / ${S.nodeOrder.length}`;
-  $("sel-res").textContent = fix ? `${e.res.toFixed(1)} dB` : "—";
   const geo = fix && e.lat != null && !radioOf;
   $("sel-geo-box").hidden = !geo;
   if (geo) {
@@ -378,7 +377,6 @@ function renderSelected() {
   $("sel-truth-box").hidden = !(truth && fix);
   if (truth && fix) $("sel-truth").textContent = `${Math.hypot(e.x - truth[0], e.y - truth[1]).toFixed(1)} ft`;
   const st = S.steps.get(dev.id) || [];
-  $("sel-step").textContent = st.length ? `${(st.reduce((a, b) => a + b, 0) / st.length).toFixed(1)} ft` : "—";
   const bars = $("sel-bars");
   bars.innerHTML = "";
   for (const id of S.nodeOrder) {
@@ -469,7 +467,10 @@ function renderModelCard() {
       `<td>${f ? f.loo_median_ft.toFixed(1) + " ft" : '<span class="muted">default</span>'}</td></tr>`;
   }).join("");
   $("model-card").innerHTML = `<tr><th></th><th>n</th><th>σ dB</th><th>wall dB</th><th>error</th></tr>${rows}`;
+  const fitted = Object.keys(S.models).filter((b) => S.calib.fits[b]).map((b) => `${names[b]} ${S.calib.fits[b].loo_median_ft.toFixed(1)} ft`);
+  $("model-sum").textContent = `Model · ${fitted.length ? fitted.join(", ") : "default"}`;
 }
+const inSetup = () => typeof C !== "undefined" && C.mode === "setup";
 
 function refresh() {
   recompute();
@@ -555,7 +556,7 @@ map.addEventListener("mousemove", (ev) => {
     tip.innerHTML = `<b>${n}</b>${S.nodes[n][0].toFixed(1)}, ${S.nodes[n][1].toFixed(1)} ft`;
     tip.hidden = false; tip.style.left = sx + 14 + "px"; tip.style.top = sy + 14 + "px";
   } else tip.hidden = true;
-  $("cursor-readout").textContent = `x ${wx.toFixed(1)} ft · y ${wy.toFixed(1)} ft`;
+  $("cursor-readout").textContent = inSetup() ? `x ${wx.toFixed(1)} ft · y ${wy.toFixed(1)} ft` : "";
 });
 map.addEventListener("mouseleave", () => { $("tooltip").hidden = true; S.hover = null; S.needsDraw = true; });
 map.addEventListener("click", (ev) => {

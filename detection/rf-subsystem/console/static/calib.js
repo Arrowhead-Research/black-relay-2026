@@ -584,6 +584,7 @@ function renderLiveCal() {
   const mine = dev ? S.calib.points.filter((p) => p.band === v.band && p.device === dev.id) : [];
   const clear = $("cal-clear");
   clear.disabled = !mine.length;
+  clear.hidden = !mine.length;
   if (!S.calib.confirmClear) clear.textContent = `Delete device's spots (${mine.length})`;
 
   const del = S.calib.deleted || [];
@@ -617,14 +618,10 @@ function renderLiveCal() {
 }
 
 function calRenderSuggestions(band) {
-  const sg = calSuggest(band), q = sg.quality;
-  const chip = (label, v, goal, unit) => v == null || !isFinite(v) ? ""
-    : `<span class="q ${v <= goal ? "ok" : "need"}" title="goal ±${goal}${unit}">${label} ±${v < 100 ? v.toFixed(v < 1 ? 2 : 1) : "?"}${unit}</span>`;
-  $("cal-quality").innerHTML = chip("n", q.n, CAL_GOALS.n, "") +
-    (q.wall != null ? chip("wall", q.wall, CAL_GOALS.wall, " dB") : "") + chip("offsets", q.offset, CAL_GOALS.offset, " dB") +
-    (sg.good ? '<span class="q ok">done</span>' : "");
+  const sg = calSuggest(band);
+  $("cal-quality").innerHTML = sg.good ? '<span class="q ok">done</span>' : "";
   $("cal-suggest").innerHTML = sg.targets.length
-    ? sg.targets.map((t) => `<div class="sg"><span class="letter">${t.letter}</span><span class="txt">${t.x}, ${t.y} ft · ${escapeHtml(t.why)}</span>` +
+    ? sg.targets.map((t) => `<div class="sg"><span class="letter">${t.letter}</span><span class="txt">${t.x}, ${t.y} ft</span>` +
         `<button class="btn small" data-go="${t.letter}">Go</button></div>`).join("")
     : "";
   $("cal-suggest").querySelectorAll("[data-go]").forEach((b) => {
@@ -728,7 +725,6 @@ function drawCal(ctx, toS, sc) {
     ctx.beginPath(); ctx.arc(tx, ty, 13, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
     ctx.fillStyle = "#ffb347"; ctx.font = "700 13px system-ui"; ctx.textAlign = "center";
     ctx.fillText(t.letter, tx, ty + 5); ctx.textAlign = "left";
-    ctx.font = "11px system-ui"; ctx.fillText(t.why, tx + 16, ty + 4);
   }
   if (S.calib.spot) {
     const [sx, sy] = toS(...S.calib.spot);

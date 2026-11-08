@@ -36,7 +36,6 @@
       <button id="calibrate" class="btn">Calibrate</button>
     </div>
     <div id="nodes-bar" class="walls-bar" hidden>
-      <span class="muted">Drag a node to move it.</span>
       <span id="nodes-chips" class="nodes-chips"></span>
       <button class="btn small active" id="nodes-done">Done</button>
       <div id="nodes-geo" class="nodes-geo"></div>
@@ -61,7 +60,7 @@
     <section class="card" id="nodes-card" hidden>
       <h2>Nodes</h2>
       <ul id="node-list" class="alert-list node-list"></ul>
-      <div id="node-token-warn" class="muted small-note" hidden>Heartbeats are accepted without a node token (CONSOLE_NODE_TOKEN).</div>
+      <div id="node-token-warn" class="muted small-note" hidden>No node token set</div>
     </section>
     <section class="card" id="calib-card" hidden>
       <h2>Calibration</h2>
@@ -98,9 +97,7 @@
         <div class="kv">
           <div><span>Position</span><b id="sel-pos">—</b></div>
           <div><span>Nodes</span><b id="sel-nodes">—</b></div>
-          <div><span>Residual</span><b id="sel-res">—</b></div>
           <div id="sel-truth-box" hidden><span>Error</span><b id="sel-truth">—</b></div>
-          <div id="sel-step-box"><span>Jitter</span><b id="sel-step">—</b></div>
           <div id="sel-geo-box" class="wide" hidden><span>Lat, lon</span><b id="sel-geo" class="mono">—</b></div>
           <div id="sel-seen-box" class="wide" hidden><span>At this site</span><b id="sel-seen">—</b></div>
         </div>
@@ -110,14 +107,13 @@
     </section>
 
     <section class="card">
-      <h2>Model</h2>
-      <table id="model-card" class="model-card"></table>
       <div class="row">
         <label class="toggle"><input type="checkbox" id="rings" checked><span>Rings</span></label>
         <label class="toggle"><input type="checkbox" id="trail" checked><span>Trail</span></label>
         <label class="toggle"><input type="checkbox" id="labels"><span>Labels</span></label>
         <label class="toggle"><input type="checkbox" id="hide-friendly"><span>Hide friendly</span></label>
       </div>
+          <details id="model-box" class="cands"><summary id="model-sum">Model</summary><table id="model-card" class="model-card"></table></details>
     </section>
 
     <section class="card grow">
