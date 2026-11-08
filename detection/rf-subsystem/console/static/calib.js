@@ -18,10 +18,13 @@
  *    fitted on the other spots; its distance to the marked position is the
  *    error. The median is an empirical CEP50 for these spots.
  * 5. Automatic model selection (no manual parameters): every candidate
- *    (per-node offsets on/off x wall loss on/off x transmit-power spread) is
- *    fitted and scored by its leave-one-out median error. The best one is
- *    used if it beats the default model at the same spots, and is saved on
- *    the server so every page uses it.
+ *    (per-node offsets on/off x wall loss on/off x transmit-power spread x
+ *    node links on/off) is fitted and scored by its leave-one-out median
+ *    error at the walked spots. The best one is used if it beats the default
+ *    model at the same spots, and is saved on the server so every page uses it.
+ * 6. Node links (Wi-Fi): the server records each node's own radio as heard by
+ *    the other nodes (known positions and walls, no walking). They are extra
+ *    training spots only: accuracy is always measured at walked spots.
  *
  * The server owns the spots: each add/delete/reassign is one request and is
  * journaled, so two open pages cannot overwrite each other, and deleted spots
@@ -150,10 +153,20 @@ function median(v) {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
-// Spots for a band: recorded ones plus (optionally, Wi-Fi) node radios at their nodes.
-// Spots for a band (recorded ones; node radios are recorded like any device).
+// Spots for a band (recorded ones; node radios can also be recorded like any device).
 function calSpots(band) {
   return S.calib.points.filter((p) => p.band === band).map((p) => ({ ...p, kind: "recorded" }));
+}
+
+// Node links as training spots (Wi-Fi): each node radio at its node, heard by the
+// other nodes (server: medians over 5 min, readings credited to the radio itself).
+// They supersede hand-recorded spots of the same radios (calBest drops those).
+function calLinks(band) {
+  if (band !== "wifi" || !S.data || !S.data.node_links) return [];
+  return (S.data.node_links.links || []).filter((l) => S.nodes[l.node]).map((l) => ({
+    id: `link:${l.node}`, kind: "link", band, device: l.device, device_name: `${l.node} radio`,
+    x: S.nodes[l.node][0], y: S.nodes[l.node][1], pos_sd_ft: calNodeSd(), rssi: l.rssi, n: l.n,
+  }));
 }
 
 // Position accuracy (1 sd, ft) of a spot and of the nodes.
@@ -297,11 +310,11 @@ function calLocate(rssi, fit, device) {
   return [lx / ls, ly / ls];
 }
 
-// Leave-one-out: fit without spot i, locate spot i, measure the error.
-function calLeaveOneOut(spots, opts) {
+// Leave-one-out: fit without spot i (plus any extra training spots), locate spot i, measure the error.
+function calLeaveOneOut(spots, opts, extra = []) {
   const out = [];
   spots.forEach((p, i) => {
-    const fit = calFit(spots.filter((_, j) => j !== i), opts);
+    const fit = calFit(spots.filter((_, j) => j !== i).concat(extra), opts);
     if (!fit) return;
     const est = calLocate(p.rssi, fit, p.device);
     if (est) out.push({ id: p.id, x: est[0], y: est[1], err: Math.hypot(est[0] - p.x, est[1] - p.y) });
@@ -311,8 +324,9 @@ function calLeaveOneOut(spots, opts) {
 
 // All candidate models for a band, scored by leave-one-out error; cached per data.
 function calBest(band) {
-  const spots = calSpots(band);
-  const sig = JSON.stringify([band, spots.map((p) => [p.id, p.x, p.y, p.rssi]), S.walls, S.nodes]);
+  const links = calLinks(band), linked = new Set(links.map((l) => l.device));
+  const spots = calSpots(band).filter((p) => !linked.has(p.device));   // a node radio's link replaces its recorded spot
+  const sig = JSON.stringify([band, spots.map((p) => [p.id, p.x, p.y, p.rssi]), links.map((p) => [p.id, p.rssi]), S.walls, S.nodes]);
   if (S.calib.best && S.calib.best[band] && S.calib.best[band].sig === sig) return S.calib.best[band];
   const dm = S.data.layout.models[band];
   const def = { n: dm.path_loss_exp, p0: dm.ref_rssi_1m, sigma: dm.sigma_db, offsets: {}, txSpread: 8,
@@ -320,12 +334,15 @@ function calBest(band) {
   const scoreErrs = (locate) => spots.map((p) => { const e = locate(p); return e ? Math.hypot(e[0] - p.x, e[1] - p.y) : null; }).filter((v) => v != null);
   const defErrs = scoreErrs((p) => calLocate(p.rssi, def, p.device)).sort((a, b) => a - b);
   const candidates = [];
+  for (const useLinks of links.length ? [false, true] : [false])
   for (const offsets of [false, true]) for (const walls of S.walls.length ? [false, true] : [false]) for (const txSpread of CAL_TX_SPREADS) {
-    const opts = { offsets, walls, txSpread };
-    const fit = calFit(spots, opts);
+    const opts = { offsets, walls, txSpread, links: useLinks };
+    const extra = useLinks ? links : [];
+    const fit = calFit(spots.concat(extra), opts);
     if (!fit) continue;
     fit.txSpread = txSpread;
-    const loo = calLeaveOneOut(spots, opts).map((l) => ({ ...l }));
+    fit.nodeLinks = useLinks ? extra.length : 0;
+    const loo = calLeaveOneOut(spots, opts, extra).map((l) => ({ ...l }));
     const errs = loo.map((l) => l.err).sort((a, b) => a - b);
     const problems = [];
     if (fit.n < CAL_N_RANGE[0] || fit.n > CAL_N_RANGE[1]) problems.push(`n = ${fit.n} outside ${CAL_N_RANGE[0]}–${CAL_N_RANGE[1]}`);
@@ -344,7 +361,10 @@ function calBest(band) {
     : !ok.length ? "too few spots"
     : !adopted ? "fit not better"
     : null;
-  const res = { sig, band, spots, candidates, best, adopted, reason, defMedian, def };
+  // What the node links change: best error at the walked spots without and with them.
+  const bestOf = (use) => ok.find((c) => !!c.opts.links === use);
+  const linksEffect = links.length ? { links: links.length, without: bestOf(false)?.median ?? null, with: bestOf(true)?.median ?? null } : null;
+  const res = { sig, band, spots, links, candidates, best, adopted, reason, defMedian, def, linksEffect };
   S.calib.best = { ...(S.calib.best || {}), [band]: res };
   return res;
 }
@@ -394,11 +414,12 @@ function calSuggest(band) {
   const fit = (r.best && r.best.fit) || null;
   const n = fit ? fit.n : r.def.n, sigma0 = fit ? fit.sigma0 : 6, nodeSd = calNodeSd();
   const cols = { dev: {}, off: {}, wall: null, P: 1 };
-  for (const d of new Set([...r.spots.map((p) => p.device), ref])) cols.dev[d] = cols.P++;
+  const known = r.spots.concat(r.links || []);   // node links are real knowledge too
+  for (const d of new Set([...known.map((p) => p.device), ref])) cols.dev[d] = cols.P++;
   for (const k of S.nodeOrder) cols.off[k] = cols.P++;
   if (S.walls.length) cols.wall = cols.P++;
   const interest = [0, ...Object.values(cols.off), ...(cols.wall != null ? [cols.wall] : [])];
-  const rows = calRows(r.spots, cols);
+  const rows = calRows(known, cols);
   const w = (row) => 1 / (sigma0 * sigma0 + calPosVar(n, row.dM, row.sd, nodeSd));
   let [A] = calNormal(rows, cols, rows.map(w));
   for (let i = 0; i < cols.P; i++) A[i][i] += 1e-4;   // weak prior: keeps the matrix invertible
@@ -600,7 +621,7 @@ function renderLiveCal() {
   });
 
   const box = $("cal-fit"), r = v.result;
-  const describe = (o) => [o.offsets && "offsets", o.walls && "walls", `tx ±${o.txSpread}`].filter(Boolean).join(", ");
+  const describe = (o) => [o.offsets && "offsets", o.walls && "walls", `tx ±${o.txSpread}`, o.links && "node links"].filter(Boolean).join(", ");
   const flagged = v.spots.filter((p) => p.warn && p.warn.length).length;
   const head = r.adopted
     ? `Error <b>${r.best.median.toFixed(1)} ft</b> (default ${r.defMedian.toFixed(1)}) · ${r.best.errs.length} spots · ${describe(r.best.opts)}`
@@ -608,7 +629,9 @@ function renderLiveCal() {
   const rows = r.candidates.slice().sort((a, b) => (a.median ?? 1e9) - (b.median ?? 1e9)).map((c) =>
     `<tr class="${c === r.best && r.adopted ? "best" : ""}${c.problems.length ? " bad" : ""}"><td>${describe(c.opts)}</td><td>${c.fit.n}</td>` +
     `<td>${c.opts.walls ? c.fit.wall : "—"}</td><td>${c.fit.sigma}</td><td>${c.median != null ? c.median.toFixed(1) : "—"}</td></tr>`).join("");
-  box.innerHTML = head + (flagged ? ` · <span class="warn">${flagged} ⚠</span>` : "");
+  const le = r.linksEffect, ft = (v) => (v == null ? "—" : `${v.toFixed(1)} ft`);
+  const linksLine = le ? `<div class="muted">Node links (${le.links}): ${ft(le.without)} without → ${ft(le.with)} with</div>` : "";
+  box.innerHTML = head + (flagged ? ` · <span class="warn">${flagged} ⚠</span>` : "") + linksLine;
   $("cal-cands-box").hidden = !r.candidates.length;
   $("cal-cands-sum").textContent = `Candidates (${r.candidates.length})`;
   $("cal-cands").innerHTML = `<tr><th></th><th>n</th><th>wall</th><th>σ</th><th>ft</th></tr>${rows}` +
@@ -746,6 +769,16 @@ $("calibrate").onclick = () => {
   refresh();
 };
 $("cal-record").onclick = calRecord;
+$("cal-rebuild").onclick = async () => {
+  $("cal-progress").textContent = "Rebuilding…";
+  try {
+    const out = await calApi("api/calibration/rebuild", {});
+    const gone = out.skipped.filter((s) => s.why.startsWith("its log")).length;
+    $("cal-progress").textContent = `Rebuilt ${out.rebuilt.length}, unchanged ${out.unchanged.length}` +
+      (out.skipped.length ? `, skipped ${out.skipped.length}${gone ? ` (${gone} without a log here)` : ""}` : "");
+  } catch (err) { calErr(err); }
+  calLoad();
+};
 $("cal-clear").onclick = async () => {
   const dev = calDev(), clear = $("cal-clear");
   if (!dev) return;

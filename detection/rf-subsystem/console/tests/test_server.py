@@ -558,3 +558,133 @@ def test_positions_history_and_geo(tmp_path):
         assert any(f.name.endswith("-positions.jsonl") for f in (tmp_path / "data" / "sites").glob("*/history/*"))
     finally:
         httpd.shutdown()
+
+
+# ---------- crediting readings to the frame's transmitter ----------
+
+def _mac(s):
+    return bytes(int(x, 16) for x in s.split(":"))
+
+
+def _frame(kind, a1, a2=None, a3=None):
+    """Radiotap (8 bytes) + 802.11 header. kind: beacon | data_to_ds | data_from_ds | ack."""
+    rt = bytes([0, 0, 8, 0, 0, 0, 0, 0])
+    fc = {"beacon": b"\x80\x00", "data_to_ds": b"\x08\x01", "data_from_ds": b"\x08\x02", "ack": b"\xd4\x00"}[kind]
+    if kind == "ack":
+        return rt + fc + b"\x00\x00" + _mac(a1)
+    return rt + fc + b"\x00\x00" + _mac(a1) + _mac(a2) + _mac(a3) + b"\x00\x00"
+
+
+def _frames_log(path, rows):
+    """Kismet log with raw frames: rows of (ts, sourcemac as Kismet logs it, datasource, signal, frame)."""
+    import sqlite3
+    db = sqlite3.connect(path)
+    db.execute("create table datasources (uuid text, name text)")
+    db.execute("create table packets (ts_sec int, ts_usec int, sourcemac text, datasource text, signal int, dlt int, packet blob)")
+    db.executemany("insert into datasources values (?, ?)", [("U1", "wbt-1:wifi"), ("U2", "wbt-2:wifi")])
+    db.executemany("insert into packets values (?, 0, ?, ?, ?, 127, ?)", rows)
+    db.commit()
+    db.close()
+
+
+AP, CLIENT, BCAST = "aa:00:00:00:00:01", "cc:00:00:00:00:02", "ff:ff:ff:ff:ff:ff"
+
+
+def _client_and_ap_rows(t0):
+    rows = []
+    for i in range(6):
+        rows.append((t0 + i, CLIENT, "U1", -70, _frame("data_to_ds", AP, CLIENT, AP)))      # the client itself
+        rows.append((t0 + i, CLIENT, "U1", -30, _frame("ack", CLIENT)))                   # AP's ACK, logged under the client
+        rows.append((t0 + i, CLIENT, "U1", -32, _frame("data_from_ds", BCAST, AP, CLIENT)))  # relayed by the AP
+        rows.append((t0 + i, AP, "U2", -50, _frame("beacon", BCAST, AP, AP)))
+    return rows
+
+
+def test_frame_transmitter_reads_address_2():
+    from server import frame_transmitter
+    assert frame_transmitter(127, _frame("data_from_ds", BCAST, AP, CLIENT)) == AP
+    assert frame_transmitter(127, _frame("ack", CLIENT)) is None
+    assert frame_transmitter(127, b"") is False and frame_transmitter(1, b"\x00" * 30) is False
+
+
+def test_spot_credits_readings_to_the_transmitter(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _frames_log(logs / "Kismet-test.kismet", _client_and_ap_rows(1000))
+    klog = KismetLog(logs)
+    # Before: the AP's ACKs and relays (-30, -32) were counted as the client's.
+    assert klog.spot(CLIENT, 1000, 10) == {"rssi": {"wbt-1": -70.0}, "n": {"wbt-1": 6}}
+    ap = klog.spot(AP, 1000, 10)
+    assert ap["rssi"] == {"wbt-1": -32.0, "wbt-2": -50.0} and ap["n"] == {"wbt-1": 6, "wbt-2": 6}
+
+
+def test_log_tail_credits_readings_to_the_transmitter(tmp_path):
+    from server import LogTail
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _frames_log(logs / "Kismet-test.kismet", _client_and_ap_rows(1000))
+    rows = LogTail(KismetLog(logs)).read(now=1006, backfill_s=60)
+    from collections import Counter
+    assert Counter((mac, node, sig) for mac, node, _, sig in rows) == Counter(
+        {(CLIENT, "wbt-1", -70): 6, (AP, "wbt-1", -32): 6, (AP, "wbt-2", -50): 6})   # ACKs dropped
+
+
+def test_node_links_from_the_log(tmp_path):
+    """Each node radio heard by the other nodes, credited to the radio (not to the AP answering it)."""
+    import sqlite3
+    import time
+    layout = load_layout(LAYOUT)
+    radios = layout["self_emitters"]
+    nodes = [n for n in radios if n in layout["nodes"]][:3]
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    path = logs / "Kismet-test.kismet"
+    db = sqlite3.connect(path)
+    db.execute("create table datasources (uuid text, name text)")
+    db.execute("create table packets (ts_sec int, ts_usec int, sourcemac text, datasource text, signal int, dlt int, packet blob)")
+    db.executemany("insert into datasources values (?, ?)", [(f"U{i}", f"{n}:wifi") for i, n in enumerate(nodes)])
+    now = int(time.time())
+    rows = []
+    for i, tx in enumerate(nodes):
+        mac = radios[tx]
+        for j, rx in enumerate(nodes):
+            for k in range(12):
+                sig = -30 if rx == tx else -60 - 5 * abs(i - j)
+                rows.append((now - k, mac, f"U{j}", sig, _frame("data_to_ds", AP, mac, AP)))
+                rows.append((now - k, mac, f"U{j}", -25, _frame("ack", mac)))                  # AP's ACK: not the radio
+    db.executemany("insert into packets values (?, 0, ?, ?, ?, 127, ?)", rows)
+    db.commit()
+    db.close()
+    app = App(None, layout, window_s=60, poll_s=3, kismet_log=KismetLog(logs))
+    doc = app.refresh_links()
+    links = {x["node"]: x for x in doc["links"]}
+    assert set(links) == set(nodes)
+    a, b, c = nodes
+    assert links[a]["rssi"] == {b: -65.0, c: -70.0}              # own node excluded, ACKs ignored
+    assert links[a]["n"] == {b: 12, c: 12}
+    state_links = {x["node"]: x for x in app.state()["node_links"]["links"]}
+    assert state_links[a]["x"] == layout["nodes"][a][0] and state_links[a]["device"] == radios[a]
+    # Re-reading the same log keeps the stored doc (no change of 2 dB or more)
+    assert app.refresh_links() is doc
+
+
+def test_rebuild_spots_from_the_log(tmp_path):
+    """Spots recorded before the transmitter fix are re-read from the log where it still covers them."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    later = [(1015, AP, "U2", -50, _frame("beacon", BCAST, AP, AP))]       # the log runs past the spots' windows
+    _frames_log(logs / "Kismet-test.kismet", _client_and_ap_rows(1000) + later)
+    store = CalibrationStore(tmp_path / "cal.json")
+    old = store.add_point({**SPOT, "device": CLIENT, "t": 1000, "seconds": 10, "rssi": {"wbt-1": -31.0, "wbt-2": -60.0}})
+    gone = store.add_point({**SPOT, "device": CLIENT, "t": 50, "seconds": 10})            # before the log starts
+    manual = store.add_point({k: v for k, v in SPOT.items() if k not in ("t", "device")})
+    app = App(None, load_layout(LAYOUT), window_s=60, poll_s=3, cal_store=store, kismet_log=KismetLog(logs))
+    ap_spot = store.add_point({**SPOT, "device": AP, "t": 1000, "seconds": 10, "rssi": {"wbt-1": -30.0, "wbt-2": -50.0}})
+    out = app.rebuild_spots()
+    assert out["rebuilt"] == [ap_spot["id"]]
+    assert {s["id"]: s["why"] for s in out["skipped"]} == {
+        old["id"]: "heard by 1 node(s)",          # without the AP's frames only wbt-1 heard the client: left as is
+        gone["id"]: "its log is not available here", manual["id"]: "not recorded from the log"}
+    pts = {p["id"]: p for p in store.data["points"]}
+    assert pts[ap_spot["id"]]["rssi"] == {"wbt-1": -32.0, "wbt-2": -50.0} and pts[ap_spot["id"]]["rebuilt"]
+    assert app.rebuild_spots()["unchanged"] == [ap_spot["id"]]

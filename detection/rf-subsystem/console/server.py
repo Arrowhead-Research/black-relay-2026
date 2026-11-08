@@ -37,6 +37,9 @@ buildings and wipe what it learned. Sign-in and roles: ``auth.py``.
     POST /api/calibration/points/restore     {ids}: restore deleted spots
     POST /api/calibration/points/<id>/reassign  {device}: rebuild a spot for
                         another device from Kismet's packet log (same window)
+    POST /api/calibration/rebuild            re-read every recorded spot from Kismet's log
+                        (where the log still covers it), e.g. after a fix to how
+                        readings are credited; each changed spot is journaled
     GET  /api/calibration/deleted            deleted spots that can be restored
     POST /api/calibration/fits/<band>        {fit} (null removes it)
     POST /api/walls/add                      {walls: [{x1, y1, x2, y2, draft?}]}
@@ -527,6 +530,42 @@ class KismetLogError(Exception):
     pass
 
 
+FRAME_HEADER_BYTES = 160     # radiotap + 802.11 header; enough to read the transmitter address
+
+
+def frame_transmitter(dlt: Any, head: Any) -> str | bool | None:
+    """The MAC that transmitted a logged 802.11 frame (its address 2).
+
+    Kismet logs each frame under its *source* address, which is not always
+    the transmitter: ACK and CTS frames name only their receiver and are
+    logged under it, and frames an access point relays keep the original
+    sender's address. Their signal is the access point's (or the ACKing
+    station's), so crediting it to the logged address pulls devices toward
+    whoever answers them. Returns the transmitter, None for frames without
+    one (ACK, CTS: not usable), or False when the header can't be read
+    (callers then fall back to the logged address).
+    """
+    if not head:
+        return False
+    b = bytes(head)
+    off = 0
+    if dlt == 127:                       # radiotap
+        if len(b) < 4:
+            return False
+        off = int.from_bytes(b[2:4], "little")
+    elif dlt != 105:                     # 105 = bare 802.11
+        return False
+    h = b[off:]
+    if len(h) < 10:
+        return False
+    ftype, subtype = (h[0] >> 2) & 3, (h[0] >> 4) & 15
+    if ftype == 1 and subtype in (12, 13):   # CTS, ACK
+        return None
+    if ftype == 3 or len(h) < 16:
+        return False
+    return ":".join(f"{x:02x}" for x in h[10:16])
+
+
 class KismetLog:
     """Reads per-node signal for one device and time window from Kismet's
     .kismet packet logs (SQLite), to record or rebuild a calibration spot.
@@ -564,6 +603,11 @@ class KismetLog:
         raise KismetLogError(f"could not read {path.name}: {last}")
 
     @staticmethod
+    def _has_frames(db: Any) -> bool:
+        """Raw frames are logged (``dlt``/``packet``): readings can be credited to their transmitter."""
+        return {"dlt", "packet"} <= {r[1] for r in db.execute("pragma table_info(packets)")}
+
+    @staticmethod
     def _has_data_signal(db: Any) -> bool:
         """Bluetooth capture logs no packets: each sighting is a ``data`` row
         (type linuxbthci) with its own ``devmac`` and ``signal``."""
@@ -591,30 +635,62 @@ class KismetLog:
             time.sleep(1.0)
         return False
 
+    def coverage(self) -> list[tuple[float, float]]:
+        """(first, last) record time of each log file."""
+        out = []
+        for f in self._files():
+            lo, hi = self._read(f, lambda db: db.execute("select min(ts_sec), max(ts_sec) from packets").fetchone())
+            if lo is not None:
+                out.append((float(lo), float(hi)))
+        return out
+
+    def has_frames(self) -> bool:
+        files = self._files()
+        return bool(files) and self._read(files[-1], self._has_frames)
+
     def spot(self, mac: str, start: float, seconds: float, min_packets: int = 3) -> dict[str, Any]:
+        return self.spots([mac], start, seconds, min_packets)[mac.lower()]
+
+    def spots(self, macs: list[str], start: float, seconds: float, min_packets: int = 3) -> dict[str, dict[str, Any]]:
+        """Median signal per node for each device in one time window (one pass over the log).
+        Wi-Fi readings are credited to the frame's transmitter (``frame_transmitter``)."""
         if not self.dir or not self.dir.is_dir():
             raise ValueError("Kismet logs are not available to this server (DFVIZ_KISMET_LOGS)")
-        per: dict[str, list[int]] = {}
+        want = {m.lower() for m in macs}
+        per: dict[str, dict[str, list[int]]] = {m: {} for m in want}
+        lo, hi = int(start), int(start + seconds)
 
         def collect(db: Any) -> None:
-            names = {u: n for u, n in db.execute("select uuid, name from datasources")}
-            window = (mac.lower(), int(start), int(start + seconds))
-            rows = db.execute(
-                "select datasource, signal from packets where lower(sourcemac)=? and ts_sec between ? and ? and signal != 0",
-                window).fetchall()
+            names = {u: str(n).split(":", 1)[0].lower() for u, n in db.execute("select uuid, name from datasources")}
+            rows: list[tuple[str, Any, Any]] = []
+            if self._has_frames(db):   # every frame in the window, credited to its transmitter
+                for src, sig, ds, dlt, head in db.execute(
+                        "select lower(sourcemac), signal, datasource, dlt, substr(packet, 1, ?) from packets "
+                        "where ts_sec between ? and ? and signal != 0", (FRAME_HEADER_BYTES, lo, hi)):
+                    ta = frame_transmitter(dlt, head)
+                    who = src if ta is False else ta
+                    if who in want:
+                        rows.append((who, ds, sig))
+            else:
+                marks = ",".join("?" * len(want))
+                rows += db.execute(f"select lower(sourcemac), datasource, signal from packets where lower(sourcemac) in ({marks}) "
+                                   "and ts_sec between ? and ? and signal != 0", (*want, lo, hi)).fetchall()
             if self._has_data_signal(db):   # Bluetooth sightings
-                rows += db.execute(
-                    "select datasource, signal from data where lower(devmac)=? and ts_sec between ? and ? and signal != 0",
-                    window).fetchall()
-            for src, sig in rows:
-                node = str(names.get(src, "")).split(":", 1)[0].lower()
+                marks = ",".join("?" * len(want))
+                rows += db.execute(f"select lower(devmac), datasource, signal from data where lower(devmac) in ({marks}) "
+                                   "and ts_sec between ? and ? and signal != 0", (*want, lo, hi)).fetchall()
+            for mac, src, sig in rows:
+                node = names.get(src, "")
                 if node:
-                    per.setdefault(node, []).append(int(sig))
+                    per[mac].setdefault(node, []).append(int(sig))
 
         for f in self._files():
             self._read(f, collect)
-        rssi = {n: float(statistics.median(v)) for n, v in per.items() if len(v) >= min_packets}
-        return {"rssi": rssi, "n": {n: len(per[n]) for n in rssi}}
+        out = {}
+        for mac, nodes in per.items():
+            rssi = {n: float(statistics.median(v)) for n, v in nodes.items() if len(v) >= min_packets}
+            out[mac] = {"rssi": rssi, "n": {n: len(nodes[n]) for n in rssi}}
+        return out
 
 
 class LogTail:
@@ -631,6 +707,7 @@ class LogTail:
         self.log = log
         self.file: Path | None = None
         self.tables: dict[str, tuple[str, bool]] = {}   # table -> (mac column, has ts_usec)
+        self.frames = False                             # packets has raw frames: credit readings to transmitters
         self.pos: dict[str, int] = {}                   # table -> last rowid read
 
     @staticmethod
@@ -663,16 +740,28 @@ class LogTail:
                         tables[table] = (mac_col, "ts_usec" in cols)
                         pos[table] = self._first_rowid(db, table, now - backfill_s) - 1
                 self.file, self.tables, self.pos = path, tables, pos
+                self.frames = "packets" in tables and KismetLog._has_frames(db)
             names = {u: str(n).split(":", 1)[0].lower() for u, n in db.execute("select uuid, name from datasources")}
             out = []
             for table, (mac_col, usec) in self.tables.items():
+                frames = table == "packets" and self.frames
                 rows = db.execute(
-                    f"select rowid, lower({mac_col}), datasource, signal, ts_sec{', ts_usec' if usec else ''} "
-                    f"from {table} where rowid > ? order by rowid limit ?", (self.pos[table], self.MAX_ROWS)).fetchall()
+                    f"select rowid, lower({mac_col}), datasource, signal, ts_sec, {'ts_usec' if usec else '0'}, "
+                    f"{'dlt, substr(packet, 1, ?)' if frames else 'null, null'} "
+                    f"from {table} where rowid > ? order by rowid limit ?",
+                    ((FRAME_HEADER_BYTES,) if frames else ()) + (self.pos[table], self.MAX_ROWS)).fetchall()
                 for r in rows:
                     node, sig = names.get(r[2]), r[3]
-                    if node and isinstance(sig, int) and -130 <= sig < 0:
-                        out.append((r[1], node, r[4] + (r[5] or 0) / 1e6 if usec else float(r[4]), sig))
+                    if not (node and isinstance(sig, int) and -130 <= sig < 0):
+                        continue
+                    mac = r[1]
+                    if frames:
+                        ta = frame_transmitter(r[6], r[7])
+                        if ta is None:
+                            continue          # ACK/CTS: no transmitter address
+                        if ta is not False:
+                            mac = ta
+                    out.append((mac, node, r[4] + (r[5] or 0) / 1e6, sig))
                 if rows:
                     self.pos[table] = rows[-1][0]
             return out
@@ -683,6 +772,11 @@ class LogTail:
 HISTORY_MIN_S = 10         # stored positions: at most one per device this often,
 HISTORY_MAX_S = 60         # and while a device stays within HISTORY_MOVE_FT only this often
 HISTORY_MOVE_FT = 3.0
+
+LINK_REFRESH_S = 600       # node links (each node's own radio heard by the other nodes): re-read this often,
+LINK_WINDOW_S = 300        # as medians over this window,
+LINK_MIN_PACKETS = 10      # from at least this many frames per receiving node;
+LINK_CHANGE_DB = 2.0       # kept unchanged unless a median moves this much (no fit churn from noise)
 
 LOG_STALE_S = 30            # log unreadable this long: fall back to Kismet's per-second history
 LOG_PENDING_S = 15          # keep readings for devices Kismet's REST hasn't listed yet this long
@@ -751,6 +845,7 @@ class App:
         self.log_tail = LogTail(self.kismet_log) if self.kismet_log.dir else None
         self.locator = Locator()
         self.publisher = publisher
+        self._links: dict[str, dict[str, Any]] = {}     # site id -> node links doc
         self.positions: dict[str, dict[str, Any]] = {}
         self.geo: dict[str, Any] | None = None
         self.hist_last: dict[str, tuple[float, float, float, str]] = {}
@@ -850,6 +945,88 @@ class App:
             self.publisher.positions(positions, by_id, site, set(layout.get("self_emitters", {}).values()), now)
             self.publisher.nodes(report, site, now)
 
+    def rebuild_spots(self) -> dict[str, Any]:
+        """Re-read each recorded spot (same device and window) from Kismet's log, where it still covers it."""
+        cal, klog = self.cal, self.kismet_log
+        cover = klog.coverage() if klog.dir else []
+        rebuilt, unchanged, skipped = [], [], []
+        for pt in list(cal.data.get("points", [])):
+            t, secs = pt.get("t"), float(pt.get("seconds") or (45 if pt.get("band") == "bt" else 15))
+            if not t or not pt.get("device"):
+                skipped.append({"id": pt["id"], "why": "not recorded from the log"})
+                continue
+            if not any(lo <= t and t + secs <= hi for lo, hi in cover):
+                skipped.append({"id": pt["id"], "why": "its log is not available here"})
+                continue
+            rec = klog.spot(pt["device"], t, secs)
+            if len(rec["rssi"]) < 2:
+                skipped.append({"id": pt["id"], "why": f"heard by {len(rec['rssi'])} node(s)"})
+                continue
+            if rec["rssi"] == pt.get("rssi"):
+                unchanged.append(pt["id"])
+                continue
+            cal.replace_point(pt["id"], {"rssi": rec["rssi"], "n": rec["n"], "source": "kismet-log",
+                                         "rebuilt": round(time.time(), 1), "warn": []})
+            rebuilt.append(pt["id"])
+        return {"rebuilt": rebuilt, "unchanged": unchanged, "skipped": skipped}
+
+    # ---------- node links ----------
+    def _site_key(self) -> tuple[str, Path | None]:
+        if self.sites:
+            s = self.sites.active()
+            return s.id, s.dir / "node_links.json"
+        return "default", None
+
+    def node_links(self) -> dict[str, Any]:
+        """Stored node links of the active site: each node's own radio as heard by the other nodes."""
+        key, path = self._site_key()
+        if key not in self._links:
+            try:
+                self._links[key] = json.loads(path.read_text()) if path and path.exists() else {"links": []}
+            except (OSError, ValueError):
+                self._links[key] = {"links": []}
+        return self._links[key]
+
+    def refresh_links(self) -> dict[str, Any]:
+        """Re-read the node links from Kismet's log (medians over LINK_WINDOW_S)."""
+        layout = self.layout
+        radios = {n: m for n, m in layout.get("self_emitters", {}).items() if n in layout["nodes"]}
+        doc = self.node_links()
+        if not radios or not self.kismet_log.dir or not self.kismet_log.has_frames():
+            return doc     # without raw frames the readings can't be credited to the radios themselves
+        end = self.kismet_log.newest()
+        res = self.kismet_log.spots(list(radios.values()), end - LINK_WINDOW_S, LINK_WINDOW_S, LINK_MIN_PACKETS)
+        links = []
+        for node, mac in sorted(radios.items()):
+            r = res[mac.lower()]
+            rssi = {k: v for k, v in sorted(r["rssi"].items()) if k != node and k in layout["nodes"]}
+            if len(rssi) >= 2:
+                links.append({"node": node, "device": mac.lower(), "rssi": rssi, "n": {k: r["n"][k] for k in rssi}})
+        old = {(x["node"], x["device"]): x["rssi"] for x in doc.get("links", [])}
+        same = len(old) == len(links) and all(
+            (x["node"], x["device"]) in old and set(old[(x["node"], x["device"])]) == set(x["rssi"])
+            and all(abs(old[(x["node"], x["device"])][k] - v) < LINK_CHANGE_DB for k, v in x["rssi"].items())
+            for x in links)
+        if same:
+            return doc
+        doc = {"t": end, "window_s": LINK_WINDOW_S, "links": links}
+        key, path = self._site_key()
+        self._links[key] = doc
+        if path:
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(doc, indent=1))
+            os.replace(tmp, path)
+        return doc
+
+    def run_links(self) -> None:
+        time.sleep(30)
+        while True:
+            try:
+                self.refresh_links()
+            except Exception as exc:  # noqa: BLE001 - keep refreshing
+                print(f"console: node links not refreshed: {exc}", file=sys.stderr)
+            time.sleep(LINK_REFRESH_S)
+
     def record_history(self, positions: dict[str, dict[str, Any]], by_id: dict[str, dict[str, Any]], now: float) -> None:
         """Append positions to the active site's history: a device at most every
         HISTORY_MIN_S, and while it stays put only every HISTORY_MAX_S."""
@@ -928,6 +1105,7 @@ class App:
                 "devices": devices,
                 "geo": self.geo,
                 "publish": self.publisher.status() if self.publisher else {"enabled": False},
+                "node_links": self._links_state(layout),
                 "calibration": calibration_samples(self.tracker, layout, now),
                 "calibration_fits": cal.data.get("fits", {}),
                 "calibration_version": cal.version,
@@ -936,6 +1114,13 @@ class App:
                 "source_nodes": sorted({x["name"].split(":", 1)[0] for x in sources if ":" in x["name"]}),
                 "walls": cal.data.get("walls", []),
             }
+
+    def _links_state(self, layout: dict[str, Any]) -> dict[str, Any]:
+        doc, nodes = self.node_links(), layout["nodes"]
+        links = [{**x, "x": nodes[x["node"]][0], "y": nodes[x["node"]][1],
+                  "rssi": {k: v for k, v in x["rssi"].items() if k in nodes}}
+                 for x in doc.get("links", []) if x["node"] in nodes]
+        return {"t": doc.get("t"), "window_s": doc.get("window_s"), "links": [x for x in links if len(x["rssi"]) >= 2]}
 
     def samples(self, emitter_id: str, since: float) -> dict[str, Any]:
         with self.lock:
@@ -1153,6 +1338,8 @@ class Handler(SimpleHTTPRequestHandler):
         if path.startswith("/api/calibration/fits/"):
             cal.set_fit(path.rsplit("/", 1)[1], body.get("fit"))
             return self._json({"fits": cal.data["fits"], "version": cal.version})
+        if path == "/api/calibration/rebuild":
+            return self._json({**self.app.rebuild_spots(), "version": cal.version})
         if path.startswith("/api/calibration/points/") and path.endswith("/reassign"):
             point_id = path.split("/")[4]
             pt = next((p for p in cal.data["points"] if p["id"] == point_id), None)
@@ -1237,6 +1424,7 @@ def main() -> int:
     app = App(poller, None, window, float(env("POLL_S", 3)), extra, None, klog, sites=sites, auth=auth,
               publisher=publisher)
     threading.Thread(target=app.run_poller, daemon=True).start()
+    threading.Thread(target=app.run_links, daemon=True).start()
     Handler.app = app
     port = int(env("PORT", 8080))
     server = ThreadingHTTPServer(("0.0.0.0", port), partial(Handler, directory=str(HERE / "static")))
