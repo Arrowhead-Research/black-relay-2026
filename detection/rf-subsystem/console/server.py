@@ -76,6 +76,9 @@ Environment (CONSOLE_*; the older DFVIZ_* names still work):
     CONSOLE_POLL_S   Kismet poll interval, default 3
     CONSOLE_PORT     default 8080
     CONSOLE_KISMET_LOGS  directory of Kismet .kismet logs (calibration spots)
+    CONSOLE_MQTT_HOST  publish positions and node status to this broker (unset: off;
+                     ``publish.py``); CONSOLE_MQTT_PORT (1883), CONSOLE_TOPIC_PREFIX
+                     (detection/rf)
     CONSOLE_DEMO     "1": add synthetic emitters with known positions (BLE
                      walker, passing car with TPMS, ...); "only": demo alone
 """
@@ -104,6 +107,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from auth import COOKIE, Auth  # noqa: E402
 from locate import M_PER_FT, Locator, band_models, georeference, to_latlon  # noqa: E402
+from publish import Publisher  # noqa: E402
 from sites import SiteManager  # noqa: E402
 
 
@@ -725,7 +729,7 @@ class App:
     def __init__(self, poller: Any, layout: dict[str, Any] | None, window_s: float, poll_s: float,
                  extra_sources: list[Any] | None = None, cal_store: CalibrationStore | None = None,
                  kismet_log: KismetLog | None = None, sites: SiteManager | None = None,
-                 auth: Auth | None = None) -> None:
+                 auth: Auth | None = None, publisher: Publisher | None = None) -> None:
         """With ``sites``, layout and calibration follow the active site;
         without it (tests, single-site use) the given layout and store are used."""
         self.poller = poller
@@ -746,6 +750,7 @@ class App:
         self.last_purge = 0.0
         self.log_tail = LogTail(self.kismet_log) if self.kismet_log.dir else None
         self.locator = Locator()
+        self.publisher = publisher
         self.positions: dict[str, dict[str, Any]] = {}
         self.geo: dict[str, Any] | None = None
         self.hist_last: dict[str, tuple[float, float, float, str]] = {}
@@ -834,7 +839,16 @@ class App:
         geo = None if tf is None else {k: tf[k] for k in ("method", "nodes", "rms_m", "scale", "heading_deg", "warnings")}
         with self.lock:
             self.positions, self.geo = positions, geo
+            report = self.health.report(now)
         self.record_history(positions, by_id, now)
+        if self.publisher is not None:
+            if self.sites:
+                s = self.sites.active()
+                site = {"id": s.id, "name": s.doc["name"]}
+            else:
+                site = {"id": "default", "name": str(layout.get("name", "site"))}
+            self.publisher.positions(positions, by_id, site, set(layout.get("self_emitters", {}).values()), now)
+            self.publisher.nodes(report, site, now)
 
     def record_history(self, positions: dict[str, dict[str, Any]], by_id: dict[str, dict[str, Any]], now: float) -> None:
         """Append positions to the active site's history: a device at most every
@@ -913,6 +927,7 @@ class App:
                 "kismet": dict(self.status),
                 "devices": devices,
                 "geo": self.geo,
+                "publish": self.publisher.status() if self.publisher else {"enabled": False},
                 "calibration": calibration_samples(self.tracker, layout, now),
                 "calibration_fits": cal.data.get("fits", {}),
                 "calibration_version": cal.version,
@@ -1212,7 +1227,15 @@ def main() -> int:
         extra.append(DemoSource(sites.layout()))
     window = max(float(env("WINDOW_S", 60)), max(t["window_s"] for t in BAND_TIMING.values()))
     klog = KismetLog(env("KISMET_LOGS"))
-    app = App(poller, None, window, float(env("POLL_S", 3)), extra, None, klog, sites=sites, auth=auth)
+    publisher = None
+    if env("MQTT_HOST"):
+        from rfanalytics.formats import TOPIC_PREFIX
+
+        publisher = Publisher.mqtt(env("MQTT_HOST"), int(env("MQTT_PORT", 1883)), data_dir / "rf-outbox.jsonl",
+                                   env("TOPIC_PREFIX", TOPIC_PREFIX))
+        print(f"console: publishing positions and node status to {env('MQTT_HOST')}", file=sys.stderr)
+    app = App(poller, None, window, float(env("POLL_S", 3)), extra, None, klog, sites=sites, auth=auth,
+              publisher=publisher)
     threading.Thread(target=app.run_poller, daemon=True).start()
     Handler.app = app
     port = int(env("PORT", 8080))

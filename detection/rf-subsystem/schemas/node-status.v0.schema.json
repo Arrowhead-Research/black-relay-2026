@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/black-relay-2026/detection/rf-subsystem/schemas/node-status.v0.schema.json",
+  "title": "RF node status (v0)",
+  "description": "State of one WBT node, on detection/rf/status/nodes: on every change and as a periodic heartbeat (WBT Console), or on online/offline changes (rf-analytics). Draft: replaced by the fusion standard when it is published.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "id", "timestamp", "node_id", "state"],
+  "properties": {
+    "schema": { "const": "rf.node-status.v0" },
+    "id": { "type": "string" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "node_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+    "state": { "enum": ["online", "degraded", "offline"], "description": "degraded: some capture sources are down or silent." },
+    "last_heard": { "type": ["string", "null"], "format": "date-time" },
+    "site": {
+      "type": "object", "additionalProperties": false, "required": ["id", "name"],
+      "properties": { "id": { "type": "string" }, "name": { "type": "string" } }
+    },
+    "sources": {
+      "type": "object",
+      "description": "Capture source (wifi, bt, tpms) -> its state.",
+      "additionalProperties": { "enum": ["ok", "silent", "stopped", "error"] }
+    }
+  }
+}

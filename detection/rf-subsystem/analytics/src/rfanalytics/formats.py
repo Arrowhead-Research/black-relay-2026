@@ -19,12 +19,16 @@ TOPICS = {
     "alert": f"{TOPIC_PREFIX}/alerts",
     "camera_cue": f"{TOPIC_PREFIX}/cues/camera",
     "node_status": f"{TOPIC_PREFIX}/status/nodes",
+    "position": f"{TOPIC_PREFIX}/positions",       # WBT Console: device position updates
 }
 SCHEMAS = {
     "alert": "rf.alert.v0",
     "camera_cue": "rf.camera-cue.v0",
     "node_status": "rf.node-status.v0",
+    "position": "rf.position.v0",
 }
+# JSON Schemas for the payloads: detection/rf-subsystem/schemas/<name>.schema.json
+# (position.v0, node-status.v0).
 
 
 def to_wire(msg: Message, topic_prefix: str = TOPIC_PREFIX) -> tuple[str, dict[str, Any]]:

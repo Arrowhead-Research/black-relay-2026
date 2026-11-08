@@ -95,6 +95,8 @@ services:
     depends_on:
       kismet-server:
         condition: service_healthy
+      mqtt:
+        condition: service_started
     environment:
       KISMET_URL: http://kismet-server:2501
       KISMET_USER: ${KISMET_ADMIN_USER:-}
@@ -106,6 +108,8 @@ services:
       CONSOLE_ADMIN_PASSWORD: ${CONSOLE_ADMIN_PASSWORD:-}
       CONSOLE_KISMET_LOGS: /kismet-data/logs      # read-only: calibration spots from packet logs
       CONSOLE_DEMO: ${CONSOLE_DEMO:-}             # 1 = add synthetic emitters with known positions
+      CONSOLE_MQTT_HOST: ${CONSOLE_MQTT_HOST-mqtt}  # positions + node status out (set empty to turn off)
+      CONSOLE_TOPIC_PREFIX: ${RF_TOPIC_PREFIX:-detection/rf}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${CONSOLE_PORT:-8080}:8080"
     volumes:

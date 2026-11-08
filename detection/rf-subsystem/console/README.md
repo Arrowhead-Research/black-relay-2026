@@ -1,6 +1,6 @@
 # WBT Console
 
-The operator web page for the RF subsystem. It shows where Wi-Fi, Bluetooth and TPMS devices are from the RSSI each WBT node hears, smoothed so estimates don't jump around. Each building the system is set up in is a **site** with its own node layout, walls, calibration and history, which can be exported, cleared or wiped when the team moves on. The path-loss model is fitted automatically from **live calibration** (a carried device recorded at known spots), and its accuracy is the **measured** error at those spots. It runs as a container (`rf-console`) next to the central Kismet server and reads Kismet's per-node signal history and packet log through the `rfanalytics` Kismet adapter. Positions are computed on the server, stored per site, and get latitude/longitude once node GPS points are set. It does not publish alerts or positions yet: see *Roadmap*.
+The operator web page for the RF subsystem. It shows where Wi-Fi, Bluetooth and TPMS devices are from the RSSI each WBT node hears, smoothed so estimates don't jump around. Each building the system is set up in is a **site** with its own node layout, walls, calibration and history, which can be exported, cleared or wiped when the team moves on. The path-loss model is fitted automatically from **live calibration** (a carried device recorded at known spots), and its accuracy is the **measured** error at those spots. It runs as a container (`rf-console`) next to the central Kismet server and reads Kismet's per-node signal history and packet log through the `rfanalytics` Kismet adapter. Positions are computed on the server, stored per site, and get latitude/longitude once node GPS points are set. It publishes device positions and node status to MQTT for the fusion service (see *Publishing*); alerts come later (see *Roadmap*).
 
 ## Start
 
@@ -122,6 +122,17 @@ Positions are in the site's own feet. Give the server node GPS points and every 
 
 The fit maths was checked on synthetic spots generated from known parameters (n = 2.3, P0 = −52 dBm, offsets +3/−2/0/−1 dB): it recovers them exactly. With `CONSOLE_DEMO=1`, the *demo calibration beacon* hops between six known spots every 45 s, so the whole workflow can be practised without walking around.
 
+## Publishing
+
+With `CONSOLE_MQTT_HOST` set (compose default: the stack's own broker, which other teams reach as `rf-mqtt:1883` on the `fusion` network), the console publishes:
+
+| Topic | Schema | When | Delivery |
+|---|---|---|---|
+| `detection/rf/positions` | [`rf.position.v0`](../schemas/position.v0.schema.json) | a device's estimate has new readings: at most every 2 s, and every 30 s while it moves less than 1 ft | QoS 0, dropped while the broker is down (an old position is not replayed) |
+| `detection/rf/status/nodes` | [`rf.node-status.v0`](../schemas/node-status.v0.schema.json) | a node's state (`online`, `degraded`, `offline`) or a source's status changes, and every 60 s | QoS 1 through the durable outbox (`/data/rf-outbox.jsonl`) |
+
+A position carries site feet, `lat`/`lon` once the site is geo-referenced, the measured error (`null` until calibrated) and the nodes that heard the device (two nodes fix a curve, not a point). The nodes' own radios are not published. `analytics/src/rfanalytics/formats.py` is the only code that knows topics and envelopes: when the fusion standard arrives, it and the schemas change. `/api/state` → `publish` shows counters and the connection. Watch the feed: `docker run --rm --network fusion eclipse-mosquitto:2.0.22 mosquitto_sub -h rf-mqtt -t 'detection/rf/#' -v`.
+
 ## Site files
 
 Everything about a particular location stays out of the repository:
@@ -143,6 +154,7 @@ The code and the defaults are general; the example layout is a placeholder. Node
 | `CONSOLE_SITE` | `central/.env` | `default`: the site used before one is chosen in the Site menu |
 | `CONSOLE_DATA` | container environment | `/data` (the `rf-console-data` volume) |
 | Kismet packet logs (read-only, for recording spots) | `kismet-logs` volume at `/kismet-data/logs` (`CONSOLE_KISMET_LOGS`) | — |
+| `CONSOLE_MQTT_HOST` / `CONSOLE_MQTT_PORT` / `CONSOLE_TOPIC_PREFIX` | `central/.env` (`RF_TOPIC_PREFIX` for the prefix) | `mqtt` / 1883 / `detection/rf`; set the host empty to stop publishing |
 | `CONSOLE_DEMO` | `central/.env` | empty (`1` adds demo emitters, `only` uses them without Kismet) |
 | `CONSOLE_PORT` | `central/.env` | 8080 (bound to `BIND_ADDR`) |
 | `CONSOLE_POLL_S` | container environment | 3 s poll |
@@ -157,7 +169,7 @@ The older `DFVIZ_*` names are still read. Data from the earlier single-site layo
 cd analytics && uv sync --extra console && uv run pytest ../console/tests
 ```
 
-`tests/test_server.py` covers RSSI smoothing (outlier rejection, time weighting), live readings from the Kismet log (each read once, new log files followed, fallback to `signal_rrd`), per-second history from `signal_rrd`, per-band windows (TPMS kept longer), calibration pairs, the demo source, `/api/state` and the page (no-cache headers) against a fake Kismet; the calibration API (per-spot add/delete/restore, journal, two-page race, fits, position-accuracy fields); recording and rebuilding spots from a Kismet-format SQLite log, including retrying while the log is write-locked; and walls (one operation at a time, stale-page race, persistent version). `tests/test_locate.py` checks server localization against the page's former code (golden values), restarts of smoothing on layout or model changes, and geo-referencing (two points, one point plus heading, a wrong coordinate flagged). `tests/test_server.py` also covers positions in `/api/state`, history throttling and `/api/site/geo`. `tests/test_sites.py` covers site workspaces (first start, legacy migration, new site copies nodes but nothing learned, node validation, retention purge by whole days, export, clear, wipe guards) and sign-in (tokens, expiry, tampering, role checks over HTTP, JSON-only posts, slow wrong-password replies). The browser-side fit maths (path-loss, wall loss, offsets, weighted by position accuracy) was checked by recovering known parameters from synthetic spots in the page.
+`tests/test_server.py` covers RSSI smoothing (outlier rejection, time weighting), live readings from the Kismet log (each read once, new log files followed, fallback to `signal_rrd`), per-second history from `signal_rrd`, per-band windows (TPMS kept longer), calibration pairs, the demo source, `/api/state` and the page (no-cache headers) against a fake Kismet; the calibration API (per-spot add/delete/restore, journal, two-page race, fits, position-accuracy fields); recording and rebuilding spots from a Kismet-format SQLite log, including retrying while the log is write-locked; and walls (one operation at a time, stale-page race, persistent version). `tests/test_locate.py` checks server localization against the page's former code (golden values), restarts of smoothing on layout or model changes, and geo-referencing (two points, one point plus heading, a wrong coordinate flagged). `tests/test_server.py` also covers positions in `/api/state`, history throttling and `/api/site/geo`. `tests/test_publish.py` covers position throttling, skipping node radios, dropping while disconnected, node states and heartbeats, and validates every payload (and rf-analytics' node status) against `schemas/`. `tests/test_sites.py` covers site workspaces (first start, legacy migration, new site copies nodes but nothing learned, node validation, retention purge by whole days, export, clear, wipe guards) and sign-in (tokens, expiry, tampering, role checks over HTTP, JSON-only posts, slow wrong-password replies). The browser-side fit maths (path-loss, wall loss, offsets, weighted by position accuracy) was checked by recovering known parameters from synthetic spots in the page.
 
 ## Lessons learned (apply to any site)
 
@@ -183,7 +195,7 @@ Agreed plan (2026-11-07). The TAK, camera and fusion message formats are still t
 | Phase | Delivers | Done when |
 |---|---|---|
 | **1. Console + site workspaces** (done) | Rename; sites (new, switch, rename, export, clear, wipe, retention); node placement; Live/Setup; sign-in with operator/admin roles | A building can be set up from the page and wiped with nothing left over |
-| **2. Server positions + history** (positions, position history and lat/lon done 2026-11-08) | Localizer ported to Python (must match the page on recorded data); one Kismet feed for map and analytics; SQLite baseline and visits per site; replay of recorded data for tuning | The page shows server positions; the baseline survives a restart; analytics can be re-run on a past day |
+| **2. Server positions + history** (positions, position history, lat/lon and MQTT position/node-status publishing done 2026-11-08) | Localizer ported to Python (must match the page on recorded data); one Kismet feed for map and analytics; SQLite baseline and visits per site; replay of recorded data for tuning | The page shows server positions; the baseline survives a restart; analytics can be re-run on a past day |
 | **3. Marking + alerting** | Friendly (team or site scope) and priority marks from the device card; alert areas drawn on the map; new-device-in-range and priority alerts; alert feed; the alert pipeline runs inside the console; MQTT alerts with lat/lon | A new phone walked into the inner area alerts within seconds; a marked device alerts wherever it is heard |
 | **4. Cameras + TAK** | Cameras placed with heading, field of view and range; cues only to cameras that can see the target; snapshot results; TAK config topic | A simulated vehicle in view cues only that camera; a test TAK message marks a device |
 | **5. Co-travelers + vehicles** | TPMS sensors grouped into vehicles; co-arrival scoring against chance; "arrived with" alerts | Precision/recall measured on the simulator, then a live test |
