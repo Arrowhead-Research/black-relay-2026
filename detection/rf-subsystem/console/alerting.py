@@ -16,6 +16,8 @@
   | ``area_entry`` | a non-friendly device placed by 3+ nodes enters an area (once per visit) | medium (high if priority) |
   | ``linger`` | it stays in the area longer than the area's linger time | medium (high if priority) |
   | ``node_offline`` / ``node_online`` | a node's capture stops / comes back | high / info |
+  | ``new_device`` | a stable address (not randomized) first seen at this site after its learning period (baseline.py), heard by 2+ nodes | low |
+  | ``repeat_visitor`` | a stable address starts its 3rd (or later) visit to this site | low |
 
   A visit ends after VISIT_GAP_S without the device in the area, so position
   jitter at an area's edge does not repeat alerts.
@@ -42,6 +44,7 @@ MAX_AREA_POINTS = 64
 DEFAULT_LINGER_S = 300.0
 VISIT_GAP_S = 600.0        # a device away (from the area, or unheard) this long starts a new visit
 AREA_MIN_NODES = 3         # two nodes fix a curve, not a point: no area alerts from them
+REPEAT_VISITS = 3          # repeat_visitor from this visit on
 RECENT_ALERTS = 300
 
 
@@ -175,7 +178,7 @@ class AlertEngine:
 
     def evaluate(self, site: str, now: float, devices: dict[str, dict[str, Any]], positions: dict[str, dict[str, Any]],
                  marks: dict[str, dict[str, Any]], areas: list[dict[str, Any]], node_states: dict[str, dict[str, Any]],
-                 friendly_ids: set[str]) -> list[dict[str, Any]]:
+                 friendly_ids: set[str], events: list[dict[str, Any]] = ()) -> list[dict[str, Any]]:
         if site != self.site:              # another site: nothing carries over
             self.site, self.visits, self.heard, self.nodes = site, {}, {}, {}
         out: list[dict[str, Any]] = []
@@ -211,6 +214,16 @@ class AlertEngine:
                     alert("linger", sev, dev_id, {"dwell_s": round(now - v["since"])}, area)
         for key in [k for k, v in self.visits.items() if now - v["last"] > VISIT_GAP_S]:
             del self.visits[key]
+
+        for ev in events:                  # baseline: new at this site, or back again
+            dev = devices.get(ev["device"])
+            if not dev or dev.get("randomized") or ev["device"] in friendly_ids \
+                    or (marks.get(ev["device"]) or {}).get("kind") == "friendly":
+                continue
+            if ev["kind"] == "new" and len(dev["nodes"]) >= 2:
+                alert("new_device", "low", ev["device"], {"nodes": sorted(dev["nodes"])})
+            elif ev["kind"] == "visit" and ev["visits"] >= REPEAT_VISITS:
+                alert("repeat_visitor", "low", ev["device"], {"visits": ev["visits"], "away_s": ev.get("away_s")})
 
         for node, st in node_states.items():
             prev = self.nodes.get(node)

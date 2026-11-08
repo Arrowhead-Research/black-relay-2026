@@ -170,3 +170,38 @@ window.addEventListener("keydown", (ev) => {
 });
 $("hide-friendly").checked = AL.hideFriendly;
 $("hide-friendly").onchange = () => { AL.hideFriendly = $("hide-friendly").checked; store.set("hideFriendly", AL.hideFriendly); refresh(); };
+
+// ---------- device history at this site (baseline.py) ----------
+AL.hist = { id: null, at: 0, data: null };
+
+function ago(t) {
+  const s = Math.max(0, Date.now() / 1000 - t);
+  return s < 90 ? "just now" : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129600 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`;
+}
+
+// Usual local hours from the per-hour-of-week presence counts (UTC).
+function usualHours(presence) {
+  const tz = -new Date().getTimezoneOffset() / 60, byHour = new Array(24).fill(0);
+  for (const [how, n] of Object.entries(presence || {})) byHour[(((+how % 24) + tz) % 24 + 24) % 24] += n;
+  const max = Math.max(...byHour);
+  if (byHour.reduce((a, b) => a + b, 0) < 3) return "";
+  const on = byHour.map((n) => n >= max / 2 && n > 0), ranges = [];
+  for (let h = 0; h < 24; h++) if (on[h] && !on[(h + 23) % 24]) { let e = h; while (on[(e + 1) % 24] && (e + 1) % 24 !== h) e = (e + 1) % 24; ranges.push(`${String(h).padStart(2, "0")}–${String((e + 1) % 24).padStart(2, "0")}`); }
+  return ranges.length && ranges.length < 6 ? ranges.join(", ") : "";
+}
+
+function renderDeviceHistory(dev) {
+  const box = $("sel-seen-box");
+  if (!dev) { box.hidden = true; return; }
+  if (AL.hist.id !== dev.id || Date.now() - AL.hist.at > 30000) {
+    AL.hist = { id: dev.id, at: Date.now(), data: AL.hist.id === dev.id ? AL.hist.data : null };
+    fetch(`api/device?id=${encodeURIComponent(dev.id)}`, { cache: "no-store" }).then((r) => r.json()).then((d) => {
+      if (AL.hist.id === dev.id) { AL.hist.data = d.baseline; renderDeviceHistory(dev); }
+    }).catch(() => {});
+  }
+  const b = AL.hist.data;
+  box.hidden = !b;
+  if (!b) return;
+  const hours = usualHours(b.presence);
+  $("sel-seen").textContent = `first seen ${ago(b.first_seen)} · visit ${b.visits}${b.background ? " · background" : ""}${hours ? ` · usually ${hours}` : ""}`;
+}

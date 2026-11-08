@@ -26,6 +26,9 @@ buildings and wipe what it learned. Sign-in and roles: ``auth.py``.
                                              active site, or {node, remove: true}
     POST /api/site/geo                       {node, lat, lon} | {node, remove: true} |
                                              {heading_deg}: geo-reference the site
+    GET  /api/device?id=<emitter>           baseline of one device at the active site
+                                             (first/last seen, visits, hours of the week)
+    GET  /api/baseline                       baseline summary of the active site
     GET  /api/history?id=<emitter>&since=<unix s>
                                              stored positions of one device (active site)
     POST /api/marks                          {device, kind: friendly|priority, scope: team|site, label?}
@@ -123,6 +126,7 @@ from locate import M_PER_FT, Locator, band_models, georeference, to_latlon  # no
 from publish import Publisher, node_states  # noqa: E402
 from alerting import AlertEngine, AlertLog, Areas, Marks  # noqa: E402
 from calfit import Calibrator, fit_signature, fit_to_save  # noqa: E402
+from baseline import Baseline  # noqa: E402
 from sites import SiteManager  # noqa: E402
 
 
@@ -863,6 +867,7 @@ class App:
         self.engine = AlertEngine()
         self.alert_log = AlertLog()
         self._fit_sigs: dict[tuple[str, str], str] = {}     # (site, band) -> inputs last evaluated
+        self._baselines: dict[str, Baseline] = {}
         self._links: dict[str, dict[str, Any]] = {}     # site id -> node links doc
         self.positions: dict[str, dict[str, Any]] = {}
         self.geo: dict[str, Any] | None = None
@@ -962,8 +967,9 @@ class App:
         radios = set(layout.get("self_emitters", {}).values())
         key, mpath = self.site_file("marks.json")
         marks = self.marks.merged(key, mpath)
+        events = self.baseline().observe(devices, now)
         alerts = self.engine.evaluate(key, now, by_id, positions, marks, self.areas.get(*self.site_file("areas.json")),
-                                      node_states(report), radios)
+                                      node_states(report), radios, events)
         alerts = [self._alert_record(a, by_id, positions, marks, site) for a in alerts]
         if alerts:
             self.alert_log.add(key, self.history_dir(), alerts)
@@ -1031,6 +1037,13 @@ class App:
     def history_dir(self) -> Path | None:
         _, d = self.site_paths()
         return d / "history" if d else None
+
+    def baseline(self) -> Baseline:
+        key = self.site_paths()[0]
+        if key not in self._baselines:
+            h = self.history_dir()
+            self._baselines[key] = Baseline(h / "baseline.sqlite" if h else None)
+        return self._baselines[key]
 
     # ---------- node links ----------
     def _site_key(self) -> tuple[str, Path | None]:
@@ -1332,6 +1345,13 @@ class Handler(SimpleHTTPRequestHandler):
             if not emitter_id:
                 return self._json({"error": "id is required"}, 400)
             return self._json(self.app.samples(emitter_id, since))
+        if url.path == "/api/device":
+            emitter_id = (parse_qs(url.query).get("id") or [""])[0].lower()
+            if not emitter_id:
+                return self._json({"error": "id is required"}, 400)
+            return self._json({"id": emitter_id, "baseline": self.app.baseline().get(emitter_id)})
+        if url.path == "/api/baseline":
+            return self._json(self.app.baseline().summary())
         if url.path == "/api/history":
             q = parse_qs(url.query)
             try:
