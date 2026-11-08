@@ -46,7 +46,6 @@ function alertWho(a) {
 }
 
 function renderAlerts() {
-  renderNodes();
   const v = S.data && S.data.alerts;
   if (!v) return;
   const pill = $("alert-pill");
@@ -214,34 +213,3 @@ function renderDeviceHistory(dev) {
     `${hours ? ` · usually ${hours}` : ""}${veh}${tw ? ` · travels with ${tw}` : ""}`;
 }
 
-// ---------- node health (rf-node-agent heartbeats) ----------
-function upText(s) { return s == null ? "" : s < 5400 ? `up ${Math.round(s / 60)} min` : s < 172800 ? `up ${Math.round(s / 3600)} h` : `up ${Math.round(s / 86400)} d`; }
-
-function renderNodes() {
-  const h = (S.data && S.data.nodes_health) || {};
-  const names = Object.keys(h);
-  $("nodes-card").hidden = !names.length;
-  $("node-token-warn").hidden = !names.length || !!(S.data && S.data.node_token);
-  const admin = typeof C !== "undefined" && (C.role === "admin" || !C.authOn);
-  const key = JSON.stringify([admin, names.map((n) => [n, h[n].problems, Math.round((h[n].temp_c || 0) / 2), Math.round((h[n].uptime_s || 0) / 3600), h[n].pending])]);
-  if (key === AL.nodesKey) return;
-  AL.nodesKey = key;
-  $("node-list").innerHTML = names.map((n) => {
-    const x = h[n], cap = Object.entries(x.units || {}).filter(([u]) => u.startsWith("kismet-cap"));
-    const up = cap.filter(([, st]) => st.active === "active").length;
-    const silent = x.problems.includes("agent silent");
-    const cls = silent ? "bad" : x.problems.length ? "warn" : "ok";
-    const restart = admin ? cap.filter(([, st]) => st.active !== "active").map(([u]) =>
-      `<button class="btn small" data-node="${escapeHtml(n)}" data-unit="${escapeHtml(u)}"${x.pending.includes(u) ? " disabled" : ""}>restart ${escapeHtml(u.replace("kismet-cap-", ""))}</button>`).join("") : "";
-    return `<li class="${cls}"><span class="sev"></span><b>${escapeHtml(n)}</b>` +
-      `<span class="muted">${x.temp_c != null ? `${x.temp_c.toFixed(0)} °C · ` : ""}${upText(x.uptime_s)} · capture ${up}/${cap.length}</span><span>${restart}</span>` +
-      (x.problems.length ? `<span class="probs">${escapeHtml(x.problems.join(" · "))}</span>` : "") + "</li>";
-  }).join("");
-  $("node-list").querySelectorAll("[data-unit]").forEach((b) => {
-    b.onclick = async () => {
-      b.disabled = true;
-      try { const out = await alertsApi(`api/nodes/${encodeURIComponent(b.dataset.node)}/restart`, { unit: b.dataset.unit }); S.data.nodes_health = out.nodes_health; renderNodes(); }
-      catch (err) { b.disabled = false; b.title = err.message; }
-    };
-  });
-}

@@ -264,10 +264,3 @@ a.btn { text-decoration: none; display: inline-block; }
 #areas-bar input, #areas-bar select { background: var(--panel-2); color: inherit; border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; font: inherit; }
 .badge.mark-friendly { background: #1f4d3a; color: #9be7c4; }
 .badge.mark-priority { background: #5a1f2a; color: #ffb3bd; }
-.node-list li { cursor: default; grid-template-columns: 8px auto 1fr auto; }
-.node-list li.ok .sev { background: var(--ok); }
-.node-list li.bad .sev { background: var(--bad); box-shadow: 0 0 6px var(--bad); }
-.node-list li.warn .sev { background: var(--accent); }
-.node-list .probs { grid-column: 2 / -1; color: #ffb3bd; font-size: 11px; }
-.node-list button { padding: 1px 6px; font-size: 11px; }
-.small-note { font-size: 11px; margin-top: 6px; }

@@ -64,7 +64,7 @@ tailscale status && tailscale ip -4
 
 ## Node agent (rf-node-agent)
 
-`agent/rf-node-agent` (Python standard library) runs as `rf-node-agent.service` and POSTs the node's health to the WBT Console every 30 s over the tailnet (`http://CENTRAL_HOST:8080/api/nodes/heartbeat`): temperature, throttling and undervoltage (`vcgencmd get_throttled`), uptime, load, memory, disk, the capture units (`kismet-cap-*`, `tailscaled`: state and restart count), whether the Wi-Fi, Bluetooth (`bluetoothctl list`: sysfs has no address on these kernels) and RTL-SDR adapters are present, and the node's tailnet address. The console shows it in the *Nodes* card, adds it to `rf.node-status.v0`, and raises `node_health` alerts for new problems. An admin can restart a capture unit from the card; the agent runs it on its next heartbeat (only `kismet-cap-wifi`, `-bt`, `-tpms`).
+`agent/rf-node-agent` (Python standard library) runs as `rf-node-agent.service` and POSTs the node's health to the WBT Console every 30 s over the tailnet (`http://CENTRAL_HOST:8080/api/nodes/heartbeat`): temperature, throttling and undervoltage (`vcgencmd get_throttled`), uptime, load, memory, disk, the capture units (`kismet-cap-*`, `tailscaled`: state and restart count), whether the Wi-Fi, Bluetooth (`bluetoothctl list`: sysfs has no address on these kernels) and RTL-SDR adapters are present, and the node's tailnet address. The console adds it to `rf.node-status.v0` and raises `node_health` alerts for new problems. An admin can queue a restart of a capture unit (`POST /api/nodes/<node>/restart`); the agent runs it on its next heartbeat (only `kismet-cap-wifi`, `-bt`, `-tpms`).
 
 ```sh
 sudo install -m 755 detection/rf-subsystem/node/agent/rf-node-agent /usr/local/sbin/
@@ -72,7 +72,7 @@ sudo install -m 644 detection/rf-subsystem/node/systemd/rf-node-agent.service /e
 sudo systemctl daemon-reload && sudo systemctl enable --now rf-node-agent
 ```
 
-It reads `/etc/rf-node/rf-node.env` (`CENTRAL_HOST`, `NODE_NAME`, `WIFI_IFACE`, `BT_ADDR`; optional `CONSOLE_PORT`, `AGENT_INTERVAL_S`, `NODE_TOKEN`). Until a token is set the console accepts heartbeats without one and says so in the Nodes card. To turn authentication on (or rotate the token), run from a machine with SSH to the nodes and the central host:
+It reads `/etc/rf-node/rf-node.env` (`CENTRAL_HOST`, `NODE_NAME`, `WIFI_IFACE`, `BT_ADDR`; optional `CONSOLE_PORT`, `AGENT_INTERVAL_S`, `NODE_TOKEN`). Until a token is set the console accepts heartbeats without one (its log says so at start). To turn authentication on (or rotate the token), run from a machine with SSH to the nodes and the central host:
 
 ```sh
 detection/rf-subsystem/node/set-node-token.sh -k ~/.ssh/<node key> -c dev@<central host> <node> [<node> ...]

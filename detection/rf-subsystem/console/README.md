@@ -92,7 +92,7 @@ On sf-dev, 30 minutes replay in about 30 s. Its baseline starts empty at `--star
 
 ## Node health
 
-Each node's `rf-node-agent` (see [`../node/README.md`](../node/README.md#node-agent-rf-node-agent)) reports every 30 s. The *Nodes* card lists each node (temperature, uptime, capture units running) with its problems: agent silent for 90 s, 80 °C or hotter, throttling or undervoltage now, a capture unit not running, a capture adapter missing, under 10 % disk free. Admins get a *restart* button for a capture unit that is down. A node with problems is `degraded` in `rf.node-status.v0`, which also carries its `health`. Heartbeats need `CONSOLE_NODE_TOKEN` once it is set (`node/set-node-token.sh`).
+Each node's `rf-node-agent` (see [`../node/README.md`](../node/README.md#node-agent-rf-node-agent)) reports every 30 s. Problems raise `node_health` alerts: agent silent for 90 s, 80 °C or hotter, throttling or undervoltage now, a capture unit not running, a capture adapter missing, under 10 % disk free. `/api/state` → `nodes_health` has the details; an admin can queue a capture-unit restart with `POST /api/nodes/<node>/restart`. A node with problems is `degraded` in `rf.node-status.v0`, which also carries its `health`. Heartbeats need `CONSOLE_NODE_TOKEN` once it is set (`node/set-node-token.sh`).
 
 ## Vehicles and co-travelers
 
