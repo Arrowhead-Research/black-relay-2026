@@ -22,6 +22,18 @@ docker compose up -d --build --wait
 
 Open `http://<BIND_ADDR>:2501` and log in with the credentials from `.env`. The credentials are written into the `kismet-home` volume **on first start only**. To change them later, use the Kismet UI, or run `docker compose down -v` (this also deletes the logs) and start again.
 
+## Shared fusion host
+
+On the team's shared Docker host, the stack lives under the host's per-team directory (copy the whole `rf-subsystem` tree: the builds use `../analytics` and `../console`). Add to `.env`:
+
+```sh
+BIND_ADDR=0.0.0.0
+COMPOSE_FILE=docker-compose.yml:docker-compose.fusion.yml
+COMPOSE_PROFILES=console
+```
+
+`docker-compose.fusion.yml` publishes only 3501 (node capture) and the console port, keeps Kismet's 2501 on the host's loopback (use an SSH tunnel), and puts `mqtt` on the external `fusion` network as `rf-mqtt`. Claim published ports in the host's `PORTS.md` first. Nodes point `CENTRAL_HOST` in `/etc/rf-node/rf-node.env` at the host's tailnet address.
+
 ## Live analytics (Kismet → alerts → MQTT)
 
 ```sh

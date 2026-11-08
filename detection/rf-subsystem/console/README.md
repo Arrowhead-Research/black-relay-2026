@@ -7,7 +7,6 @@ The operator web page for the RF subsystem. It shows where Wi-Fi, Bluetooth and 
 ```sh
 mkdir -p site && cp layout.example.yaml site/layout.yaml   # team template: node radio MACs, first layout
 cd ../central
-# in .env: CONSOLE_OPERATOR_PASSWORD and CONSOLE_ADMIN_PASSWORD (empty = sign-in off)
 docker compose --profile console up -d --build
 open http://<BIND_ADDR>:8080        # e.g. http://127.0.0.1:8080
 # with synthetic emitters that have known positions (BLE walker, still laptop and headset, passing car with 4 TPMS sensors):
@@ -18,7 +17,7 @@ Kismet must have `keep_per_datasource_stats=true` (already set in `central/kisme
 
 ## Layout of the page
 
-- **Header:** the site menu (site name ▾), Kismet and device counts, capture-source warnings, the **Live / Setup** switch, Pause, and the signed-in role.
+- **Header:** the site menu (site name ▾), Kismet and device counts, capture-source warnings, the **Live / Setup** switch and Pause.
 - **Live** (default): the map, the selected device, the model card and the device list. Nothing on the map can be changed by accident.
 - **Setup:** a toolbar on the map with **Nodes** (drag nodes to where they are; place nodes Kismet knows that are not on the map yet; remove nodes), **Walls** and **Calibrate**. One tool is active at a time.
 
@@ -30,7 +29,7 @@ Data per site lives in the `rf-console-data` volume under `/data/sites/<id>/`; e
 
 ## Sign-in
 
-Two roles, with passwords from `central/.env`: **operator** (watch, set up the site, calibrate, create and switch sites) and **admin** (also export, clear, wipe and retention). Sessions are signed cookies valid for 12 hours. With neither password set, sign-in is off and the header says *sign-in off*: use that only in the lab. Every POST must be JSON (a cross-site form cannot send it). Keep the console on the LAN or tailnet; it does not serve HTTPS itself. Survivability's identity stack (Pocket ID OIDC with team groups) is the likely future sign-in.
+Set or change the passwords with `central/set-console-passwords.sh` on the host (it prompts, writes `.env` and restarts the console). Two roles, with passwords from `central/.env`: **operator** (watch, set up the site, calibrate, create and switch sites) and **admin** (also export, clear, wipe and retention). Sessions are signed cookies valid for 12 hours. With neither password set, sign-in is off and the header says *sign-in off*: use that only in the lab. Every POST must be JSON (a cross-site form cannot send it). Keep the console on the LAN or tailnet; it does not serve HTTPS itself. Survivability's identity stack (Pocket ID OIDC with team groups) is the likely future sign-in.
 
 ## What the page shows
 
@@ -126,7 +125,7 @@ The code and the defaults are general; the example layout is a placeholder. Node
 | Setting | Where | Default |
 |---|---|---|
 | Team template: node radio MACs (`self_emitters`), `node_sd_ft`, per-band model defaults (incl. `wall_db`), first site's node positions | `console/site/layout.yaml`, mounted at `/site`. Template: [`layout.example.yaml`](layout.example.yaml) | the example, if no file |
-| `CONSOLE_OPERATOR_PASSWORD`, `CONSOLE_ADMIN_PASSWORD` | `central/.env` | empty: sign-in off |
+| `CONSOLE_OPERATOR_PASSWORD`, `CONSOLE_ADMIN_PASSWORD` | `central/.env` | sign-in passwords (operator, admin); neither set = sign-in off |
 | `CONSOLE_SITE` | `central/.env` | `default`: the site used before one is chosen in the Site menu |
 | `CONSOLE_DATA` | container environment | `/data` (the `rf-console-data` volume) |
 | Kismet packet logs (read-only, for recording spots) | `kismet-logs` volume at `/kismet-data/logs` (`CONSOLE_KISMET_LOGS`) | — |
@@ -165,7 +164,7 @@ Site-specific findings (spot positions, nearby networks, per-node results) belon
 
 ## Roadmap
 
-Agreed plan (2026-11-07). Wire formats for TAK, cameras and alerts are drafted in [`../INTERFACES-DRAFT.md`](../INTERFACES-DRAFT.md) for the other teams to review.
+Agreed plan (2026-11-07). The TAK, camera and fusion message formats are still to come.
 
 | Phase | Delivers | Done when |
 |---|---|---|

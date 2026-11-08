@@ -35,6 +35,33 @@ Pin each node's capture adapter in `/etc/rf-node/rf-node.env` with `BT_ADDR` (li
 
 Tests for the adapter selection and `btmgmt info` parsing run anywhere with bash: `bash detection/rf-subsystem/node/tests/test_bt_lib.sh`. Verified on four nodes: after a Kismet restart, all Bluetooth sources delivered packets again within 10 s; before the fix the UB500 sources stayed at zero.
 
+## Tailscale (Headscale tailnet)
+
+Installed on all four WBT nodes 2026-11-08 (Tailscale 1.104.5 from the official apt repository, `tailscaled` enabled) and joined to the Headscale tailnet as `node-wbt-1`…`node-wbt-4`; capture now reaches the central server over the tailnet.
+
+Install on a new node (Debian 13 trixie; use the matching codename on other releases):
+
+```sh
+curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.tailscale-keyring.list | sudo tee /etc/apt/sources.list.d/tailscale.list >/dev/null
+sudo apt-get update && sudo apt-get install -y tailscale
+sudo systemctl enable --now tailscaled
+```
+
+**Why the nodes join the tailnet themselves.** In survivability's design (`survivability/identity-stack/ARCHITECTURE_ROADMAP.md` on the survivability branches), tailnet clients reach the Detection VLAN `10.73.200.0/24` through a subnet router, but **that VLAN cannot initiate sessions toward tailnet clients**. Kismet remote capture is initiated by the node (to the central server, TCP 3501), so a node that relies on the subnet router alone could not reach a central server on the tailnet. Joined nodes connect directly.
+
+**Join** (on each node, once the Headscale details and an auth key are available):
+
+```sh
+sudo tailscale up --login-server https://<headscale-url> --auth-key <auth key> \
+  --hostname wbt-1 --accept-routes=false
+tailscale status && tailscale ip -4
+```
+
+- `--accept-routes=false` (the Linux default, stated explicitly): a node on the Detection VLAN must not route that VLAN through the subnet router as well.
+- Then point capture at the central server's tailnet name: set `CENTRAL_HOST` in `/etc/rf-node/rf-node.env` to its MagicDNS name and restart the `kismet-cap-*` units. Do this one node at a time and confirm its sources in Kismet before the next; LAN SSH keeps working if anything goes wrong.
+- The central server must join the tailnet too (Kismet's remote-capture port 3501 bound where tailnet clients can reach it).
+
 ## Install the example systemd units
 
 These units use legacy TCP remote capture (`--tcp`, port 3501), validated with Kismet 2026-10-R1 (see [`../central/README.md`](../central/README.md), DESIGN.md open question 5).
@@ -43,6 +70,10 @@ These units use legacy TCP remote capture (`--tcp`, port 3501), validated with K
 sudo mkdir -p /etc/rf-node
 sudo cp detection/rf-subsystem/node/systemd/rf-node.env.example /etc/rf-node/rf-node.env
 sudoedit /etc/rf-node/rf-node.env   # set CENTRAL_HOST, NODE_NAME, interfaces; verify devices
+
+# keep the kernel's TV-tuner drivers off the RTL-SDR (rtl_433 needs the device)
+sudo install -m 644 detection/rf-subsystem/node/modprobe/rf-rtlsdr-blacklist.conf /etc/modprobe.d/
+sudo modprobe -r rtl2832_sdr dvb_usb_rtl28xxu rtl2832 dvb_usb_v2 2>/dev/null || true   # unbound: safe while rtl_433 runs
 
 sudo cp detection/rf-subsystem/node/systemd/kismet-cap-*.service /etc/systemd/system/
 # kismet-cap-bt.service runs /usr/local/sbin/rf-bt-capture: install the Bluetooth helper scripts first (above)
@@ -63,6 +94,6 @@ On the central server, confirm data sources appear (named `<NODE_NAME>:wifi`, `:
 
 - **Do not capture on the backhaul/SSH interface.** If the node uses onboard Wi‑Fi for connectivity, keep it off monitor mode and capture only on the external Wi‑Fi adapter.
 - **Verify interfaces per node** (`kismet_cap_linux_wifi --list`, `kismet_cap_linux_bluetooth --list`, `kismet_cap_sdr_rtl433 --list`). USB enumeration and `hci*` ordering can vary.
-- **No secrets here.** Do not commit `/etc/rf-node/rf-node.env` values, credentials, or Tailscale keys.
-- **TPMS conflicts:** stop any standalone `rtl_433` process/service that claims the RTL‑SDR before running the Kismet TPMS helper.
+- **No secrets here.** Do not commit `/etc/rf-node/rf-node.env` values, credentials, or Tailscale/Headscale auth keys.
+- **TPMS conflicts:** stop any standalone `rtl_433` process/service that claims the RTL‑SDR before running the Kismet TPMS helper. Without `modprobe/rf-rtlsdr-blacklist.conf`, the kernel's DVB-T driver (`dvb_usb_rtl28xxu`) binds the dongle at boot and `dmesg` shows `RTL2832U ... deinitialized and disconnected` when `rtl_433` takes it over. That message is the driver being detached, not a power or USB fault.
 - **WebSocket remote capture** (port 2501, API key/user auth) is not validated by these templates; adjust `ExecStart` only after confirming the flags for your Kismet release.
