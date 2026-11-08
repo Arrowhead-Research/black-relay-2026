@@ -2,6 +2,11 @@
 
 Living handoff for agents working on Black Relay `detection/rf-subsystem`. Keep this factual; **never add credentials, tokens, or secrets**.
 
+## Documents to keep current
+
+- **Operator guide: `console/USER_GUIDE.md`.** Any change an operator can see (page controls, labels, alert rules, setup or calibration steps, site menu) updates it in the same commit, including its *Last updated* date.
+- **MQTT contract: `MQTT-CONTRACT.md`.** Any change to topics, payload fields, QoS, delivery or timing updates it (and `schemas/`) in the same commit, with a change-log row; breaking changes follow its versioning rules.
+
 ## Current state (validated)
 
 - **Nodes:** `wbt-1`–`wbt-4` on Raspberry Pi OS, running Kismet remote capture helpers (**`2026-10-R1`**, same as central) to central Kismet. Datasource names map to node IDs: `wbt-1:wifi|bt|tpms` etc. Capture targets: `wlan1` (Wi‑Fi, external mt7921u), `hci0` (BT), `rtl433-0` (TPMS). **Do not capture `wlan0`** (backhaul/SSH). All three helpers run from the repo's systemd units in `node/systemd/` (installed 2026-11-08) with per-node `/etc/rf-node/rf-node.env` (**no secrets**). `ps` shows two processes per Wi-Fi/TPMS helper: that's the helper's own fork, not a duplicate.
