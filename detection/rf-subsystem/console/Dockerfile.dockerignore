@@ -9,6 +9,7 @@
 !console/demo.py
 !console/locate.py
 !console/publish.py
+!console/alerting.py
 !console/layout.example.yaml
 !console/static
 **/__pycache__

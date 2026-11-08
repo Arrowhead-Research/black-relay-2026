@@ -10,6 +10,8 @@ payload envelopes); payload schemas: ``schemas/position.v0.schema.json`` and
   is sent when its estimate has new readings, at most every POS_MIN_S, and
   while it barely moves only every POS_MAX_S. The nodes' own radios are not
   published (they are the team's infrastructure, at their nodes).
+- **Alerts** (``detection/rf/alerts``, rf.alert.v0) from ``alerting.py``, through
+  the durable outbox.
 - **Node status** (``detection/rf/status/nodes``, rf.node-status.v0) goes
   through the durable outbox (QoS 1, kept on disk until the broker
   acknowledges it): on every state change and every NODE_HEARTBEAT_S.
@@ -87,7 +89,7 @@ class Publisher:
                    topic_prefix)
 
     def positions(self, positions: dict[str, dict[str, Any]], devices: dict[str, dict[str, Any]],
-                  site: dict[str, str], skip: set[str], now: float) -> None:
+                  site: dict[str, str], skip: set[str], now: float, marks: dict[str, dict[str, Any]] | None = None) -> None:
         for eid, p in positions.items():
             if eid in skip or not p.get("updated"):
                 continue
@@ -96,7 +98,8 @@ class Publisher:
                 dt, moved = now - last[0], math.hypot(p["x"] - last[1], p["y"] - last[2])
                 if dt < POS_MIN_S or (dt < POS_MAX_S and moved < POS_MOVE_FT):
                     continue
-            topic, payload = to_wire(Message("position", p["t"], position_body(eid, p, devices[eid], site)), self.prefix)
+            body = position_body(eid, p, devices[eid], site, ((marks or {}).get(eid) or {}).get("kind"))
+            topic, payload = to_wire(Message("position", p["t"], body), self.prefix)
             if self.live.publish(topic, json.dumps(payload, separators=(",", ":"))):
                 self.stats["positions_sent"] += 1
                 self.last_pos[eid] = (now, p["x"], p["y"])
@@ -121,6 +124,20 @@ class Publisher:
                 continue
             self.last_node[node] = (now, st["state"], st["sources"])
 
+    def alert(self, rec: dict[str, Any]) -> None:
+        """One alert (AlertLog record) through the durable outbox, as rf.alert.v0."""
+        body = {k: rec[k] for k in ("rule_id", "rule_type", "severity", "site", "context") if k in rec}
+        for k in ("emitter", "location"):
+            if rec.get(k):
+                body[k] = rec[k]
+        msg = Message("alert", rec["t"], body, id=rec["id"])
+        topic, payload = to_wire(msg, self.prefix)
+        try:
+            self.durable.send(msg.id, topic, payload)
+            self.stats["alerts_queued"] = self.stats.get("alerts_queued", 0) + 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"console: alert not queued: {exc}", file=sys.stderr)
+
     def status(self) -> dict[str, Any]:
         live = getattr(self.live, "connected", None)
         outbox = getattr(getattr(self.durable, "outbox", None), "__len__", None)
@@ -128,7 +145,7 @@ class Publisher:
                 "outbox": outbox() if outbox else None, **self.stats}
 
 
-def position_body(eid: str, p: dict[str, Any], dev: dict[str, Any], site: dict[str, str]) -> dict[str, Any]:
+def position_body(eid: str, p: dict[str, Any], dev: dict[str, Any], site: dict[str, str], mark: str | None = None) -> dict[str, Any]:
     pos: dict[str, Any] = {"x_ft": p["x"], "y_ft": p["y"], "calibrated": p["calibrated"],
                            "error_ft": None if p.get("err_ft") is None else round(p["err_ft"], 1)}
     if "lat" in p:
@@ -136,7 +153,7 @@ def position_body(eid: str, p: dict[str, Any], dev: dict[str, Any], site: dict[s
     return {
         "site": site,
         "emitter": {"id": eid, "type": dev["type"], "band": dev["band"], "name": dev.get("name"),
-                    "manufacturer": dev.get("manufacturer"), "randomized": bool(dev.get("randomized"))},
+                    "manufacturer": dev.get("manufacturer"), "randomized": bool(dev.get("randomized")), "mark": mark},
         "position": pos,
         "heard_by": list(p["ids"]),
     }

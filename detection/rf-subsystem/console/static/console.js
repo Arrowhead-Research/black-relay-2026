@@ -97,11 +97,12 @@ function setTool(tool) {
   if (tool !== "walls" && S.wallsMode.on) wallsToggle();
   if (tool !== "calibrate" && S.calib.on) { S.calib.on = false; renderLiveCal(); refresh(); }
   if (tool !== "nodes" && S.nodesMode.on) nodesToggle(false);
+  if (tool !== "areas" && AL.mode.on) areasToggle(false);
 }
 $("setup-bar").addEventListener("click", (ev) => {
   const b = ev.target.closest("button");
   if (!b) return;
-  setTool({ "walls-btn": "walls", calibrate: "calibrate", "nodes-btn": "nodes" }[b.id] || null);
+  setTool({ "walls-btn": "walls", calibrate: "calibrate", "nodes-btn": "nodes", "areas-btn": "areas" }[b.id] || null);
 }, true);
 
 // ---------- nodes tool ----------

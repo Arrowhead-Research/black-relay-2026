@@ -24,7 +24,8 @@
         "band": { "enum": ["wifi", "bt", "tpms"] },
         "name": { "type": ["string", "null"], "description": "SSID, Bluetooth name or TPMS model, when known." },
         "manufacturer": { "type": ["string", "null"] },
-        "randomized": { "type": "boolean", "description": "Locally administered (randomized) address." }
+        "randomized": { "type": "boolean", "description": "Locally administered (randomized) address." },
+        "mark": { "enum": ["friendly", "priority", null], "description": "Operator's mark: friendly (team device) or priority (device of interest)." }
       }
     },
     "position": {

@@ -17,6 +17,7 @@
     <span class="pill" id="kismet-pill"><i></i><span>connecting…</span></span>
     <span class="pill subtle" id="count-pill">0 devices</span>
     <span class="pill warn" id="src-pill" hidden></span>
+    <span class="pill alert" id="alert-pill" hidden></span>
     <div class="seg" id="mode" role="tablist"><button data-mode="live" class="on">Live</button><button data-mode="setup">Setup</button></div>
     <button id="pause" class="btn">Pause</button>
     <span class="pill warn" id="auth-off" hidden title="Set CONSOLE_OPERATOR_PASSWORD and CONSOLE_ADMIN_PASSWORD in central/.env">sign-in off</span>
@@ -31,6 +32,7 @@
     <div class="overlay top-left"></div>
     <div class="overlay top-center" id="setup-bar" hidden>
       <button id="nodes-btn" class="btn">Nodes</button>
+      <button id="areas-btn" class="btn">Areas</button>
       <button id="calibrate" class="btn">Calibrate</button>
     </div>
     <div id="nodes-bar" class="walls-bar" hidden>
@@ -40,11 +42,22 @@
       <div id="nodes-geo" class="nodes-geo"></div>
       <div id="nodes-hint" class="walls-hint"></div>
     </div>
+    <div id="areas-bar" class="walls-bar" hidden>
+      <input id="area-name" placeholder="Area name" size="14" maxlength="40" autocomplete="off">
+      <label class="muted">Linger <select id="area-linger"><option value="120">2 min</option><option value="300" selected>5 min</option><option value="900">15 min</option><option value="3600">1 h</option></select></label>
+      <span id="area-chips" class="nodes-chips"></span>
+      <button class="btn small active" id="areas-done">Done</button>
+      <div id="areas-hint" class="walls-hint"></div>
+    </div>
     <div class="overlay bottom-right" id="cursor-readout"></div>
     <div id="tooltip" hidden></div>
   </section>
 
   <aside>
+    <section class="card" id="alerts-card" hidden>
+      <div class="list-head"><h2>Alerts</h2><button id="alerts-ack" class="btn small">Acknowledge all</button></div>
+      <ul id="alert-list" class="alert-list"></ul>
+    </section>
     <section class="card" id="calib-card" hidden>
       <h2>Calibration</h2>
       <div class="cal-row"><span class="muted">Device</span> <span id="cal-ref">select in list</span></div>
@@ -85,6 +98,7 @@
           <div id="sel-step-box"><span>Jitter</span><b id="sel-step">—</b></div>
           <div id="sel-geo-box" class="wide" hidden><span>Lat, lon</span><b id="sel-geo" class="mono">—</b></div>
         </div>
+        <div id="sel-mark" class="mark-row"></div>
         <div id="sel-bars" class="bars"></div>
       </div>
     </section>
@@ -96,6 +110,7 @@
         <label class="toggle"><input type="checkbox" id="rings" checked><span>Rings</span></label>
         <label class="toggle"><input type="checkbox" id="trail" checked><span>Trail</span></label>
         <label class="toggle"><input type="checkbox" id="labels"><span>Labels</span></label>
+        <label class="toggle"><input type="checkbox" id="hide-friendly"><span>Hide friendly</span></label>
       </div>
     </section>
 
@@ -120,6 +135,7 @@
 <script src="app.js"></script>
 <script src="calib.js"></script>
 <script src="walls.js"></script>
+<script src="alerts.js"></script>
 <script src="console.js"></script>
 </body>
 </html>

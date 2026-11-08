@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/black-relay-2026/detection/rf-subsystem/schemas/alert.v0.schema.json",
+  "title": "RF alert (v0)",
+  "description": "One alert on detection/rf/alerts, from the WBT Console (area entry, linger, priority device, node offline/online) or rf-analytics (loiter, new device, repeat visitor, watchlist, node offline, camera cue). Draft: replaced by the fusion standard when it is published (analytics/src/rfanalytics/formats.py).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "id", "timestamp", "rule_id", "rule_type", "severity"],
+  "properties": {
+    "schema": { "const": "rf.alert.v0" },
+    "id": { "type": "string" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "rule_id": { "type": "string" },
+    "rule_type": { "type": "string" },
+    "severity": { "enum": ["info", "low", "medium", "high", "critical"] },
+    "site": {
+      "type": "object", "additionalProperties": false, "required": ["id", "name"],
+      "properties": { "id": { "type": "string" }, "name": { "type": "string" } }
+    },
+    "emitter": {
+      "type": "object",
+      "required": ["id", "type"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": ["string", "null"] },
+        "band": { "enum": ["wifi", "bt", "tpms", null] },
+        "name": { "type": ["string", "null"] },
+        "randomized_address": { "type": ["boolean", "null"] },
+        "mark": { "enum": ["friendly", "priority", null] },
+        "label": { "type": ["string", "null"] }
+      }
+    },
+    "location": {
+      "type": "object",
+      "properties": {
+        "zone": { "type": ["string", "null"], "description": "Alert area (console) or analytics zone." },
+        "confidence": { "type": ["number", "null"] },
+        "x_ft": { "type": "number" }, "y_ft": { "type": "number" },
+        "lat": { "type": "number", "minimum": -90, "maximum": 90 },
+        "lon": { "type": "number", "minimum": -180, "maximum": 180 },
+        "error_m": { "type": ["number", "null"] },
+        "nodes": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "context": { "type": "object", "description": "Rule-specific details (dwell_s, node_id, ...)." }
+  }
+}

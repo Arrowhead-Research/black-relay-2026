@@ -200,6 +200,7 @@ function draw() {
   }
 
   drawWalls(ctx, toS);
+  drawAreas(ctx, toS);
 
   // building outline (node hull) with edge lengths
   const H = hull();
@@ -257,6 +258,7 @@ function draw() {
     const dev = S.devById.get(id);
     if (!dev || e.kind !== "fix" || (!visible(dev) && id !== S.selected)) continue;
     if (S.selfRadio[id]) continue;  // a node's own radio is at its node (drawn below), not at an estimate
+    if (AL.hideFriendly && isFriendly(id) && id !== S.selected) continue;
     if (S.selected && id !== S.selected && S.est.has(S.selected)) continue;  // focus: hide the others
     const p = S.disp.get(id);
     const dx = e.x - p[0], dy = e.y - p[1];
@@ -282,7 +284,9 @@ function draw() {
     if (isSel) { ctx.shadowColor = col; ctx.shadowBlur = 18; }
     const e = S.est.get(id);
     // Two nodes only constrain a curve, not a point: draw those fainter.
-    ctx.fillStyle = col; ctx.globalAlpha = !isSel && !isHover && e && e.K < 3 ? 0.35 : 0.95;
+    const mark = markOf(id);
+    ctx.fillStyle = col;
+    ctx.globalAlpha = !isSel && !isHover && mark && mark.kind === "friendly" ? 0.2 : !isSel && !isHover && e && e.K < 3 ? 0.35 : 0.95;
     ctx.beginPath();
     if (dev.band === "tpms") ctx.roundRect(sx - radius, sy - radius, radius * 2, radius * 2, 2);   // vehicle sensor
     else if (dev.band === "bt") { ctx.moveTo(sx, sy - radius * 1.2); ctx.lineTo(sx + radius * 1.1, sy + radius * 0.8); ctx.lineTo(sx - radius * 1.1, sy + radius * 0.8); ctx.closePath(); }
@@ -290,6 +294,7 @@ function draw() {
     ctx.fill();
     ctx.shadowBlur = 0; ctx.globalAlpha = 1;
     if (S.selfRadio[id]) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(sx, sy, radius + 3, 0, Math.PI * 2); ctx.stroke(); }
+    if (mark && mark.kind === "priority") { ctx.strokeStyle = "#ff5d73"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(sx, sy, radius + 4, 0, Math.PI * 2); ctx.stroke(); }
     if (isSel) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(sx, sy, radius, 0, Math.PI * 2); ctx.stroke(); }
     if (S.labels || isSel || isHover) {
       ctx.fillStyle = isSel ? "#fff" : "#c9d3e3";
@@ -352,7 +357,10 @@ function renderSelected() {
   $("selected-card").hidden = !dev;
   if (!dev) return;
   $("sel-dot").style.background = typeColor(dev.type);
-  $("sel-name").innerHTML = escapeHtml(displayName(dev)) + (S.selfRadio[dev.id] ? '<span class="badge">node</span>' : "");
+  const mk = markOf(dev.id);
+  $("sel-name").innerHTML = escapeHtml(displayName(dev)) + (S.selfRadio[dev.id] ? '<span class="badge">node</span>' : "") +
+    (mk ? `<span class="badge mark-${mk.kind}">${mk.kind}</span>` : "");
+  renderMarkButtons(dev);
   $("sel-id").textContent = `${dev.id} · ${TYPES[dev.type] || dev.type}${dev.manufacturer && dev.name ? " · " + dev.manufacturer : ""}`;
   const fix = e && e.kind === "fix";
   const radioOf = S.selfRadio[dev.id];
@@ -401,7 +409,7 @@ function renderList() {
     const e = S.est.get(dev.id);
     li.className = (dev.id === S.selected ? "sel " : "") + (e && e.kind === "fix" ? "" : "dim");
     li.innerHTML = `<i class="type-dot" style="background:${typeColor(dev.type)}"></i>
-      <div><div class="dname">${escapeHtml(displayName(dev))}${S.selfRadio[dev.id] ? '<span class="badge">node</span>' : ""}${dev.randomized ? '<span class="badge">random MAC</span>' : ""}</div>
+      <div><div class="dname">${escapeHtml(displayName(dev))}${S.selfRadio[dev.id] ? '<span class="badge">node</span>' : ""}${markOf(dev.id) ? `<span class="badge mark-${markOf(dev.id).kind}">${markOf(dev.id).kind}</span>` : ""}${dev.randomized ? '<span class="badge">random MAC</span>' : ""}</div>
       <div class="dmeta mono">${dev.id}${e && e.kind === "proximity" ? ` · ~${e.dFt.toFixed(0)} ft from ${e.node}` : ""}</div></div>
       <div class="dright">${strongest.toFixed(0)} dBm<br><span class="nodedots">${S.nodeOrder.map((n) => `<span class="${dev.nodes[n] ? "on" : ""}"></span>`).join("")}</span></div>`;
     li.onclick = () => (S.calib.on ? calSetRef(dev.id) : select(dev.id === S.selected ? null : dev.id));
@@ -471,6 +479,7 @@ function refresh() {
   renderModelCard();
   renderLiveCal();
   renderGeoStatus();
+  renderAlerts();
   S.needsDraw = true;
 }
 
@@ -520,6 +529,7 @@ map.addEventListener("mousemove", (ev) => {
   const [sx, sy] = pointer(ev);
   const [wx, wy] = toW(sx, sy);
   if (S.wallsMode.on) wallsMove(wx, wy);
+  if (AL.mode.on && AL.mode.pts.length) { AL.mode.cursor = [wx, wy]; S.needsDraw = true; }
   if (S.drag) {
     S.nodes[S.drag] = [Math.round(wx * 2) / 2, Math.round(wy * 2) / 2];
     if (!S.dragPending) {
@@ -551,6 +561,7 @@ map.addEventListener("click", (ev) => {
   const [sx, sy] = pointer(ev);
   if (nodeAt(sx, sy)) return;
   if (S.nodesMode.on) { nodesClick(...toW(sx, sy)); return; }  // placing a node
+  if (AL.mode.on) { areasClick(...toW(sx, sy)); return; }      // drawing an alert area
   if (S.wallsMode.on) { wallsClick(...toW(sx, sy)); return; }  // drawing walls
   if (S.calib.on) { calSetSpot(...toW(sx, sy)); return; }  // calibration: click marks where you stand
   const d = deviceAt(sx, sy);

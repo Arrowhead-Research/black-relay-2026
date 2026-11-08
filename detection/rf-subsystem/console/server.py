@@ -28,6 +28,11 @@ buildings and wipe what it learned. Sign-in and roles: ``auth.py``.
                                              {heading_deg}: geo-reference the site
     GET  /api/history?id=<emitter>&since=<unix s>
                                              stored positions of one device (active site)
+    POST /api/marks                          {device, kind: friendly|priority, scope: team|site, label?}
+                                             or {device, scope, remove: true}
+    POST /api/areas/add                      {name, points: [[x, y], ...], linger_s?}
+    POST /api/areas/delete                   {ids}
+    POST /api/alerts/ack                     {ids} or {} for all
     GET  /api/calibration                    {points, fits, version}
     POST /api/calibration/record             {device, x, y, t0, seconds, ...}:
                         record a spot from Kismet's packet log (every packet,
@@ -110,7 +115,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from auth import COOKIE, Auth  # noqa: E402
 from locate import M_PER_FT, Locator, band_models, georeference, to_latlon  # noqa: E402
-from publish import Publisher  # noqa: E402
+from publish import Publisher, node_states  # noqa: E402
+from alerting import AlertEngine, AlertLog, Areas, Marks  # noqa: E402
 from sites import SiteManager  # noqa: E402
 
 
@@ -823,7 +829,7 @@ class App:
     def __init__(self, poller: Any, layout: dict[str, Any] | None, window_s: float, poll_s: float,
                  extra_sources: list[Any] | None = None, cal_store: CalibrationStore | None = None,
                  kismet_log: KismetLog | None = None, sites: SiteManager | None = None,
-                 auth: Auth | None = None, publisher: Publisher | None = None) -> None:
+                 auth: Auth | None = None, publisher: Publisher | None = None, data_dir: Path | None = None) -> None:
         """With ``sites``, layout and calibration follow the active site;
         without it (tests, single-site use) the given layout and store are used."""
         self.poller = poller
@@ -845,6 +851,10 @@ class App:
         self.log_tail = LogTail(self.kismet_log) if self.kismet_log.dir else None
         self.locator = Locator()
         self.publisher = publisher
+        self.marks = Marks(data_dir / "marks.json" if data_dir else None)
+        self.areas = Areas()
+        self.engine = AlertEngine()
+        self.alert_log = AlertLog()
         self._links: dict[str, dict[str, Any]] = {}     # site id -> node links doc
         self.positions: dict[str, dict[str, Any]] = {}
         self.geo: dict[str, Any] | None = None
@@ -936,14 +946,43 @@ class App:
             self.positions, self.geo = positions, geo
             report = self.health.report(now)
         self.record_history(positions, by_id, now)
+        if self.sites:
+            s = self.sites.active()
+            site = {"id": s.id, "name": s.doc["name"]}
+        else:
+            site = {"id": "default", "name": str(layout.get("name", "site"))}
+        radios = set(layout.get("self_emitters", {}).values())
+        key, mpath = self.site_file("marks.json")
+        marks = self.marks.merged(key, mpath)
+        alerts = self.engine.evaluate(key, now, by_id, positions, marks, self.areas.get(*self.site_file("areas.json")),
+                                      node_states(report), radios)
+        alerts = [self._alert_record(a, by_id, positions, marks, site) for a in alerts]
+        if alerts:
+            self.alert_log.add(key, self.history_dir(), alerts)
         if self.publisher is not None:
-            if self.sites:
-                s = self.sites.active()
-                site = {"id": s.id, "name": s.doc["name"]}
-            else:
-                site = {"id": "default", "name": str(layout.get("name", "site"))}
-            self.publisher.positions(positions, by_id, site, set(layout.get("self_emitters", {}).values()), now)
+            self.publisher.positions(positions, by_id, site, radios, now, marks)
             self.publisher.nodes(report, site, now)
+            for a in alerts:
+                self.publisher.alert(a)
+
+    @staticmethod
+    def _alert_record(a: dict[str, Any], devices: dict[str, dict[str, Any]], positions: dict[str, dict[str, Any]],
+                      marks: dict[str, dict[str, Any]], site: dict[str, str]) -> dict[str, Any]:
+        rec = {"id": str(__import__("uuid").uuid4()), **a, "site": site}
+        dev_id = a.get("device")
+        if dev_id:
+            dev, p = devices.get(dev_id, {}), positions.get(dev_id)
+            mark = marks.get(dev_id) or {}
+            rec["emitter"] = {"id": dev_id, "type": dev.get("type"), "band": dev.get("band"), "name": dev.get("name"),
+                              "randomized_address": bool(dev.get("randomized")), "mark": mark.get("kind"),
+                              "label": mark.get("label")}
+            if p:
+                loc = {"zone": (a.get("area") or {}).get("name"), "confidence": None, "x_ft": p["x"], "y_ft": p["y"],
+                       "nodes": list(p["ids"])}
+                if "lat" in p:
+                    loc.update(lat=p["lat"], lon=p["lon"], error_m=p.get("err_m"))
+                rec["location"] = loc
+        return rec
 
     def rebuild_spots(self) -> dict[str, Any]:
         """Re-read each recorded spot (same device and window) from Kismet's log, where it still covers it."""
@@ -969,6 +1008,21 @@ class App:
                                          "rebuilt": round(time.time(), 1), "warn": []})
             rebuilt.append(pt["id"])
         return {"rebuilt": rebuilt, "unchanged": unchanged, "skipped": skipped}
+
+    def site_paths(self) -> tuple[str, Path | None]:
+        """Active site's id and directory (None without site workspaces: kept in memory)."""
+        if self.sites:
+            s = self.sites.active()
+            return s.id, s.dir
+        return "default", None
+
+    def site_file(self, name: str) -> tuple[str, Path | None]:
+        key, d = self.site_paths()
+        return key, (d / name if d else None)
+
+    def history_dir(self) -> Path | None:
+        _, d = self.site_paths()
+        return d / "history" if d else None
 
     # ---------- node links ----------
     def _site_key(self) -> tuple[str, Path | None]:
@@ -1106,6 +1160,9 @@ class App:
                 "geo": self.geo,
                 "publish": self.publisher.status() if self.publisher else {"enabled": False},
                 "node_links": self._links_state(layout),
+                "marks": self.marks.merged(*self.site_file("marks.json")),
+                "areas": self.areas.get(*self.site_file("areas.json")),
+                "alerts": self.alert_log.view(self.site_paths()[0], self.history_dir()),
                 "calibration": calibration_samples(self.tracker, layout, now),
                 "calibration_fits": cal.data.get("fits", {}),
                 "calibration_version": cal.version,
@@ -1272,6 +1329,8 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             if path.startswith("/api/sites") or path in ("/api/site/nodes", "/api/site/geo"):
                 return self._sites_post(path, body, role)
+            if path in ("/api/marks", "/api/areas/add", "/api/areas/delete", "/api/alerts/ack"):
+                return self._alerts_post(path, body, role)
             return self._cal_post(path, body)
         except KeyError as exc:
             return self._json({"error": f"not found: {exc}"}, 404)
@@ -1314,6 +1373,18 @@ class Handler(SimpleHTTPRequestHandler):
         else:
             return self._json({"error": "not found"}, 404)
         return self._json({"sites": sites.list(), "version": sites.version})
+
+    def _alerts_post(self, path: str, body: dict[str, Any], role: str) -> None:
+        app = self.app
+        if path == "/api/marks":
+            return self._json({"marks": app.marks.set(*app.site_file("marks.json"), body, role)})
+        if path == "/api/areas/add":
+            return self._json({"areas": app.areas.add(*app.site_file("areas.json"), body, role)})
+        if path == "/api/areas/delete":
+            return self._json({"areas": app.areas.delete(*app.site_file("areas.json"), list(body.get("ids", [])), role)})
+        ids = body.get("ids")
+        n = app.alert_log.ack(app.site_paths()[0], app.history_dir(), None if ids is None else [str(i) for i in ids], role)
+        return self._json({"acked": n, "alerts": app.alert_log.view(app.site_paths()[0], app.history_dir())})
 
     def _cal_post(self, path: str, body: dict[str, Any]) -> None:
         cal = self.app.cal
@@ -1422,7 +1493,7 @@ def main() -> int:
                                    env("TOPIC_PREFIX", TOPIC_PREFIX))
         print(f"console: publishing positions and node status to {env('MQTT_HOST')}", file=sys.stderr)
     app = App(poller, None, window, float(env("POLL_S", 3)), extra, None, klog, sites=sites, auth=auth,
-              publisher=publisher)
+              publisher=publisher, data_dir=data_dir)
     threading.Thread(target=app.run_poller, daemon=True).start()
     threading.Thread(target=app.run_links, daemon=True).start()
     Handler.app = app

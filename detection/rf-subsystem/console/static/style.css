@@ -247,3 +247,20 @@ a.btn { text-decoration: none; display: inline-block; }
 .nodes-geo { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; }
 .nodes-geo input, .nodes-geo select { background: var(--panel-2); color: inherit; border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; font: inherit; }
 .nodes-geo .warn { color: #ffcf70; }
+.pill.alert { background: rgba(255,93,115,.18); color: #ffb3bd; border-color: rgba(255,93,115,.5); cursor: pointer; }
+.pill.alert.flash { animation: alertflash 1s ease-in-out 3; }
+@keyframes alertflash { 50% { background: rgba(255,93,115,.6); } }
+.alert-list { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow-y: auto; }
+.alert-list li { display: grid; grid-template-columns: 8px 1fr auto; gap: 8px; align-items: center; padding: 5px 4px; border-radius: 6px; font-size: 12px; cursor: pointer; }
+.alert-list li:hover { background: var(--panel-2); }
+.alert-list li .sev { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.alert-list li.high .sev, .alert-list li.critical .sev { background: var(--bad); box-shadow: 0 0 6px var(--bad); }
+.alert-list li.medium .sev { background: var(--accent); }
+.alert-list li.acked { opacity: .5; }
+.alert-list li.acked .sev { box-shadow: none; }
+.mark-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 10px; font-size: 12px; }
+.mark-row select { background: var(--panel-2); color: inherit; border: 1px solid var(--line); border-radius: 6px; padding: 2px 4px; font: inherit; }
+.mark-row .warn { color: #ffcf70; }
+#areas-bar input, #areas-bar select { background: var(--panel-2); color: inherit; border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; font: inherit; }
+.badge.mark-friendly { background: #1f4d3a; color: #9be7c4; }
+.badge.mark-priority { background: #5a1f2a; color: #ffb3bd; }
