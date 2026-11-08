@@ -8,7 +8,7 @@
 
 The RF subsystem gives the safehouse passive, receive-only awareness of nearby Wi-Fi, Bluetooth/BLE, and TPMS emitters. Distributed WBT nodes stream their captures to a central Kismet server. An analytics service characterizes the emitters, places them in zones, learns patterns of life, and publishes alerts and camera cues to the fusion service over MQTT. The full design is in [`DESIGN.md`](DESIGN.md).
 
-**Current state:** the central Kismet stack, a scenario simulator, and `rf-analytics` (ingest, friendly exclusion, visits, zone localization, alert rules, camera cues, and durable MQTT output) are built and tested on simulated data. **The live pipeline is validated end to end on the four WBT nodes:** `rfanalytics live` (compose service `rf-analytics`) polls Kismet, runs analytics and alert rules on real devices with true per-node RSSI, and publishes alerts to MQTT (see [`analytics/README.md`](analytics/README.md#live-pipeline-kismet--alerts--mqtt)). TPMS and camera cues have not yet been exercised live, and the site geometry is still a placeholder. **Direction finding:** [`dfviz/`](dfviz/README.md) is a live web page (compose service `rf-dfviz`) that places Wi-Fi, Bluetooth and TPMS devices on the floor plan from per-node RSSI. Its model is fitted automatically from live calibration with a carried device, and the page reports the measured error at the calibration spots (see [Direction finding](#direction-finding-rf-dfviz)). Site files (layout, walls, calibration) stay local to each deployment. Example `systemd` capture units are in [`node/`](node/README.md); the `rf-node-agent` (registration, heartbeats) is not built yet. Node assembly remains draft; on Raspberry Pi 5 WBT nodes (Debian 13/trixie, arm64) the Kismet `2026-10-R1` capture helpers were installed and **legacy TCP remote capture to the central server (port 3501) was validated** for Wi‑Fi, Bluetooth, and TPMS (see [`central/README.md`](central/README.md)). WebSocket remote capture and production node provisioning still need validation.
+**Current state:** the central Kismet stack, a scenario simulator, and `rf-analytics` (ingest, friendly exclusion, visits, zone localization, alert rules, camera cues, and durable MQTT output) are built and tested on simulated data. **The live pipeline is validated end to end on the four WBT nodes:** `rfanalytics live` (compose service `rf-analytics`) polls Kismet, runs analytics and alert rules on real devices with true per-node RSSI, and publishes alerts to MQTT (see [`analytics/README.md`](analytics/README.md#live-pipeline-kismet--alerts--mqtt)). TPMS and camera cues have not yet been exercised live, and the site geometry is still a placeholder. **WBT Console:** [`console/`](console/README.md) is the operator web page (compose service `rf-console`). It places Wi-Fi, Bluetooth and TPMS devices on the floor plan from per-node RSSI, with the model fitted automatically from live calibration with a carried device and the measured error at the calibration spots. Each building is a *site* (node layout, walls, calibration, history) that can be exported, cleared or wiped, and sign-in has operator and admin roles (see [WBT Console](#wbt-console-rf-console)). Its roadmap (marking friendly and priority devices, alert areas, cameras, TAK, co-travelers) is in the console README, and the draft wire formats for the TAK, camera and fusion teams are in [`INTERFACES-DRAFT.md`](INTERFACES-DRAFT.md). Example `systemd` capture units are in [`node/`](node/README.md); the `rf-node-agent` (registration, heartbeats) is not built yet. Node assembly remains draft; on Raspberry Pi 5 WBT nodes (Debian 13/trixie, arm64) the Kismet `2026-10-R1` capture helpers were installed and **legacy TCP remote capture to the central server (port 3501) was validated** for Wi‑Fi, Bluetooth, and TPMS (see [`central/README.md`](central/README.md)). WebSocket remote capture and production node provisioning still need validation.
 
 ## File Tree
 
@@ -28,7 +28,7 @@ rf-subsystem/
 │   ├── .env.example             # Bind address, Kismet version, admin credentials
 │   ├── kismet/                  # Kismet image: Dockerfile, site config, entrypoint
 │   └── mosquitto/               # Development broker config
-├── dfviz/                       # rf-dfviz: live RSSI direction-finding page (web UI, container)
+├── console/                     # rf-console: WBT Console web page (live map, sites, calibration)
 │   └── site/                    # per-deployment layout and notes (local, gitignored)
 ├── node/                        # WBT node artifacts
 │   ├── systemd/                 # Example Kismet remote-capture units and env template (no secrets)
@@ -107,14 +107,15 @@ Central stack settings are in `central/.env` (copy it from `central/.env.example
 | `KISMET_VERSION` | Yes | Pinned Kismet release, `2026-10-R1`. Nodes must use the same version. |
 | `KISMET_ADMIN_USER` / `KISMET_ADMIN_PASSWORD` | Yes | Kismet web admin account. Seeded on first start only. |
 
-Direction-finding settings (`central/.env` and the local `dfviz/site/layout.yaml`):
+WBT Console settings (`central/.env` and the local `console/site/layout.yaml`):
 
 | Setting | Required | Description / example |
 |---|---|---|
-| `DFVIZ_PORT` | No | Host port of the direction-finding page (default `8080`, bound to `BIND_ADDR`). |
-| `DFVIZ_DEMO` | No | `1` adds synthetic emitters with known positions (testing); empty for real data only. |
-| `DFVIZ_SITE` | No | Name of the deployment site (default `default`). Walls, calibration spots and fitted models are stored per site, so a new location starts clean. |
-| `dfviz/site/layout.yaml` | Yes, per site | Local, not committed: node positions in feet, how well they are known (`node_sd_ft`), the nodes' radio MACs and starting path-loss values. Copy from `dfviz/layout.example.yaml`. Without it the page runs on the example. |
+| `CONSOLE_OPERATOR_PASSWORD` / `CONSOLE_ADMIN_PASSWORD` | Yes, in the field | Sign-in for the console. Operators watch and set up sites; admins can also export, clear and wipe site data. Both empty = sign-in off (lab only). |
+| `CONSOLE_PORT` | No | Host port of the console (default `8080`, bound to `BIND_ADDR`). |
+| `CONSOLE_SITE` | No | Site used before one is chosen in the console's Site menu (default `default`). |
+| `CONSOLE_DEMO` | No | `1` adds synthetic emitters with known positions (testing); empty for real data only. |
+| `console/site/layout.yaml` | Recommended | Local, not committed: the team template, meaning the nodes' radio MACs, `node_sd_ft`, starting path-loss values, and the first site's node positions. Copy from `console/layout.example.yaml`. Later sites are laid out in the console (*Setup → Nodes*). |
 
 Node configuration (`/etc/rf-node/node.yaml`) is specified in DESIGN.md section 6.4 and is not implemented yet.
 
@@ -138,13 +139,14 @@ Node configuration (`/etc/rf-node/node.yaml`) is specified in DESIGN.md section 
    5. **Start capture** against `rf-central`, using the stand-in node commands in [`central/README.md`](central/README.md). Confirm that each data source shows as running in the Kismet web UI (*Data Sources*).
    6. **Shutdown:** run `sudo poweroff` on the Pi, wait for the green LED to stop, then unplug the Pi and the hub.
 
-### Direction finding (rf-dfviz)
+### WBT Console (rf-console)
 
-1. **New site:** `cp dfviz/layout.example.yaml dfviz/site/layout.yaml` and enter the nodes' positions (feet, any origin); set `DFVIZ_SITE` in `central/.env`.
-2. Start it with the central stack: `cd central && docker compose --profile dfviz up -d --build`, then open `http://<BIND_ADDR>:8080`. Do a hard refresh after updates.
-3. **Map:** each located device is a dot (circle Wi-Fi, triangle Bluetooth, square TPMS); faint dots are heard by only two nodes. Click a device to focus on it (others hide; range rings, trail, per-node RSSI). Click empty space or press Esc to return. Positions are smoothed over time so they do not jump.
-4. **Walls:** *Walls* → *Wall* (click start, end), *Room* (two corners), *Erase*. Choose how accurately you are drawing (±0.5 to ±4 ft); the model treats wall positions as uncertain.
-5. **Calibrate** (makes the model fit the site):
+1. **Once:** `cp console/layout.example.yaml console/site/layout.yaml` (node radio MACs), and set `CONSOLE_OPERATOR_PASSWORD` and `CONSOLE_ADMIN_PASSWORD` in `central/.env`.
+2. Start it with the central stack: `cd central && docker compose --profile console up -d --build`, then open `http://<BIND_ADDR>:8080` and sign in.
+3. **New building:** Site menu (site name ▾) → *New site*. Then *Setup → Nodes*: drag each node to where it is (feet, any origin) and place any node Kismet knows that is not on the map yet. **Leaving a building:** an admin uses *Export* if the data is needed, switches to the new site, and *Wipes* the old one.
+4. **Map** (*Live* mode): each located device is a dot (circle Wi-Fi, triangle Bluetooth, square TPMS); faint dots are heard by only two nodes. Click a device to focus on it (others hide; range rings, trail, per-node RSSI). Click empty space or press Esc to return. Positions are smoothed over time so they do not jump.
+5. **Walls:** *Setup → Walls* → *Wall* (click start, end), *Room* (two corners), *Erase*. Choose how accurately you are drawing (±0.5 to ±4 ft); the model treats wall positions as uncertain.
+6. **Calibrate** (*Setup → Calibrate*; makes the model fit the site):
    1. Turn on a phone hotspot and carry the phone. Select the hotspot's network in the device list.
    2. Walk to a suggested spot (**A, B, C** on the map, or *Go* in the panel), stand still, click your spot, choose how sure you are (exact, ±2 ft, ±5 ft), and press **Record** (15 s).
    3. Repeat until the uncertainty chips (n, wall, offsets) turn green. The Calibrate button shows how many spots are suggested.
@@ -157,7 +159,7 @@ Focus checks on business rules, event definitions, and contracts with connected 
 
 - **Automated checks:**
   - `cd simulator && uv run pytest` validates every scenario's output against `schemas/observation.v0.schema.json` and checks the scenario properties that analytics tests rely on.
-  - `cd analytics && uv run pytest ../dfviz/tests` covers the direction-finding server: RSSI smoothing, the calibration and walls APIs (journal, restore, stale-page races), recording spots from the Kismet packet log (including while it is write-locked), and position-accuracy fields.
+  - `cd analytics && uv run pytest ../console/tests` covers the console server: RSSI smoothing, the calibration and walls APIs (journal, restore, stale-page races), recording spots from the Kismet packet log (including while it is write-locked), position-accuracy fields, site workspaces (create, switch, migrate, retention, export, clear, wipe) and sign-in roles.
   - `cd analytics && uv run pytest` covers the ingest contract, the analyzer and alert-rule business rules, the outbound wire format and outbox, and end-to-end quality on scenarios. That includes the phase 3 target of at least 80% localization accuracy and the expected alerts per scenario.
 - **Manual verification:** `docker compose ps` in `central/` shows `kismet-server` as healthy. `curl -u <user>:<pass> http://127.0.0.1:2501/system/status.json` returns the Kismet version. The Kismet log shows `Launching remote capture server on 0.0.0.0 3501`.
 - **Node hardware checks (manual, on each node):**
@@ -192,7 +194,7 @@ Focus checks on business rules, event definitions, and contracts with connected 
 | `kismet_cap_sdr_rtl433` fails with `rtl_433 binary not installed` | The `rtl-433` decoder package is missing | Install it: `sudo apt install rtl-433`. `kismet-capture-rtl433-v2` provides the Kismet helper, not the decoder binary. |
 | TPMS helper cycles / Kismet shows "IPC connection closed" for the TPMS source | A standalone `rtl_433` process or `rtl-433` service is claiming the RTL-SDR, or the helper cannot hold the device | Stop competing processes/services (`ps aux \| grep rtl_433`, `systemctl status '*rtl*433*'`), confirm SDR access (`rtl_test -t`), then restart `kismet_cap_sdr_rtl433`. Check `/tmp/kcap-tpms.log` (or your log path). |
 | Captures stop after a node reboot | Helpers were started ad hoc (`nohup`/foreground) and no persistent unit is installed | Install and enable the example `systemd` units from [`node/README.md`](node/README.md), or restart helpers after boot. See [`central/README.md`](central/README.md) for validated commands. |
-| Direction-finding page behaves like an older version | The browser kept old page code | Hard refresh (Cmd+Shift+R). The server now sends `Cache-Control: no-cache`, so this is needed only once after the change. |
+| Console page behaves like an older version | The browser kept old page code | Hard refresh (Cmd+Shift+R). The server now sends `Cache-Control: no-cache`, so this is needed only once after the change. |
 | Every device sits in the middle, nodes report the same RSSI | Kismet is not keeping per-node signal | `keep_per_datasource_stats=true` must be in `central/kismet/kismet_site.conf`; rebuild `kismet-server`. |
 | Calibration *Record* fails with "Kismet log busy" | Kismet held the packet log's write lock for the whole retry period | Record again. Reads already wait and retry up to about 10 s. |
 | Bluetooth devices only show as rings, or the page shows *⚠ N silent* | A node's `:bt` source runs (no error in Kismet) but delivers no packets. Cause found: on TP-Link UB500 dongles a scan stays "discovering" after the capture helper exits (e.g. Kismet restarted), so every new scan gets "Busy" | Run Bluetooth capture through `kismet-cap-bt.service` (`rf-bt-capture` clears discovery at every start and reconnect). To diagnose: `sudo rf-bt-doctor`; to repair: `sudo rf-bt-doctor --fix`. See [`node/README.md`](node/README.md#bluetooth-helper-scripts). |
@@ -211,7 +213,7 @@ Focus checks on business rules, event definitions, and contracts with connected 
 | Alerts, node status → fusion service | Outbound | MQTT QoS 1, `detection/rf/alerts` and `detection/rf/status/nodes`, with a durable outbox | Implemented with the draft format and validated live against the development broker. Waiting on the fusion message standard (none published on any branch as of 2026-11-07). |
 | TPMS camera cue → camera subsystem | Outbound | MQTT `detection/rf/cues/camera` | Implemented. Routing (directly or through fusion) and expected cue volume still to be agreed (DESIGN.md open question 3). |
 | Alert configuration from TAK | Inbound | To be decided | Waiting on the TAK team. |
-| `rf-dfviz` web page and API | Internal / operators | HTTP on `DFVIZ_PORT` (8080): `/api/state`, `/api/samples`, `/api/calibration/*`, `/api/walls/*`; reads Kismet REST and the packet log (read-only) | Implemented; no authentication, so keep it on the LAN or tailnet only. |
+| `rf-console` web page and API | Operators | HTTP on `CONSOLE_PORT` (8080): `/api/state`, `/api/sites/*`, `/api/site/nodes`, `/api/calibration/*`, `/api/walls/*`, `/api/login`; reads Kismet REST and the packet log (read-only) | Implemented. Sign-in with operator/admin roles (signed cookie); plain HTTP, so keep it on the LAN or tailnet. |
 
 **Dependencies:**
 - **Tailscale tailnet:** connects nodes and the central server.
@@ -225,6 +227,7 @@ Focus checks on business rules, event definitions, and contracts with connected 
 
 | Date | Change |
 |---|---|
+| 2026-11-08 | `rf-dfviz` became the **WBT Console** (`console/`, compose service `rf-console`, profile `console`): one workspace per building (new, switch, rename, export, clear history, wipe, retention), node placement in the page, Live/Setup modes, and sign-in with operator and admin roles. Existing calibration and walls were moved into the first site. Added `INTERFACES-DRAFT.md` (TAK marking, alerts with position, camera cues and results) for the other teams to review. |
 | 2026-11-08 | Bluetooth capture fixed: UB500 dongles stayed "discovering" after a helper exited, so their sources delivered nothing after Kismet restarts. `rf-bt-capture` (systemd unit) clears discovery before every start, reconnects through systemd (`--disable-retry`), and picks the adapter by address instead of `hci` index; `rf-bt-doctor` diagnoses and repairs; the direction-finding page warns about silent or stopped capture sources. Verified: all four nodes recover within 10 s of a Kismet restart. |
 | 2026-11-07 | Added `rf-dfviz`, a live direction-finding page (compose profile `dfviz`): Wi-Fi, Bluetooth and TPMS positions from per-node RSSI with smoothing; walls with uncertain positions; live calibration recorded from the Kismet packet log, with automatic model selection by measured error, suggested next spots, position-accuracy weighting and a journal with restore; demo emitters. |
 | 2026-11-07 | Added `rfanalytics live` and the `rf-analytics` compose service; enabled per-node RSSI in Kismet; validated Kismet → alerts → MQTT on the WBT nodes. Fixed an outbox deadlock with paho-mqtt and false node-offline alerts from stale per-node entries. |

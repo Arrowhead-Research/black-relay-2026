@@ -3,28 +3,42 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>RF Direction Finding</title>
+<title>WBT Console</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
   <div class="brand">
     <span class="logo" aria-hidden="true"></span>
-    <h1>RF Direction Finding</h1>
+    <h1>WBT Console</h1>
+    <button id="site-btn" class="site-btn" aria-haspopup="true" aria-expanded="false"><span id="site-name">…</span><span class="caret">▾</span></button>
   </div>
   <div class="status">
     <span class="pill" id="kismet-pill"><i></i><span>connecting…</span></span>
     <span class="pill subtle" id="count-pill">0 devices</span>
     <span class="pill warn" id="src-pill" hidden></span>
-    <button id="calibrate" class="btn">Calibrate</button>
+    <div class="seg" id="mode" role="tablist"><button data-mode="live" class="on">Live</button><button data-mode="setup">Setup</button></div>
     <button id="pause" class="btn">Pause</button>
+    <span class="pill warn" id="auth-off" hidden title="Set CONSOLE_OPERATOR_PASSWORD and CONSOLE_ADMIN_PASSWORD in central/.env">sign-in off</span>
+    <span class="user" id="user-box" hidden><span id="user-role"></span><button id="logout" class="btn small">Sign out</button></span>
   </div>
+  <div id="site-menu" class="menu" hidden></div>
 </header>
 
 <main>
   <section class="map-wrap">
     <canvas id="map"></canvas>
     <div class="overlay top-left"></div>
+    <div class="overlay top-center" id="setup-bar" hidden>
+      <button id="nodes-btn" class="btn">Nodes</button>
+      <button id="calibrate" class="btn">Calibrate</button>
+    </div>
+    <div id="nodes-bar" class="walls-bar" hidden>
+      <span class="muted">Drag a node to move it.</span>
+      <span id="nodes-chips" class="nodes-chips"></span>
+      <button class="btn small active" id="nodes-done">Done</button>
+      <div id="nodes-hint" class="walls-hint"></div>
+    </div>
     <div class="overlay bottom-right" id="cursor-readout"></div>
     <div id="tooltip" hidden></div>
   </section>
@@ -92,8 +106,17 @@
     </section>
   </aside>
 </main>
+<div id="login" class="login" hidden>
+  <form id="login-form" class="login-card">
+    <h2>WBT Console</h2>
+    <input id="login-pw" type="password" autocomplete="current-password" placeholder="Password" required>
+    <button class="btn active" type="submit">Sign in</button>
+    <div id="login-err" class="cal-warn" hidden></div>
+  </form>
+</div>
 <script src="app.js"></script>
 <script src="calib.js"></script>
 <script src="walls.js"></script>
+<script src="console.js"></script>
 </body>
 </html>

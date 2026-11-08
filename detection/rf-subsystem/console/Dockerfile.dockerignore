@@ -3,8 +3,10 @@
 !analytics/pyproject.toml
 !analytics/README.md
 !analytics/src
-!dfviz/server.py
-!dfviz/demo.py
-!dfviz/layout.example.yaml
-!dfviz/static
+!console/server.py
+!console/sites.py
+!console/auth.py
+!console/demo.py
+!console/layout.example.yaml
+!console/static
 **/__pycache__

@@ -4,7 +4,8 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 out/
-dfviz/calibration.json
+console/calibration.json
+console/data/
 
 # Per-deployment site files (layout, notes): local only
-dfviz/site/
+console/site/

@@ -1,4 +1,4 @@
-"""rf-dfviz backend: Kismet snapshots -> rolling per-node RSSI and calibration."""
+"""WBT Console backend: Kismet snapshots -> rolling per-node RSSI and calibration."""
 
 from __future__ import annotations
 
@@ -138,7 +138,7 @@ def test_api_state_end_to_end():
         assert state["layout"]["nodes"]["wbt-2"] == [20, 0]
         assert state["devices"][0]["nodes"]["wbt-1"]["rssi"] == -45
         resp = urlopen(base + "/")
-        assert "RF Direction Finding" in resp.read().decode()
+        assert "WBT Console" in resp.read().decode()
         assert resp.headers["Cache-Control"] == "no-cache"  # never run stale page code after an update
     finally:
         httpd.shutdown()

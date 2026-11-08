@@ -77,17 +77,20 @@ services:
       - ../analytics/config:/config:ro
       - rf-analytics-data:/data
 
-  # RSSI direction-finding heat map (web UI). Opt in with
-  #   docker compose --profile dfviz up -d --build
-  # then open http://<BIND_ADDR>:8080. Site files (node layout) live in
-  # ../dfviz/site/ (local, not committed); calibration and walls are stored per
-  # DFVIZ_SITE in the rf-dfviz-data volume, so each deployment site starts clean.
-  rf-dfviz:
-    profiles: [dfviz]
+  # WBT Console (web UI): live RF map, node placement, walls, calibration, and
+  # one workspace per building (Site menu: new, switch, export, clear, wipe).
+  # Opt in with
+  #   docker compose --profile console up -d --build
+  # then open http://<BIND_ADDR>:8080. Set CONSOLE_OPERATOR_PASSWORD and
+  # CONSOLE_ADMIN_PASSWORD in .env (unset = sign-in off). Site data is kept in
+  # the rf-console-data volume; ../console/site/layout.yaml (local, not
+  # committed) is the team template (node hardware, first site's layout).
+  rf-console:
+    profiles: [console]
     build:
       context: ..
-      dockerfile: dfviz/Dockerfile
-    image: black-relay/rf-dfviz:dev
+      dockerfile: console/Dockerfile
+    image: black-relay/rf-console:dev
     restart: unless-stopped
     depends_on:
       kismet-server:
@@ -96,15 +99,18 @@ services:
       KISMET_URL: http://kismet-server:2501
       KISMET_USER: ${KISMET_ADMIN_USER:-}
       KISMET_PASSWORD: ${KISMET_ADMIN_PASSWORD:-}
-      DFVIZ_DEMO: ${DFVIZ_DEMO:-}   # 1 = add synthetic emitters with known positions
-      DFVIZ_LAYOUT: /site/layout.yaml          # missing: falls back to the bundled example
-      DFVIZ_CAL_FILE: /data/${DFVIZ_SITE:-default}/calibration.json   # spots, fits, walls: per site
-      DFVIZ_KISMET_LOGS: /kismet-data/logs      # read-only: rebuild spots from packet logs
+      CONSOLE_DATA: /data
+      CONSOLE_LAYOUT: /site/layout.yaml          # missing: falls back to the bundled example
+      CONSOLE_SITE: ${CONSOLE_SITE:-default}      # site to start on if none was chosen yet
+      CONSOLE_OPERATOR_PASSWORD: ${CONSOLE_OPERATOR_PASSWORD:-}
+      CONSOLE_ADMIN_PASSWORD: ${CONSOLE_ADMIN_PASSWORD:-}
+      CONSOLE_KISMET_LOGS: /kismet-data/logs      # read-only: calibration spots from packet logs
+      CONSOLE_DEMO: ${CONSOLE_DEMO:-}             # 1 = add synthetic emitters with known positions
     ports:
-      - "${BIND_ADDR:-127.0.0.1}:${DFVIZ_PORT:-8080}:8080"
+      - "${BIND_ADDR:-127.0.0.1}:${CONSOLE_PORT:-8080}:8080"
     volumes:
-      - ../dfviz/site:/site:ro
-      - rf-dfviz-data:/data
+      - ../console/site:/site:ro
+      - rf-console-data:/data
       - kismet-logs:/kismet-data:ro
 
 volumes:
@@ -112,4 +118,4 @@ volumes:
   kismet-home:
   mqtt-data:
   rf-analytics-data:
-  rf-dfviz-data:
+  rf-console-data:

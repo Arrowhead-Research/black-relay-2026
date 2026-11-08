@@ -1,15 +1,29 @@
-"""rf-dfviz: live RSSI direction-finding heat map for the WBT nodes.
+"""WBT Console: live RF picture of a site from the WBT nodes.
 
 Polls Kismet for each device's per-node RSSI (``seenby`` signal), keeps a
-short rolling window per (device, node), and serves:
+short rolling window per (device, node), and serves the console page and its
+API. Everything learned at a building (node positions, walls, calibration,
+history) is kept per *site* (``sites.py``) so the system can move between
+buildings and wipe what it learned. Sign-in and roles: ``auth.py``.
 
-    GET /               the heat-map page (static/)
-    GET /api/state      node layout, per-band model defaults, per-device
-                        smoothed per-node RSSI, node-to-node calibration, and
-                        the saved live calibration fits
-    GET /api/samples?id=<emitter>&since=<unix s>
-                        raw per-second RSSI per node for one device (used to
-                        record a calibration spot)
+    GET  /                  the console page (static/)
+    GET  /api/session       {enabled, role}
+    POST /api/login         {password} -> session cookie; POST /api/logout
+    GET  /api/state         active site, node layout, per-band model defaults,
+                            per-device smoothed per-node RSSI, node-to-node
+                            calibration, saved calibration fits, walls, sources
+    GET  /api/samples?id=<emitter>&since=<unix s>
+                            raw per-second RSSI per node for one device
+    GET  /api/sites                          all sites (summary)
+    POST /api/sites                          {name}: create a site and switch to it
+    POST /api/sites/<id>/activate            switch the console to this site
+    POST /api/sites/<id>/rename              {name}
+    POST /api/sites/<id>/retention           {days}             (admin)
+    POST /api/sites/<id>/clear               delete its history (admin)
+    POST /api/sites/<id>/wipe                {confirm: name}    (admin; not the active site)
+    GET  /api/sites/<id>/export              zip of everything stored for it (admin)
+    POST /api/site/nodes                     {node, x, y} place/move a node on the
+                                             active site, or {node, remove: true}
     GET  /api/calibration                    {points, fits, version}
     POST /api/calibration/record             {device, x, y, t0, seconds, ...}:
                         record a spot from Kismet's packet log (every packet,
@@ -25,32 +39,32 @@ short rolling window per (device, node), and serves:
     POST /api/walls/delete                   {ids}
     POST /api/walls/accept                   clear draft flags
     POST /api/walls/clear                    remove all walls
-                        The floor plan's walls (each crossing costs the band's
-                        wall loss in dB). One journaled operation per request;
-                        a page never sends the whole list, so a page with a
-                        stale list cannot wipe walls another page drew.
-                        Every change is applied on the server one item at a
-                        time and appended to a journal next to DFVIZ_CAL_FILE,
-                        so two open pages cannot overwrite each other's spots.
+                        Calibration and walls belong to the active site. One
+                        journaled operation per request; a page never sends a
+                        whole list, so a page with a stale list cannot wipe
+                        what another page drew.
+
+Every POST needs ``Content-Type: application/json`` (a cross-site form cannot
+send that) and the operator role; site clear/wipe/retention/export need admin.
 
 Smoothing: each node's per-second RSSI history (Kismet ``signal_rrd``) is
 kept per (device, node) for a per-band window; outliers beyond 3 MAD of the
 median are dropped and the rest is averaged with exponential time weights.
-Localization (and its temporal filter) runs in the browser so model
-parameters can be changed live.
+Localization (and its temporal filter) runs in the browser for now.
 
-Environment:
+Environment (CONSOLE_*; the older DFVIZ_* names still work):
     KISMET_URL       default http://kismet-server:2501
     KISMET_USER / KISMET_PASSWORD
-    DFVIZ_LAYOUT     site layout (local per deployment); falls back to the bundled
-                     layout.example.yaml when the file does not exist
-    DFVIZ_WINDOW_S   rolling RSSI window, default 60
-    DFVIZ_POLL_S     Kismet poll interval, default 3
-    DFVIZ_PORT       default 8080
-    DFVIZ_CAL_FILE   default ./calibration.json (the compose service uses /data)
-    DFVIZ_KISMET_LOGS  directory of Kismet .kismet logs for reassigning spots
-                     (compose mounts the kismet-logs volume read-only)
-    DFVIZ_DEMO       "1": add synthetic emitters with known positions (BLE
+    CONSOLE_DATA     data directory (sites, session key), default ./data
+    CONSOLE_LAYOUT   team template: node hardware (self_emitters) and the node
+                     layout for the first site; falls back to layout.example.yaml
+    CONSOLE_SITE     site to start on when none was chosen yet (default "default")
+    CONSOLE_OPERATOR_PASSWORD / CONSOLE_ADMIN_PASSWORD   sign-in (unset: off)
+    CONSOLE_WINDOW_S rolling RSSI window, default 60
+    CONSOLE_POLL_S   Kismet poll interval, default 3
+    CONSOLE_PORT     default 8080
+    CONSOLE_KISMET_LOGS  directory of Kismet .kismet logs (calibration spots)
+    CONSOLE_DEMO     "1": add synthetic emitters with known positions (BLE
                      walker, passing car with TPMS, ...); "only": demo alone
 """
 
@@ -75,6 +89,14 @@ import yaml
 from rfanalytics.kismet import KismetIngestError, KismetPoller, describe_device, seenby_history
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from auth import COOKIE, Auth  # noqa: E402
+from sites import SiteManager  # noqa: E402
+
+
+def env(name: str, default: Any = None) -> Any:
+    """CONSOLE_<name>, else the older DFVIZ_<name>, else default."""
+    return os.environ.get(f"CONSOLE_{name}", os.environ.get(f"DFVIZ_{name}", default))
 FT_PER_M = 3.28084
 
 BANDS = {"wifi_ap": "wifi", "wifi_client": "wifi", "ble": "bt", "bt_classic": "bt", "tpms": "tpms"}
@@ -280,7 +302,7 @@ class CalibrationStore:
             try:
                 self.data = self.validate(json.loads(self.path.read_text()))
             except (ValueError, json.JSONDecodeError) as exc:
-                print(f"dfviz: ignoring unreadable {self.path}: {exc}", file=sys.stderr)
+                print(f"console: ignoring unreadable {self.path}: {exc}", file=sys.stderr)
         for pt in self.data["points"]:
             pt.setdefault("id", self._new_id())
         for w in self.data["walls"]:
@@ -571,21 +593,40 @@ class SourceHealth:
         return out
 
 
+PURGE_EVERY_S = 3600
+
+
 class App:
-    def __init__(self, poller: Any, layout: dict[str, Any], window_s: float, poll_s: float,
+    def __init__(self, poller: Any, layout: dict[str, Any] | None, window_s: float, poll_s: float,
                  extra_sources: list[Any] | None = None, cal_store: CalibrationStore | None = None,
-                 kismet_log: KismetLog | None = None) -> None:
+                 kismet_log: KismetLog | None = None, sites: SiteManager | None = None,
+                 auth: Auth | None = None) -> None:
+        """With ``sites``, layout and calibration follow the active site;
+        without it (tests, single-site use) the given layout and store are used."""
         self.poller = poller
-        self.cal = cal_store or CalibrationStore(HERE / "calibration.json")
+        self.sites = sites
+        self._layout = layout
+        self._cal = cal_store if sites is None else None
+        if sites is None and self._cal is None:
+            self._cal = CalibrationStore(HERE / "calibration.json")
+        self.auth = auth or Auth(None, None, None)
         self.kismet_log = kismet_log or KismetLog(None)
         self.extra_sources = extra_sources or []
-        self.layout = layout
         self.poll_s = poll_s
         self.tracker = Tracker(window_s)
         self.lock = threading.Lock()
         self.status: dict[str, Any] = {"ok": False, "error": "not polled yet", "last_poll": None, "devices_polled": 0}
         self.health = SourceHealth()
         self.last_source_poll = 0.0
+        self.last_purge = 0.0
+
+    @property
+    def layout(self) -> dict[str, Any]:
+        return self.sites.layout() if self.sites else self._layout
+
+    @property
+    def cal(self) -> CalibrationStore:
+        return self.sites.active().cal if self.sites else self._cal
 
     def poll_once(self) -> None:
         devices: list[dict[str, Any]] = []
@@ -606,6 +647,9 @@ class App:
                     self.health.update(sources, now)
             except KismetIngestError:
                 pass
+        if self.sites and now - self.last_purge >= PURGE_EVERY_S:
+            self.last_purge = now
+            self.sites.purge(now)
         if error and not self.extra_sources:
             with self.lock:
                 self.status.update(ok=False, error=error, last_poll=now)
@@ -623,24 +667,38 @@ class App:
 
     def state(self) -> dict[str, Any]:
         now = time.time()
+        layout, cal = self.layout, self.cal
+        site = None
+        if self.sites:
+            s = self.sites.active()
+            site = {"id": s.id, "name": s.doc["name"], "retention_days": s.doc["retention_days"],
+                    "version": self.sites.version}
         with self.lock:
+            sources = self.health.report(now)
             return {
                 "now": now,
+                "site": site,
                 "window_s": self.tracker.window_s,
                 "timing": BAND_TIMING,
-                "layout": self.layout,
+                "layout": layout,
                 "kismet": dict(self.status),
                 "devices": self.tracker.snapshot(now),
-                "calibration": calibration_samples(self.tracker, self.layout, now),
-                "calibration_fits": self.cal.data.get("fits", {}),
-                "calibration_version": self.cal.version,
-                "sources": self.health.report(now),
-                "walls": self.cal.data.get("walls", []),
+                "calibration": calibration_samples(self.tracker, layout, now),
+                "calibration_fits": cal.data.get("fits", {}),
+                "calibration_version": cal.version,
+                "sources": sources,
+                # Nodes Kismet knows (from capture source names), placed on the map or not.
+                "source_nodes": sorted({x["name"].split(":", 1)[0] for x in sources if ":" in x["name"]}),
+                "walls": cal.data.get("walls", []),
             }
 
     def samples(self, emitter_id: str, since: float) -> dict[str, Any]:
         with self.lock:
             return {"id": emitter_id, "now": time.time(), "nodes": self.tracker.samples_since(emitter_id, since)}
+
+
+ADMIN_ACTIONS = ("retention", "clear", "wipe", "export")
+LOGIN_FAIL_DELAY_S = 1.0
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -651,23 +709,83 @@ class Handler(SimpleHTTPRequestHandler):
         # running an old app.js/calib.js after the container is updated.
         if not self.path.startswith("/api/"):
             self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
         super().end_headers()
 
-    def _json(self, obj: Any, status: int = 200) -> None:
+    def _json(self, obj: Any, status: int = 200, headers: dict[str, str] | None = None) -> None:
         body = json.dumps(obj, separators=(",", ":")).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
+    # ---------- auth ----------
+    def _role(self) -> str | None:
+        from http.cookies import SimpleCookie
+
+        token = None
+        try:
+            jar = SimpleCookie(self.headers.get("Cookie") or "")
+            if COOKIE in jar:
+                token = jar[COOKIE].value
+        except Exception:  # noqa: BLE001 - a malformed cookie is just "not signed in"
+            token = None
+        return self.app.auth.verify(token)
+
+    def _need(self, needed: str) -> str | None:
+        """Role if it allows ``needed``; otherwise sends 401/403 and returns None."""
+        role = self._role()
+        if role is None:
+            self._json({"error": "sign in required"}, 401)
+            return None
+        if not Auth.allows(role, needed):
+            self._json({"error": f"needs the {needed} role"}, 403)
+            return None
+        return role
+
+    def _cookie(self, value: str, max_age: int) -> dict[str, str]:
+        return {"Set-Cookie": f"{COOKIE}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}"}
+
+    # ---------- GET ----------
     def do_GET(self) -> None:  # noqa: N802
         from urllib.parse import parse_qs, urlsplit
 
         url = urlsplit(self.path)
+        if not url.path.startswith("/api/"):
+            return super().do_GET()
+        if url.path == "/api/session":
+            return self._json({"enabled": self.app.auth.enabled, "role": self._role()})
+        sites = self.app.sites
+        if url.path.startswith("/api/sites/") and url.path.endswith("/export"):
+            if self._need("admin") is None:
+                return None
+            site_id = url.path.split("/")[3]
+            try:
+                data = sites.export(site_id)
+            except KeyError:
+                return self._json({"error": "no such site"}, 404)
+            stamp = time.strftime("%Y%m%d-%H%M", time.gmtime())
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", f'attachment; filename="wbt-site-{site_id}-{stamp}.zip"')
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+            return None
+        if self._need("operator") is None:
+            return None
         if url.path == "/api/state":
             return self._json(self.app.state())
+        if url.path == "/api/sites":
+            if not sites:
+                return self._json({"sites": [], "version": 0})
+            return self._json({"sites": sites.list(), "version": sites.version})
         if url.path == "/api/calibration":
             return self._json(self.app.cal.snapshot())
         if url.path == "/api/calibration/deleted":
@@ -682,7 +800,7 @@ class Handler(SimpleHTTPRequestHandler):
             if not emitter_id:
                 return self._json({"error": "id is required"}, 400)
             return self._json(self.app.samples(emitter_id, since))
-        super().do_GET()
+        return self._json({"error": "not found"}, 404)
 
     def _body(self) -> Any:
         length = int(self.headers.get("Content-Length") or 0)
@@ -690,47 +808,33 @@ class Handler(SimpleHTTPRequestHandler):
             raise ValueError(f"body must be 1..{MAX_CAL_BYTES} bytes")
         return json.loads(self.rfile.read(length))
 
+    # ---------- POST ----------
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?")[0]
-        cal = self.app.cal
+        if not (self.headers.get("Content-Type") or "").startswith("application/json"):
+            return self._json({"error": "Content-Type must be application/json"}, 415)
         try:
             body = self._body()
-            if path == "/api/calibration/record":
-                return self._record(body)
-            if path == "/api/calibration/points":
-                return self._json({"point": cal.add_point(body), "version": cal.version})
-            if path == "/api/calibration/points/delete":
-                return self._json({"deleted": cal.delete_points(list(body.get("ids", []))), "version": cal.version})
-            if path == "/api/calibration/points/restore":
-                return self._json({"restored": cal.restore(list(body.get("ids", []))), "version": cal.version})
-            if path == "/api/walls":
-                return self._json({"error": "this page is out of date: reload it (walls are now changed one operation at a time)"}, 410)
-            if path == "/api/walls/add":
-                return self._json({"walls": cal.add_walls(body.get("walls", [])), "version": cal.version})
-            if path == "/api/walls/delete":
-                return self._json({"walls": cal.delete_walls(list(body.get("ids", []))), "version": cal.version})
-            if path == "/api/walls/accept":
-                return self._json({"walls": cal.accept_walls(), "version": cal.version})
-            if path == "/api/walls/clear":
-                return self._json({"walls": cal.clear_walls(), "version": cal.version})
-            if path.startswith("/api/calibration/fits/"):
-                cal.set_fit(path.rsplit("/", 1)[1], body.get("fit"))
-                return self._json({"fits": cal.data["fits"], "version": cal.version})
-            if path.startswith("/api/calibration/points/") and path.endswith("/reassign"):
-                point_id = path.split("/")[4]
-                pt = next((p for p in cal.data["points"] if p["id"] == point_id), None)
-                if pt is None:
-                    return self._json({"error": "no such spot"}, 404)
-                device = str(body.get("device", "")).lower()
-                if not device:
-                    return self._json({"error": "device is required"}, 400)
-                rec = self.app.kismet_log.spot(device, pt["t"], float(body.get("seconds", 15)))
-                if len(rec["rssi"]) < 2:
-                    return self._json({"error": f"{device} was heard by {len(rec['rssi'])} node(s) with 3+ packets in that window"}, 422)
-                changes = {"device": device, "rssi": rec["rssi"], "n": rec["n"], "source": "kismet-log",
-                           "device_name": body.get("device_name"), "device_type": body.get("device_type"),
-                           "band": body.get("band", pt["band"]), "warn": []}
-                return self._json({"point": cal.replace_point(point_id, changes), "version": cal.version})
+        except (ValueError, json.JSONDecodeError) as exc:
+            return self._json({"error": str(exc)}, 400)
+        if path == "/api/login":
+            role = self.app.auth.login(str(body.get("password", ""))) if self.app.auth.enabled else "admin"
+            if role is None:
+                time.sleep(LOGIN_FAIL_DELAY_S)
+                return self._json({"error": "wrong password"}, 401)
+            return self._json({"role": role}, headers=self._cookie(self.app.auth.issue(role), 12 * 3600))
+        if path == "/api/logout":
+            return self._json({"ok": True}, headers=self._cookie("", 0))
+        needed = "admin" if path.startswith("/api/sites/") and path.rsplit("/", 1)[1] in ADMIN_ACTIONS else "operator"
+        role = self._need(needed)
+        if role is None:
+            return None
+        try:
+            if path.startswith("/api/sites") or path == "/api/site/nodes":
+                return self._sites_post(path, body, role)
+            return self._cal_post(path, body)
+        except KeyError as exc:
+            return self._json({"error": f"not found: {exc}"}, 404)
         except (ValueError, json.JSONDecodeError) as exc:
             return self._json({"error": str(exc)}, 400)
         except KismetLogError as exc:
@@ -739,6 +843,74 @@ class Handler(SimpleHTTPRequestHandler):
             import traceback
             traceback.print_exc()
             return self._json({"error": f"server error: {exc}"}, 500)
+
+    def _sites_post(self, path: str, body: dict[str, Any], role: str) -> None:
+        sites = self.app.sites
+        if sites is None:
+            return self._json({"error": "this server runs without site workspaces"}, 404)
+        if path == "/api/sites":
+            site = sites.create(str(body.get("name", "")), activate=True, user=role)
+            return self._json({"site": site, "version": sites.version})
+        if path == "/api/site/nodes":
+            node = str(body.get("node", ""))
+            xy = None if body.get("remove") else [body.get("x"), body.get("y")]
+            return self._json({"nodes": sites.set_node(node, xy, user=role), "version": sites.version})
+        parts = path.split("/")   # /api/sites/<id>/<action>
+        if len(parts) != 5:
+            return self._json({"error": "not found"}, 404)
+        site_id, action = parts[3], parts[4]
+        if action == "activate":
+            sites.activate(site_id, user=role)
+        elif action == "rename":
+            sites.rename(site_id, body.get("name", ""), user=role)
+        elif action == "retention":
+            sites.set_retention(site_id, body.get("days"), user=role)
+        elif action == "clear":
+            return self._json({"removed": sites.clear_history(site_id, user=role), "version": sites.version})
+        elif action == "wipe":
+            sites.wipe(site_id, str(body.get("confirm", "")))
+        else:
+            return self._json({"error": "not found"}, 404)
+        return self._json({"sites": sites.list(), "version": sites.version})
+
+    def _cal_post(self, path: str, body: dict[str, Any]) -> None:
+        cal = self.app.cal
+        if path == "/api/calibration/record":
+            return self._record(body)
+        if path == "/api/calibration/points":
+            return self._json({"point": cal.add_point(body), "version": cal.version})
+        if path == "/api/calibration/points/delete":
+            return self._json({"deleted": cal.delete_points(list(body.get("ids", []))), "version": cal.version})
+        if path == "/api/calibration/points/restore":
+            return self._json({"restored": cal.restore(list(body.get("ids", []))), "version": cal.version})
+        if path == "/api/walls":
+            return self._json({"error": "this page is out of date: reload it (walls are now changed one operation at a time)"}, 410)
+        if path == "/api/walls/add":
+            return self._json({"walls": cal.add_walls(body.get("walls", [])), "version": cal.version})
+        if path == "/api/walls/delete":
+            return self._json({"walls": cal.delete_walls(list(body.get("ids", []))), "version": cal.version})
+        if path == "/api/walls/accept":
+            return self._json({"walls": cal.accept_walls(), "version": cal.version})
+        if path == "/api/walls/clear":
+            return self._json({"walls": cal.clear_walls(), "version": cal.version})
+        if path.startswith("/api/calibration/fits/"):
+            cal.set_fit(path.rsplit("/", 1)[1], body.get("fit"))
+            return self._json({"fits": cal.data["fits"], "version": cal.version})
+        if path.startswith("/api/calibration/points/") and path.endswith("/reassign"):
+            point_id = path.split("/")[4]
+            pt = next((p for p in cal.data["points"] if p["id"] == point_id), None)
+            if pt is None:
+                return self._json({"error": "no such spot"}, 404)
+            device = str(body.get("device", "")).lower()
+            if not device:
+                return self._json({"error": "device is required"}, 400)
+            rec = self.app.kismet_log.spot(device, pt["t"], float(body.get("seconds", 15)))
+            if len(rec["rssi"]) < 2:
+                return self._json({"error": f"{device} was heard by {len(rec['rssi'])} node(s) with 3+ packets in that window"}, 422)
+            changes = {"device": device, "rssi": rec["rssi"], "n": rec["n"], "source": "kismet-log",
+                       "device_name": body.get("device_name"), "device_type": body.get("device_type"),
+                       "band": body.get("band", pt["band"]), "warn": []}
+            return self._json({"point": cal.replace_point(point_id, changes), "version": cal.version})
         return self._json({"error": "not found"}, 404)
 
     def _record(self, body: dict[str, Any]) -> None:
@@ -754,28 +926,35 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json({"error": "device and t0 are required"}, 400)
         klog = self.app.kismet_log
         if not klog.dir:
-            return self._json({"error": "Kismet logs are not mounted (DFVIZ_KISMET_LOGS)"}, 503)
+            return self._json({"error": "Kismet logs are not mounted (CONSOLE_KISMET_LOGS)"}, 503)
         if not klog.wait_for(t0 + seconds):
             return self._json({"error": "the Kismet log has not caught up with the recording window yet; try again"}, 503)
+        cal = self.app.cal   # the site that was active when recording started
         rec = klog.spot(device, t0, seconds)
         if len(rec["rssi"]) < 2:
             return self._json({"error": f"only {len(rec['rssi'])} node(s) heard {body.get('device_name') or device} 3+ times in the window", "rssi": rec["rssi"]}, 422)
         point = {k: body[k] for k in ("band", "device_name", "device_type", "x", "y", "warn", "pos_sd_ft") if k in body}
         point.update(device=device, t=t0, seconds=seconds, rssi=rec["rssi"], n=rec["n"], source="kismet-log")
-        return self._json({"point": self.app.cal.add_point(point), "version": self.app.cal.version})
+        return self._json({"point": cal.add_point(point), "version": cal.version})
 
     def log_message(self, fmt: str, *args: Any) -> None:
         if not self.path.startswith("/api/"):
-            sys.stderr.write("dfviz: " + fmt % args + "\n")
+            sys.stderr.write("console: " + fmt % args + "\n")
 
 
 def main() -> int:
-    site_layout = Path(os.environ.get("DFVIZ_LAYOUT", HERE / "site" / "layout.yaml"))
-    if not site_layout.is_file():
-        print(f"dfviz: no site layout at {site_layout}; using layout.example.yaml", file=sys.stderr)
-        site_layout = HERE / "layout.example.yaml"
-    layout = load_layout(site_layout)
-    demo = os.environ.get("DFVIZ_DEMO", "").lower()
+    template_path = Path(env("LAYOUT", HERE / "site" / "layout.yaml"))
+    if not template_path.is_file():
+        print(f"console: no team layout at {template_path}; using layout.example.yaml", file=sys.stderr)
+        template_path = HERE / "layout.example.yaml"
+    template = load_layout(template_path)
+    data_dir = Path(env("DATA", HERE / "data"))
+    sites = SiteManager(data_dir, template, CalibrationStore, initial=env("SITE"))
+    auth = Auth(os.environ.get("CONSOLE_OPERATOR_PASSWORD"), os.environ.get("CONSOLE_ADMIN_PASSWORD"),
+                data_dir / ".session_key")
+    if not auth.enabled:
+        print("console: sign-in is OFF (set CONSOLE_OPERATOR_PASSWORD / CONSOLE_ADMIN_PASSWORD)", file=sys.stderr)
+    demo = str(env("DEMO", "")).lower()
     poller = None if demo == "only" else KismetPoller(
         os.environ.get("KISMET_URL", "http://kismet-server:2501"),
         username=os.environ.get("KISMET_USER"),
@@ -785,17 +964,16 @@ def main() -> int:
     if demo in ("1", "true", "yes", "only"):
         from demo import DemoSource
 
-        extra.append(DemoSource(layout))
-    window = max(float(os.environ.get("DFVIZ_WINDOW_S", 60)), max(t["window_s"] for t in BAND_TIMING.values()))
-    cal = CalibrationStore(os.environ.get("DFVIZ_CAL_FILE", HERE / "calibration.json"))
-    klog = KismetLog(os.environ.get("DFVIZ_KISMET_LOGS"))
-    app = App(poller, layout, window, float(os.environ.get("DFVIZ_POLL_S", 3)), extra, cal, klog)
+        extra.append(DemoSource(sites.layout()))
+    window = max(float(env("WINDOW_S", 60)), max(t["window_s"] for t in BAND_TIMING.values()))
+    klog = KismetLog(env("KISMET_LOGS"))
+    app = App(poller, None, window, float(env("POLL_S", 3)), extra, None, klog, sites=sites, auth=auth)
     threading.Thread(target=app.run_poller, daemon=True).start()
     Handler.app = app
-    port = int(os.environ.get("DFVIZ_PORT", 8080))
+    port = int(env("PORT", 8080))
     server = ThreadingHTTPServer(("0.0.0.0", port), partial(Handler, directory=str(HERE / "static")))
-    print(f"dfviz: serving on :{port}, polling {poller.base_url if poller else '(no Kismet)'}"
-          f"{' + demo emitters' if extra else ''}", file=sys.stderr)
+    print(f"console: serving on :{port}, site {sites.active_id!r}, polling "
+          f"{poller.base_url if poller else '(no Kismet)'}{' + demo emitters' if extra else ''}", file=sys.stderr)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

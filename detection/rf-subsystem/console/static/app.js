@@ -1,7 +1,8 @@
 "use strict";
 /*
- * RF direction finding: per-node RSSI -> estimated position of each device
- * (Wi-Fi, Bluetooth, TPMS).
+ * WBT Console map: per-node RSSI -> estimated position of each device
+ * (Wi-Fi, Bluetooth, TPMS). Site menu, modes, node placement and sign-in:
+ * console.js.
  *
  * Model (log-distance path loss): predicted RSSI at node k for a transmitter
  * at p is  P0 - 10 n log10(d_k(p) in m).  For every grid cell we compare the
@@ -70,6 +71,7 @@ const S = {
   filt: new Map(),       // id -> { cost, key, version }
   offsets: { wifi: {}, bt: {}, tpms: {} },  // per band, per node dB correction from live calibration
   walls: [],             // floor-plan walls [{x1, y1, x2, y2, draft?}] (ft)
+  nodesMode: { on: false, placing: null },
   wallsMode: { on: false, tool: "wall", pending: null, cursor: null, hover: null },
   calib: { on: false, spot: null, recording: false, points: [], fits: {}, deleted: [], view: null },
   steps: new Map(),      // id -> recent estimate movements (ft per update)
@@ -604,10 +606,10 @@ function pointer(ev) { const r = map.getBoundingClientRect(); return [ev.clientX
 map.addEventListener("mousedown", (ev) => {
   const [sx, sy] = pointer(ev);
   const n = nodeAt(sx, sy);
-  if (n) { S.drag = n; ev.preventDefault(); }
+  if (n && S.nodesMode.on) { S.drag = n; ev.preventDefault(); }  // nodes move only in Setup > Nodes
 });
 window.addEventListener("mouseup", () => {
-  if (S.drag) { S.drag = null; store.set("nodes", S.nodes); buildGrid(); refresh(); }
+  if (S.drag) { const id = S.drag; S.drag = null; buildGrid(); refresh(); nodesSave(id, S.nodes[id]); }
 });
 map.addEventListener("mousemove", (ev) => {
   if (!S.view) return;
@@ -624,7 +626,7 @@ map.addEventListener("mousemove", (ev) => {
   }
   const n = nodeAt(sx, sy);
   const d = n ? null : deviceAt(sx, sy);
-  map.style.cursor = n ? "grab" : d ? "pointer" : "crosshair";
+  map.style.cursor = n && S.nodesMode.on ? "grab" : d ? "pointer" : "crosshair";
   if (d !== S.hover) { S.hover = d; S.needsDraw = true; }
   const tip = $("tooltip");
   if (d) {
@@ -644,6 +646,7 @@ map.addEventListener("mouseleave", () => { $("tooltip").hidden = true; S.hover =
 map.addEventListener("click", (ev) => {
   const [sx, sy] = pointer(ev);
   if (nodeAt(sx, sy)) return;
+  if (S.nodesMode.on) { nodesClick(...toW(sx, sy)); return; }  // placing a node
   if (S.wallsMode.on) { wallsClick(...toW(sx, sy)); return; }  // drawing walls
   if (S.calib.on) { calSetSpot(...toW(sx, sy)); return; }  // calibration: click marks where you stand
   const d = deviceAt(sx, sy);
@@ -669,23 +672,21 @@ function togglePause() {
   renderStatus();
 }
 
-// "All devices" button (shown while focused on one device) and reset-layout button
+// "All devices" button (shown while focused on one device)
 const back = document.createElement("button");
 back.className = "btn small active"; back.id = "show-all"; back.textContent = "← All"; back.hidden = true;
 back.onclick = () => select(null);
 document.querySelector(".top-left").appendChild(back);
-const reset = document.createElement("button");
-reset.className = "btn small"; reset.textContent = "Reset layout"; reset.style.marginLeft = "8px";
-reset.onclick = () => { S.nodes = structuredClone(S.data.layout.nodes); store.set("nodes", null); buildGrid(); refresh(); };
-document.querySelector(".top-left").appendChild(reset);
 
 // ---------- data ----------
 async function poll() {
   if (!S.paused || !S.data) {
     try {
       const res = await fetch("api/state", { cache: "no-store" });
+      if (res.status === 401) { setTimeout(poll, 2500); return; }  // console.js shows sign-in
       const data = await res.json();
       const first = !S.data;
+      if (!first && siteSync(data)) return;  // switched site: the page reloads
       S.data = data;
       S.devById = new Map(data.devices.map((d) => [d.id, d]));
       // walls changed by another page: adopt them unless this page has a newer edit
@@ -703,7 +704,7 @@ async function poll() {
       }
     } catch (err) {
       $("kismet-pill").classList.add("bad");
-      $("kismet-pill").lastElementChild.textContent = "dfviz server unreachable";
+      $("kismet-pill").lastElementChild.textContent = "console server unreachable";
     }
   }
   setTimeout(poll, 2500);
@@ -714,8 +715,8 @@ function init(data) {
   S.nodeOrder = Object.keys(L.nodes);
   S.walls = data.walls || [];
   S.wallsVersion = data.calibration_version;
-  const saved = store.get("nodes", null);
-  S.nodes = saved && S.nodeOrder.every((k) => saved[k]) ? saved : structuredClone(L.nodes);
+  S.nodes = structuredClone(L.nodes);   // node positions belong to the site (server)
+  S.siteVersion = data.site && data.site.version;
   for (const [band, m] of Object.entries(L.models || {})) {
     S.models[band] = { n: m.path_loss_exp, p0: m.ref_rssi_1m, sigma: m.sigma_db, wall: m.wall_db || 0, txSpread: 8 };
   }
