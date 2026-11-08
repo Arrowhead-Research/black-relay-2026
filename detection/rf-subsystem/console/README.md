@@ -18,7 +18,7 @@ Kismet must have `keep_per_datasource_stats=true` (already set in `central/kisme
 ## Layout of the page
 
 - **Header:** the site menu (site name ▾), Kismet and device counts, capture-source warnings, the **Live / Setup** switch and Pause.
-- **Live** (default): the map, the selected device, the model card and the device list. Nothing on the map can be changed by accident.
+- **Live** (default): the map, alerts, the selected device and the device list. Nothing on the map can be changed by accident.
 - **Setup:** a toolbar on the map with **Nodes** (drag nodes to where they are; place nodes Kismet knows that are not on the map yet; remove nodes; set node GPS points, see *Latitude and longitude*), **Walls** and **Calibrate**. One tool is active at a time.
 
 ## Sites (moving between buildings)
@@ -36,7 +36,7 @@ Set or change the passwords with `central/set-console-passwords.sh` on the host 
 - **All devices (nothing selected):** each located device is a dot (circle = Wi-Fi, triangle = Bluetooth, square = TPMS). Faint dots are heard by only two nodes, which fixes a curve rather than a point. Nodes come from the site layout (see *Site files*), in feet.
 - **Selected device (click a dot or a list row):** the other devices hide, and the selected one shows range rings (the distance each node's RSSI implies under the model), a trail, per-node RSSI bars (hover: smoothed and raw values, spread, outliers dropped), the model fit residual, and the average movement per update, which directly measures jumping. **To go back to all devices:** click empty map space, press Esc, or use *← All*.
 - **Devices heard by one node:** distance only, no direction. When selected, they show as a ring around that node.
-- **Model card (read-only):** per band, n, σ, wall loss and the measured error, or *default* when no calibration beats the defaults. There are no manual model parameters: they are always the best fit to the calibration.
+- **Model:** no manual parameters and no model panel; the server always uses the best fit to the calibration (see *Model selection on the server*), and the calibration panel (Setup) shows the fit.
 - **Node radios** (the nodes' own onboard Wi-Fi, `self_emitters` in the site layout) are shown at their nodes, because that is where they are. Selecting one circles its node and shows, labelled *model check*, where the model would have placed it and how far off that is. Recording a node radio in calibration uses its node's exact position (no click needed).
 - **Demo emitters** (`CONSOLE_DEMO=1`): their true position is a hollow cyan diamond joined to the estimate, and the panel shows the error.
 - **Source warning:** the header shows *⚠ N silent* (or *sources down*) when a Kismet capture source is stopped, in error, or running without delivering packets for 5 minutes. Hover for the list. TPMS sources are exempt, since sensors transmit rarely.

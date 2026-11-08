@@ -512,7 +512,6 @@ function calUseFits() {
     S.offsets[band] = (f && f.offsets) || {};
   }
   S.version++;
-  renderModelCard();
   refresh();
 }
 

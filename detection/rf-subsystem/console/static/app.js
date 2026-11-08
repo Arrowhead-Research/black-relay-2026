@@ -454,22 +454,8 @@ function renderStatus() {
 // ---------- controls ----------
 function showBand(band) {
   S.band = band;
-  renderModelCard();
 }
 
-// Read-only: the model in use per band, and where it came from.
-function renderModelCard() {
-  if (!S.data) return;
-  const names = { wifi: "Wi-Fi", bt: "Bluetooth", tpms: "TPMS" };
-  const rows = Object.keys(S.models).map((band) => {
-    const m = S.models[band], f = S.calib.fits[band];
-    return `<tr><td><b>${names[band]}</b></td><td>${m.n}</td><td>${m.sigma}</td><td>${S.walls.length && m.wall ? m.wall : "—"}</td>` +
-      `<td>${f ? f.loo_median_ft.toFixed(1) + " ft" : '<span class="muted">default</span>'}</td></tr>`;
-  }).join("");
-  $("model-card").innerHTML = `<tr><th></th><th>n</th><th>σ dB</th><th>wall dB</th><th>error</th></tr>${rows}`;
-  const fitted = Object.keys(S.models).filter((b) => S.calib.fits[b]).map((b) => `${names[b]} ${S.calib.fits[b].loo_median_ft.toFixed(1)} ft`);
-  $("model-sum").textContent = `Model · ${fitted.length ? fitted.join(", ") : "default"}`;
-}
 const inSetup = () => typeof C !== "undefined" && C.mode === "setup";
 
 function refresh() {
@@ -478,7 +464,6 @@ function refresh() {
   renderList();
   renderChips();
   renderStatus();
-  renderModelCard();
   renderLiveCal();
   renderGeoStatus();
   renderAlerts();

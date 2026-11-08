@@ -170,10 +170,6 @@ aside { border-left: 1px solid var(--line); background: var(--panel); overflow-y
 .walls-hint { flex-basis: 100%; font-size: 12px; color: var(--muted); }
 #walls-btn.active { background: var(--accent); color: #1a1205; border-color: var(--accent); }
 
-.model-card { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 10px; }
-.model-card th, .model-card td { text-align: left; padding: 4px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; vertical-align: top; }
-.model-card th { color: var(--muted); font-weight: 500; }
-.model-card .src { color: var(--muted); font-size: 11px; }
 .cands { margin: 8px 0; }
 .cands summary { cursor: pointer; color: var(--muted); }
 .cands table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 11px; }
