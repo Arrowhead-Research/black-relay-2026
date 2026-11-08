@@ -361,7 +361,6 @@ function renderSelected() {
   $("sel-name").innerHTML = escapeHtml(displayName(dev)) + (S.selfRadio[dev.id] ? '<span class="badge">node</span>' : "") +
     (mk ? `<span class="badge mark-${mk.kind}">${mk.kind}</span>` : "");
   renderMarkButtons(dev);
-  renderDeviceHistory(dev);
   $("sel-id").textContent = `${dev.id} · ${TYPES[dev.type] || dev.type}${dev.manufacturer && dev.name ? " · " + dev.manufacturer : ""}`;
   const fix = e && e.kind === "fix";
   const radioOf = S.selfRadio[dev.id];

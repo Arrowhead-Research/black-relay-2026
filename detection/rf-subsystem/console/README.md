@@ -79,7 +79,7 @@ How it is used: a position error of δ changes the expected RSSI by about `10·n
 
 ## Baseline and replay
 
-**Baseline** (`baseline.py`): per site, `history/baseline.sqlite` keeps every device's first and last sighting, visits (a visit ends after 10 minutes unheard), time heard and the hours of the week it is around. Devices first seen in the site's first 2 hours are its background. The device card shows *At this site: first seen 3 h ago · visit 4 · usually 08–10, 17–19* (local time); `GET /api/device?id=` returns it, `GET /api/baseline` summarizes. *Clear history* clears it; *Wipe* removes it.
+**Baseline** (`baseline.py`): per site, `history/baseline.sqlite` keeps every device's first and last sighting, visits (a visit ends after 10 minutes unheard), time heard and the hours of the week it is around. Devices first seen in the site's first 2 hours are its background. `GET /api/device?id=` returns a device's record (with its vehicle and co-travelers), `GET /api/baseline` summarizes. *Clear history* clears it; *Wipe* removes it.
 
 **Replay** (`replay.py`): Kismet's log is the raw feed, so a past window can be re-run through the console's pipeline (transmitter crediting, smoothing, server positions with the site's model, walls and geo-reference, baseline, alert rules with the site's areas and marks) to tune rules or models against what was seen. It reads site data only and writes positions, alerts and a summary to `--out`:
 
@@ -100,7 +100,7 @@ Each node's `rf-node-agent` (see [`../node/README.md`](../node/README.md#node-ag
 
 - **Vehicles:** TPMS sensors of one model that burst within 30 s of each other (they transmit while the car moves, so on arrival and departure) are one vehicle. One shared burst is enough; a group larger than 5 (two cars of a make passing together) keeps only pairs seen together twice.
 - **Co-travelers:** two stable devices (a vehicle counts as one) that arrive or leave within 2 minutes of each other on 2+ different visits, more often than chance (Poisson tail < 0.01 given how often each visits), form a group. Randomized addresses change every few minutes and cannot be followed across visits (identity linking is roadmap phase 6).
-- The device card shows *part of a vehicle (4 TPMS)* and *travels with …*; `GET /api/device` returns them; `arrived_with` alerts when a group arrives again.
+- `GET /api/device` returns a device's vehicle and co-travelers; `arrived_with` alerts when a group arrives again.
 
 Measured on the simulator (`tests/cotravel_eval.py`, also run as tests): over 24 h with 536 passing vehicles, 91 % of vehicles are recovered exactly and 98 % of predicted vehicles are pure; the subject vehicle is grouped with its own head unit and nothing else is (pair precision 1.0); the passersby, loiterer and friendly-only scenarios produce no co-traveler groups. The occupants' phones, watch and tag rotate their addresses and are not linked.
 
