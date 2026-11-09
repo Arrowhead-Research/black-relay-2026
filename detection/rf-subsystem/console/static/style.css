@@ -115,7 +115,7 @@ aside { border-left: 1px solid var(--line); background: var(--panel); overflow-y
 .chip:not(.on) i { opacity: .3; }
 #device-list { list-style: none; margin: 0; padding: 0; }
 #device-list li {
-  display: grid; grid-template-columns: 10px 1fr auto; gap: 10px; align-items: center;
+  display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 10px; align-items: center;
   padding: 7px 8px; border-radius: 8px; cursor: pointer;
 }
 #device-list li:hover { background: var(--panel-2); }
@@ -123,7 +123,7 @@ aside { border-left: 1px solid var(--line); background: var(--panel); overflow-y
 #device-list li.dim { opacity: .45; }
 .dname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .dmeta { font-size: 11px; color: var(--muted); }
-.dright { text-align: right; font-size: 12px; font-variant-numeric: tabular-nums; }
+.dright { text-align: right; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .nodedots { display: inline-flex; gap: 2px; }
 .nodedots span { width: 6px; height: 6px; border-radius: 50%; background: var(--line); }
 .nodedots span.on { background: var(--accent); }

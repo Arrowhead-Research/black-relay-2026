@@ -268,7 +268,7 @@ function draw() {
   dots.sort((a, b) => (a[0] === S.selected) - (b[0] === S.selected));
   // demo emitters: true position (hollow diamond) and the error to the estimate
   for (const [id, dev, p] of dots) {
-    if (!dev.truth) continue;
+    if (!dev.truth || S.hideTruth) continue;
     const [tx, ty] = toS(...dev.truth), [sx, sy] = toS(...p);
     ctx.strokeStyle = "rgba(155,231,255,.7)"; ctx.lineWidth = 1; ctx.setLineDash([2, 3]);
     ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(sx, sy); ctx.stroke(); ctx.setLineDash([]);
@@ -359,7 +359,7 @@ function renderSelected() {
   $("sel-dot").style.background = typeColor(dev.type);
   const mk = markOf(dev.id);
   $("sel-name").innerHTML = escapeHtml(displayName(dev)) + (S.selfRadio[dev.id] ? '<span class="badge">node</span>' : "") +
-    (mk ? `<span class="badge mark-${mk.kind}">${mk.kind}</span>` : "");
+    (mk && mk.kind ? `<span class="badge mark-${mk.kind}">${mk.kind}</span>` : "");
   renderMarkButtons(dev);
   $("sel-id").textContent = `${dev.id} · ${TYPES[dev.type] || dev.type}${dev.manufacturer && dev.name ? " · " + dev.manufacturer : ""}`;
   const fix = e && e.kind === "fix";
@@ -372,7 +372,7 @@ function renderSelected() {
     $("sel-geo").textContent = `${e.lat.toFixed(6)}, ${e.lon.toFixed(6)}`;
     $("sel-geo-box").title = e.errM != null ? `Median error ±${e.errM} m (calibration and node GPS fit)` : "Not calibrated: no measured accuracy yet";
   }
-  const truth = dev.truth || (radioOf ? S.nodes[radioOf] : null);  // demo truth, or a node radio's node
+  const truth = (S.hideTruth ? null : dev.truth) || (radioOf ? S.nodes[radioOf] : null);  // demo truth, or a node radio's node
   $("sel-truth-box").hidden = !(truth && fix);
   if (truth && fix) $("sel-truth").textContent = `${Math.hypot(e.x - truth[0], e.y - truth[1]).toFixed(1)} ft`;
   const st = S.steps.get(dev.id) || [];
@@ -407,7 +407,7 @@ function renderList() {
     const e = S.est.get(dev.id);
     li.className = (dev.id === S.selected ? "sel " : "") + (e && e.kind === "fix" ? "" : "dim");
     li.innerHTML = `<i class="type-dot" style="background:${typeColor(dev.type)}"></i>
-      <div><div class="dname">${escapeHtml(displayName(dev))}${S.selfRadio[dev.id] ? '<span class="badge">node</span>' : ""}${markOf(dev.id) ? `<span class="badge mark-${markOf(dev.id).kind}">${markOf(dev.id).kind}</span>` : ""}${dev.randomized ? '<span class="badge">random MAC</span>' : ""}</div>
+      <div><div class="dname">${escapeHtml(displayName(dev))}${S.selfRadio[dev.id] ? '<span class="badge">node</span>' : ""}${(markOf(dev.id) || {}).kind ? `<span class="badge mark-${markOf(dev.id).kind}">${markOf(dev.id).kind}</span>` : ""}${dev.randomized ? '<span class="badge">random MAC</span>' : ""}</div>
       <div class="dmeta mono">${dev.id}${e && e.kind === "proximity" ? ` · ~${e.dFt.toFixed(0)} ft from ${e.node}` : ""}</div></div>
       <div class="dright">${strongest.toFixed(0)} dBm<br><span class="nodedots">${S.nodeOrder.map((n) => `<span class="${dev.nodes[n] ? "on" : ""}"></span>`).join("")}</span></div>`;
     li.onclick = () => (S.calib.on ? calSetRef(dev.id) : select(dev.id === S.selected ? null : dev.id));

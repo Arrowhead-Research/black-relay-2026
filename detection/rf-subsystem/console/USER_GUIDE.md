@@ -2,7 +2,7 @@
 
 The WBT Console is the operator page of the RF subsystem. It shows where nearby Wi-Fi, Bluetooth and TPMS (tire sensor) devices are, based on what the four WBT nodes hear, and raises alerts for devices you care about. This guide covers using it. For installing and running it, see [`README.md`](README.md).
 
-*Last updated 2026-11-08.*
+*Last updated 2026-11-08. Screenshots show the console's demo mode (synthetic devices and an example layout), not a real site.*
 
 ## Contents
 
@@ -27,9 +27,13 @@ Open `http://<central host>:8080` in a browser on the team network or the tailne
 | **Operator** | Everything on the map, marking devices, alerts, setting up nodes, walls, areas and calibration, creating and switching sites |
 | **Admin** | Everything an operator can, plus exporting a site, clearing its history, changing how long history is kept, and wiping a site |
 
+![Sign-in page](docs/img/sign-in.png)
+
 A session lasts 12 hours. *Sign out* is at the top right. If the header shows **sign-in off**, the console has no passwords set and anyone on the network can use it: tell whoever runs the central host.
 
 ## 2. The screen
+
+![The console in Live mode: map on the left, alerts and devices on the right](docs/img/overview.png)
 
 **Header (left to right):** the site name (click it for the site menu), the connection to Kismet (green *Kismet live* is normal), the number of devices heard and located, a red alert count when there are unacknowledged alerts, a warning when a capture source is silent or down, the **Live / Setup** switch, and **Pause**.
 
@@ -54,6 +58,8 @@ A session lasts 12 hours. *Sign out* is at the top right. If the header shows **
 
 Click a dot or a row in the device list. The other devices fade out and the device's card opens:
 
+![One device selected: rings around the nodes on the map, its card on the right](docs/img/device.png)
+
 - **Name**, address and type. Randomized addresses (most phones) are marked *random MAC*.
 - **Position** in feet on the floor plan, and **Lat, lon** once the site has node GPS points (section 7).
 - **Nodes:** how many nodes hear it.
@@ -66,6 +72,8 @@ To go back to all devices, click empty map space, press **Esc**, or click **← 
 ## 5. Marking devices
 
 On the device's card:
+
+![Device card with the Friendly and Priority buttons, linger alarm and scope](docs/img/device-card.png)
 
 | Control | What it does |
 |---|---|
@@ -88,6 +96,8 @@ Clicking the highlighted mark button again removes just that mark and keeps the 
 | **in *area* for N min** / **here for N min** | a device has stayed in an area longer than the area's linger time, or has been around longer than its own linger alarm | medium, high for a priority device |
 | ***node* offline** | a node has stopped capturing | high |
 
+![Alerts card](docs/img/alerts.png)
+
 **One alert, then quiet.** Once a device has alerted, it alerts again only when it reaches a linger time, and after that not at all until it has been gone for 10 minutes. A priority device walking into an area gives one high alert, not two. Walking into a second area, or back into the same one, stays quiet.
 
 **Area alerts need three nodes.** A device heard by only two nodes has no reliable position, so it never triggers an area alert. Friendly devices never trigger area alerts.
@@ -102,6 +112,8 @@ Do this once per building, in **Setup**. Create a site first (section 9) so the 
 
 ### Nodes
 
+![Setup → Nodes: node chips and the GPS row at the bottom of the map](docs/img/setup-nodes.png)
+
 **Setup → Nodes.** Drag each node to where it really is (any corner of the building can be 0, 0; distances are in feet; positions snap to half a foot). Nodes that Kismet hears but that are not on the map yet show as **+ wbt-…** buttons: click one, then click the map where it is. **×** removes a node from this site (a site needs at least two).
 
 Measure node positions with a tape or laser if you can. Wrong node positions make every position on the map wrong, and calibration cannot fully fix them.
@@ -109,6 +121,8 @@ Measure node positions with a tape or laser if you can. Wrong node positions mak
 **GPS (optional, for latitude/longitude):** in the same bar, choose a node, paste its coordinates as `lat, lon` (decimal degrees, as map apps copy them) and click **Set**. With two or more nodes set, the console works out how the floor plan sits on the map. With only one, also enter **Up**: the compass bearing (0–360°) of the map's up direction. The status next to it shows how well the points agree (`fit ±1.2 m`) and warns if they don't. Take coordinates outdoors or from a satellite map: GPS inside a building is often 5–15 m off. Coordinates are kept only with the site and are erased when it is wiped.
 
 ### Walls
+
+![Setup → Walls toolbar](docs/img/setup-walls.png)
 
 **Setup → Walls.** Walls weaken signals, so drawing the main ones improves positions.
 
@@ -120,6 +134,8 @@ Measure node positions with a tape or laser if you can. Wrong node positions mak
 
 ### Areas
 
+![Setup → Areas: an area drawn on the map, its name and linger time in the bar](docs/img/setup-areas.png)
+
 **Setup → Areas.** Type a name, choose its **Linger** time (2 min, 5 min, 15 min or 1 h), click the corners of the area on the map, and click the first corner again to finish. **×** on an area's name deletes it. Good areas: the approach to the door, the parking area, the inner perimeter.
 
 ## 8. Calibration
@@ -128,6 +144,8 @@ Calibration measures how signals fade in this building, so positions become accu
 
 **What to carry:** your phone's **Wi-Fi hotspot** turned on (it transmits constantly at a fixed power). A Bluetooth tag works for Bluetooth. Avoid devices that go quiet (idle phones, scooters connected to their app, earbuds in their case).
 
+![Setup → Calibrate: suggested spots A–C on the map, the calibration panel on the right](docs/img/calibrate.png)
+
 **Recording a spot:**
 
 1. **Setup → Calibrate.**
@@ -135,6 +153,8 @@ Calibration measures how signals fade in this building, so positions become accu
 3. Stand still. Click the map where you are standing, and choose how sure you are of that spot (**exact**, **±2 ft**, **±5 ft**).
 4. Click **Record** and stay still: 15 seconds for Wi-Fi, 45 for Bluetooth. The panel says how many nodes heard it.
 5. Move to the next spot and repeat.
+
+![Calibration panel](docs/img/calibrate-panel.png)
 
 **Where to stand:** the panel suggests the next spots as **A**, **B**, **C** (also drawn on the map). Click **Go** to set that spot, walk there, and record. Spread spots over the whole area, including the middle of rooms and places separated from nodes by walls. Eight or more spots give a trustworthy result. The panel shows **done** when calibration is good enough.
 
@@ -149,6 +169,8 @@ Calibration measures how signals fade in this building, so positions become accu
 ## 9. Sites: moving between buildings
 
 Each building is a **site** with its own nodes, walls, areas, calibration, marks (site scope), alerts and history. Click the site name in the header to open the site menu.
+
+![Site menu (admin view)](docs/img/site-menu.png)
 
 | To | Do |
 |---|---|

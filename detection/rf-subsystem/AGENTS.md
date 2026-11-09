@@ -5,6 +5,7 @@ Living handoff for agents working on Black Relay `detection/rf-subsystem`. Keep 
 ## Documents to keep current
 
 - **Operator guide: `console/USER_GUIDE.md`.** Any change an operator can see (page controls, labels, alert rules, setup or calibration steps, site menu) updates it in the same commit, including its *Last updated* date.
+- **Guide screenshots: `console/docs/img/*.png`.** Retake them in the same commit whenever the page's look changes: run `console/docs/screenshots.mjs` against a **demo** console (instructions at the top of the script; synthetic devices, example layout, throwaway password). Never screenshot a real site: site data stays out of git. A new view in the guide gets a new step in the script, so all images can be regenerated in one run. Look at every image before committing.
 - **MQTT contract: `MQTT-CONTRACT.md`.** Any change to topics, payload fields, QoS, delivery or timing updates it (and `schemas/`) in the same commit, with a change-log row; breaking changes follow its versioning rules.
 
 ## Current state (validated)
