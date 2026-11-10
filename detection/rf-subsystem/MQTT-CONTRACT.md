@@ -2,7 +2,7 @@
 
 What the RF subsystem publishes to MQTT, and what a subscriber (the fusion service) can rely on. It describes the implementation on `detection/wifi-dev` as of the date below; any change to topics, payloads or delivery is made here in the same commit.
 
-*Version: draft v0. Last updated 2026-11-08.*
+*Version: draft v0. Last updated 2026-11-09.*
 
 **Status:** draft. The fusion team has not published its message standard yet. When it does, only the wire adapter (`analytics/src/rfanalytics/formats.py`) and the schemas in [`schemas/`](schemas/) change; this document will be updated with them. Until then, the formats below are stable: changes follow the versioning rules in section 8.
 
@@ -120,7 +120,7 @@ One node's state. `timestamp` = when the status was produced.
 | `state` | string | `online` (all capture sources delivering, no health problem), `degraded` (some sources silent or down, or a health problem), `offline` (no source running, or the node agent silent with no sources). |
 | `site` | object | See section 3. |
 | `sources` | object | Capture source (`wifi`, `bt`, `tpms`) → `ok`, `silent` (running but delivering nothing for 5 min; not used for TPMS), `stopped` or `error`. |
-| `health` | object | From the node's agent, when it reports: `temp_c`, `throttled` (Raspberry Pi `get_throttled` bits), `uptime_s`, `agent_age_s` (seconds since its last report), `problems` (list of strings, e.g. `"undervoltage"`, `"kismet-cap-bt failed"`). |
+| `health` | object | From the node's agent, when it reports: `temp_c`, `throttled` (Raspberry Pi `get_throttled` bits), `uptime_s`, `agent_age_s` (seconds since its last report), `problems` (list of strings, e.g. `"undervoltage"`, `"kismet-cap-bt failed"`, `"kismet-cap-bt restarted by watchdog"`: the node restarted a capture unit that delivered no data, listed for 30 min). |
 | `last_heard` | string or null | rf-analytics only. |
 
 ```json
@@ -182,3 +182,4 @@ Expect a node status for each node within a minute, and position updates (about 
 | Date | Change |
 |---|---|
 | 2026-11-08 | First version: positions, alerts (priority, area entry, linger, node offline), node status with health. |
+| 2026-11-09 | Node status `health.problems` may include `"<unit> restarted by watchdog"` (additive). |

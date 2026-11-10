@@ -4,7 +4,8 @@ Each node POSTs its health every 30 s to /api/nodes/heartbeat (with
 X-Node-Token when CONSOLE_NODE_TOKEN is set). ``report`` derives problems:
 agent silent (no heartbeat for SILENT_S), hot, throttling or undervoltage
 (vcgencmd bits), a capture unit not running, a capture adapter missing, disk
-nearly full. An admin can queue a restart of a capture unit; the agent
+nearly full, and a capture unit the agent's watchdog restarted in the last
+WATCHDOG_SHOW_S (it delivered no data). An admin can queue a restart of a capture unit; the agent
 receives it in the reply to its next heartbeat.
 """
 
@@ -17,6 +18,7 @@ from typing import Any
 SILENT_S = 90.0
 HOT_C = 80.0
 LOW_DISK_PCT = 10.0
+WATCHDOG_SHOW_S = 1800.0   # a node agent's watchdog restart is listed as a problem this long
 RESTARTABLE = ("kismet-cap-wifi", "kismet-cap-bt", "kismet-cap-tpms")
 NODE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")
 MAX_NODES = 32
@@ -35,13 +37,16 @@ class NodeHealth:
             raise ValueError("heartbeat needs a node name")
         node = str(body["node"]).lower()
         keep = ("agent", "host", "uptime_s", "temp_c", "throttled", "load", "mem_free_pct", "disk_free_pct",
-                "units", "adapters", "tailscale_ip", "actions")
+                "units", "adapters", "tailscale_ip", "actions", "watchdog")
         with self.lock:
             if node not in self.data and len(self.data) >= MAX_NODES:
                 raise ValueError("too many nodes")
             prev = self.data.get(node, {})
+            # keep the agent's watchdog restarts for WATCHDOG_SHOW_S (they are reported once)
+            auto = [a for a in (prev.get("auto_restarts") or []) if now - a.get("t", 0) <= WATCHDOG_SHOW_S]
+            auto += [a for a in (body.get("actions") or []) if isinstance(a, dict) and a.get("auto")]
             self.data[node] = {**{k: body.get(k) for k in keep}, "received": now,
-                               "actions": (body.get("actions") or []) or prev.get("actions", [])}
+                               "actions": (body.get("actions") or []) or prev.get("actions", []), "auto_restarts": auto}
             return {"restart": sorted(self.pending.pop(node, set()))}
 
     def queue_restart(self, node: str, unit: str) -> None:
@@ -70,6 +75,9 @@ class NodeHealth:
                 for k, label in ADAPTERS.items():
                     if (h.get("adapters") or {}).get(k) is False:
                         problems.append(f"no {label}")
+                for unit in sorted({a.get("restart") for a in h.get("auto_restarts") or []
+                                    if now - a.get("t", 0) <= WATCHDOG_SHOW_S and a.get("restart")}):
+                    problems.append(f"{unit} restarted by watchdog")
                 if h.get("disk_free_pct") is not None and h["disk_free_pct"] < LOW_DISK_PCT:
                     problems.append(f"disk {h['disk_free_pct']:.0f}% free")
                 out[node] = {**{k: v for k, v in h.items() if k != "received"}, "age_s": round(age),

@@ -12,6 +12,17 @@ The reply can ask the agent to restart one of the capture units (queued by an
 admin in the console); only those three units can be restarted, and the
 result is reported in the next heartbeat.
 
+Watchdog: a capture helper can stay connected yet deliver nothing (a
+Bluetooth adapter that stopped scanning, a link that accepts nothing). For the
+Wi-Fi and Bluetooth units the agent watches the capture data Kismet has
+acknowledged on the helper's TCP connection (``ss``: bytes_acked minus
+bytes_received, so the helper's keepalives cancel out). If it grows by less
+than WATCH_MIN_BYTES for WATCH_STALL_S, the agent restarts that unit itself, at
+most once per WATCH_GAP_S, and reports it (``actions`` with ``"auto": true``).
+A helper with no connection for WATCH_STALL_S counts as stuck too (it may hang
+with no connection; a helper that is only reconnecting loses nothing by a
+restart). TPMS is not watched: tire sensors can be silent for hours.
+
 Configuration: /etc/rf-node/rf-node.env (systemd EnvironmentFile): CENTRAL_HOST,
 NODE_NAME, WIFI_IFACE, BT_ADDR, and optionally CONSOLE_PORT (8080),
 AGENT_INTERVAL_S and NODE_TOKEN (sent as X-Node-Token when the console
@@ -31,10 +42,89 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1"
+VERSION = "2"
 UNITS = ("kismet-cap-wifi", "kismet-cap-bt", "kismet-cap-tpms", "tailscaled")
 RESTARTABLE = ("kismet-cap-wifi", "kismet-cap-bt", "kismet-cap-tpms")
 RTLSDR_IDS = {("0bda", "2838"), ("0bda", "2832")}
+WATCHED = ("kismet-cap-wifi", "kismet-cap-bt")
+WATCH_STALL_S = 600.0       # no capture data acknowledged this long: restart
+WATCH_MIN_BYTES = 2048      # less than this in WATCH_STALL_S counts as nothing (keepalives cancel out anyway)
+WATCH_GAP_S = 600.0         # at most one watchdog restart per unit this often
+
+
+def unit_pids(unit: str) -> set[int]:
+    """The unit's main process and its descendants (the capture helper forks)."""
+    main = run(["systemctl", "show", "-p", "MainPID", "--value", unit])
+    if not main.isdigit() or main == "0":
+        return set()
+    pids, todo = set(), [int(main)]
+    while todo:
+        pid = todo.pop()
+        if pid in pids:
+            continue
+        pids.add(pid)
+        for f in Path(f"/proc/{pid}/task").glob("*/children"):
+            todo += [int(c) for c in read(str(f)).split() if c.isdigit()]
+    return pids
+
+
+def parse_ss(text: str) -> dict[int, tuple[str, int]]:
+    """``ss -Htinp`` output -> {pid: (connection key, bytes_acked - bytes_received)}."""
+    out: dict[int, tuple[str, int]] = {}
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if "pid=" not in line:
+            continue
+        parts = line.split()
+        key = " ".join(parts[2:4]) if len(parts) >= 4 else line
+        info = lines[i + 1] if i + 1 < len(lines) and "pid=" not in lines[i + 1] else ""
+        stats = dict(f.split(":", 1) for f in info.split() if ":" in f and f.split(":", 1)[1].isdigit())
+        acked, received = int(stats.get("bytes_acked", 0)), int(stats.get("bytes_received", 0))
+        for p in line.split("pid=")[1:]:
+            pid = p.split(",", 1)[0]
+            if pid.isdigit():
+                out[int(pid)] = (key, acked - received)
+    return out
+
+
+class Watchdog:
+    """Restart a capture unit whose connection to central carries no capture data."""
+
+    def __init__(self, stall_s: float = WATCH_STALL_S, min_bytes: int = WATCH_MIN_BYTES, gap_s: float = WATCH_GAP_S) -> None:
+        self.stall_s, self.min_bytes, self.gap_s = stall_s, min_bytes, gap_s
+        self.state: dict[str, dict] = {}         # unit -> {key, mark, since, restarted}
+
+    def step(self, now: float, samples: dict[str, tuple[str, int] | None]) -> list[str]:
+        """samples: unit -> (connection key, delivered bytes), or None without a connection
+        (no connection counts as delivering nothing). Returns the units to restart now."""
+        due = []
+        for unit, sample in samples.items():
+            st = self.state.setdefault(unit, {"key": "", "mark": 0, "since": now, "restarted": -1e18})
+            key, delivered = sample if sample is not None else (None, 0)
+            if key != st["key"] or delivered - st["mark"] >= self.min_bytes or delivered < st["mark"]:
+                st.update(key=key, mark=delivered, since=now)      # new connection, or data flowing
+                continue
+            if now - st["since"] >= self.stall_s and now - st["restarted"] >= self.gap_s:
+                due.append(unit)
+                st.update(key=key, since=now, restarted=now)    # the clock runs from the restart
+        return due
+
+    def status(self, now: float) -> dict[str, dict]:
+        return {u: {"stalled_s": round(now - s["since"]),
+                    "last_restart_s": round(now - s["restarted"]) if s["restarted"] > 0 else None}
+                for u, s in self.state.items()}
+
+
+def watch_samples(env: dict) -> dict[str, tuple[str, int] | None]:
+    port = env.get("CENTRAL_PORT", "3501")
+    conns = parse_ss(run(["ss", "-Htinp", "state", "established", f"( dport = :{port} )"]))
+    out: dict[str, tuple[str, int] | None] = {}
+    for unit in WATCHED:
+        if unit_state(unit)["active"] != "active":
+            continue                             # systemd handles stopped or failed units
+        mine = [conns[p] for p in unit_pids(unit) if p in conns]
+        out[unit] = mine[0] if mine else None
+    return out
 
 
 def run(cmd: list[str], timeout: float = 5.0) -> str:
@@ -79,7 +169,7 @@ def bt_addresses() -> list[str]:
     return addrs
 
 
-def collect(env: dict, actions: list[dict]) -> dict:
+def collect(env: dict, actions: list[dict], watchdog_status: dict | None = None) -> dict:
     temp = read("/sys/class/thermal/thermal_zone0/temp")
     thr = run(["vcgencmd", "get_throttled"]).partition("=")[2]
     mem = {k: int(v.split()[0]) for k, v in (line.split(":", 1) for line in read("/proc/meminfo").splitlines() if ":" in line)
@@ -104,6 +194,7 @@ def collect(env: dict, actions: list[dict]) -> dict:
         },
         "tailscale_ip": run(["tailscale", "ip", "-4"]).splitlines()[0] if run(["tailscale", "ip", "-4"]) else None,
         "actions": actions,
+        "watchdog": watchdog_status or {},
     }
 
 
@@ -115,7 +206,7 @@ def load_env(path: str = "/etc/rf-node/rf-node.env") -> dict:
             k, v = line.split("=", 1)
             env[k.strip()] = v.strip().strip("'\"")
     env.update({k: v for k, v in os.environ.items() if k in ("CENTRAL_HOST", "NODE_NAME", "CONSOLE_PORT", "NODE_TOKEN",
-                                                             "AGENT_INTERVAL_S", "WIFI_IFACE", "BT_ADDR")})
+                                                             "AGENT_INTERVAL_S", "WIFI_IFACE", "BT_ADDR", "CENTRAL_PORT")})
     return env
 
 
@@ -128,15 +219,26 @@ def main() -> int:
     interval = float(env.get("AGENT_INTERVAL_S", 30))
     actions: list[dict] = []
     failures = 0
+    dog = Watchdog()
     while True:
-        body = json.dumps(collect(env, actions)).encode()
+        now = time.time()
+        try:
+            for unit in dog.step(now, watch_samples(env)):
+                rc = subprocess.run(["systemctl", "restart", unit], capture_output=True, timeout=60).returncode
+                print(f"rf-node-agent: watchdog restarted {unit}: no capture data for {WATCH_STALL_S / 60:.0f} min "
+                      f"({'ok' if rc == 0 else f'failed, rc {rc}'})", file=sys.stderr)
+                actions.append({"restart": unit, "ok": rc == 0, "t": now, "auto": True,
+                                "reason": f"no capture data for {WATCH_STALL_S / 60:.0f} min"})
+        except Exception as exc:  # noqa: BLE001 - the watchdog must never stop the heartbeats
+            print(f"rf-node-agent: watchdog check failed: {exc}", file=sys.stderr)
+        body = json.dumps(collect(env, actions, dog.status(now))).encode()
         headers = {"Content-Type": "application/json"}
         if env.get("NODE_TOKEN"):
             headers["X-Node-Token"] = env["NODE_TOKEN"]
         try:
             with urllib.request.urlopen(urllib.request.Request(url, data=body, headers=headers), timeout=10) as r:
                 reply = json.loads(r.read() or b"{}")
-            actions = []
+            actions = []                          # reported: start a new list
             failures = 0
             for unit in reply.get("restart", []):
                 if unit in RESTARTABLE:
