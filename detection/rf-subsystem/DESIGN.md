@@ -153,7 +153,7 @@ These requirements come from the original design notes. Each has an ID so it can
 | Layer | Component | Notes |
 |---|---|---|
 | OS | Raspberry Pi OS Lite (64-bit, Bookworm or later) | Headless. |
-| Networking | Tailscale | Joins the tailnet with a pre-authorized, tagged auth key (`tag:rf-node`). |
+| Networking | Tailscale | Joins the tailnet with a pre-authorized, tagged auth key (`tag:rf-node` in this design; the deployed nodes use `tag:sensor-fusion`). |
 | Capture | `kismet_cap_linux_wifi`, `kismet_cap_linux_bluetooth`, `kismet_cap_sdr_rtl433` (or `rtl_433` feeding Kismet) | Kismet remote-capture helpers only. The node does not run a full Kismet server. |
 | Agent | `rf-node-agent` (to be written) | Registration, self-exclusion, health reporting, and server discovery. |
 | Supervision | systemd | One unit per capture source plus the agent. Units restart on failure. |
@@ -194,6 +194,7 @@ placement:
 - Tailscale ACLs allow `tag:rf-node` to reach only the Kismet remote-capture port and the agent registration endpoint on `tag:rf-central`.
 - If the server moves to another host, only that host's Tailscale hostname needs to change. Nodes do not need reconfiguring.
 - **Fallback:** `node.yaml` can override the server hostname for testing off the tailnet.
+- **As deployed (2026-11-11):** the central server is a VM behind the deployment's subnet router and does not join the tailnet, so nodes use its LAN address through the router (`tailscale set --accept-routes` plus a Headscale rule). Moving the server means changing `CENTRAL_HOST` on every node. See [`node/README.md`](node/README.md#tailscale-headscale-tailnet).
 
 ### 6.6 Self-registration and automatic exclusion (NODE-05)
 

@@ -2,7 +2,7 @@
 
 What the RF subsystem publishes to MQTT, and what a subscriber (the fusion service) can rely on. It describes the implementation on `detection/wifi-dev` as of the date below; any change to topics, payloads or delivery is made here in the same commit.
 
-*Version: draft v0. Last updated 2026-11-09.*
+*Version: draft v0. Last updated 2026-11-11.*
 
 **Status:** draft. The fusion team has not published its message standard yet. When it does, only the wire adapter (`analytics/src/rfanalytics/formats.py`) and the schemas in [`schemas/`](schemas/) change; this document will be updated with them. Until then, the formats below are stable: changes follow the versioning rules in section 8.
 
@@ -11,7 +11,7 @@ What the RF subsystem publishes to MQTT, and what a subscriber (the fusion servi
 | | Value |
 |---|---|
 | Broker | Eclipse Mosquitto 2.0.22, service `mqtt` of the `rf-central` stack ([`central/docker-compose.yml`](central/docker-compose.yml)) |
-| Address on the shared host | `rf-mqtt:1883` on the Docker network `fusion` (join that network to subscribe). The port is not published on the host. |
+| Address on the shared host | `rf-mqtt:1883` on the Docker network `fusion` of the host that runs the central stack (join that network to subscribe). The port is not published on the host, so subscribers must run on that host. |
 | Protocol | MQTT 3.1.1 / 5, plain TCP |
 | Authentication | None (anonymous), no TLS. Access is limited by the network: only containers on `fusion` and the stack itself can reach it. Not acceptable for a field deployment; see section 10. |
 | Persistence | On (`mqtt-data` volume): QoS 1 messages queued for a persistent session survive a broker restart |
@@ -173,7 +173,7 @@ Expect a node status for each node within a minute, and position updates (about 
 |---|---|
 | Fusion message standard | Waiting on the fusion team; this contract maps onto it when it arrives. |
 | Broker authentication and TLS | Not configured (anonymous, network-isolated). Needed before field use: per-client credentials and ACLs (RF publishes on `detection/rf/#`, others subscribe). |
-| Shared broker | `sf-dev` lists port 1883 as a planned broker. If a shared broker replaces ours, only the console's `CONSOLE_MQTT_HOST` changes. |
+| Shared broker | None on the current central host. If a shared broker replaces ours, only the console's `CONSOLE_MQTT_HOST` changes. Subscribers on other machines need either that, or port 1883 published (with authentication first, see above). |
 | Inbound topics (configuration from TAK via fusion) | Not implemented. Draft names from DESIGN.md 9.3: `detection/rf/config/in`, `detection/rf/config/ack`. |
 | Camera cues | Produced only by rf-analytics (not running); routing to be agreed with the camera team. |
 
@@ -183,3 +183,4 @@ Expect a node status for each node within a minute, and position updates (about 
 |---|---|
 | 2026-11-08 | First version: positions, alerts (priority, area entry, linger, node offline), node status with health. |
 | 2026-11-09 | Node status `health.problems` may include `"<unit> restarted by watchdog"` (additive). |
+| 2026-11-11 | Broker moved with the central stack to the deployment's JOC server; same address on its `fusion` network (`rf-mqtt:1883`). No change to topics or payloads. |

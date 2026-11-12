@@ -71,7 +71,7 @@ The central service has no physical assembly. It runs as Docker containers on th
   - A tape measure, to record node positions for localization.
   - A laptop with SSH and Tailscale, for setup.
   - Optional: an inline USB power meter, to diagnose power problems.
-- **Accounts:** access to the team's Tailscale tailnet, and a pre-authorized auth key tagged `tag:rf-node`. Get the key from the RF lead and never commit it.
+- **Accounts:** access to the team's Tailscale tailnet, and a pre-authorized auth key tagged `tag:sensor-fusion` (the tag the WBT nodes use in Headscale). Get the key from the RF lead and never commit it.
 - **Power requirements:** two outlets per node.
   - **Pi 5:** USB-C PD supply rated 5 V / 5 A (27 W). Use the kit supply. A weaker supply limits USB output current, and the radios will disconnect at random.
   - **Powered USB hub:** its own wall adapter. All three radios draw power from the hub, not from the Pi.
@@ -103,7 +103,7 @@ Central stack settings are in `central/.env` (copy it from `central/.env.example
 
 | Setting | Required | Description / example |
 |---|---|---|
-| `BIND_ADDR` | Yes | Host address to expose ports on. Use `127.0.0.1` for development or the host's Tailscale IP. |
+| `BIND_ADDR` | Yes | Host address to expose ports on. Use `127.0.0.1` for development, the host's Tailscale IP, or `0.0.0.0` on a shared host behind a subnet router (with `docker-compose.fusion.yml`, see [`central/README.md`](central/README.md#shared-fusion-host)). |
 | `KISMET_VERSION` | Yes | Pinned Kismet release, `2026-10-R1`. Nodes must use the same version. |
 | `KISMET_ADMIN_USER` / `KISMET_ADMIN_PASSWORD` | Yes | Kismet web admin account. Seeded on first start only. |
 
@@ -128,7 +128,7 @@ Node configuration (`/etc/rf-node/node.yaml`) is specified in DESIGN.md section 
    To process the feed and publish alerts, run `cd analytics && uv sync --extra mqtt && uv run rfanalytics run --site ../simulator/sites/dev-site.yaml --mqtt-host 127.0.0.1 -o events.jsonl --rules config/rules.example.yaml --publish-host 127.0.0.1`. See [`analytics/README.md`](analytics/README.md).
    With live nodes instead, start the analytics service next to Kismet: `cd central && docker compose --profile analytics up -d --build`, and watch its output with `docker compose exec mqtt mosquitto_sub -t 'detection/rf/#' -v`. Set `RF_SITE`, `RF_RULES` and `RF_FRIENDLY` in `central/.env` to the real site files first; the example site geometry is a placeholder. See [`central/README.md`](central/README.md#live-analytics-kismet--alerts--mqtt).
 3. **Bring up WBT nodes.** This is a draft until it is validated on hardware. The node agent is not built yet. Steps 3.4–3.5 can be run manually, or capture can be made persistent with the example systemd units in [`node/README.md`](node/README.md).
-   1. Make sure the central stack is running and the central server is on the tailnet as `rf-central`.
+   1. Make sure the central stack is running and the central server is on the tailnet as `rf-central`, or reachable through the site's subnet router (see [`node/README.md`](node/README.md#tailscale-headscale-tailnet)).
    2. **Power order:** power the USB hub **first**, wait about 5 seconds, then power the Pi. This way all radios are present when the Pi enumerates USB devices.
    3. **First boot only:** SSH in, then:
       - run `sudo apt update && sudo apt full-upgrade`
@@ -217,7 +217,7 @@ Focus checks on business rules, event definitions, and contracts with connected 
 | `rf-console` web page and API | Operators | HTTP on `CONSOLE_PORT` (8080): `/api/state`, `/api/sites/*`, `/api/site/nodes`, `/api/calibration/*`, `/api/walls/*`, `/api/login`; reads Kismet REST and the packet log (read-only) | Implemented, with sign-in (operator/admin). Plain HTTP, so keep it on the LAN or tailnet only. |
 
 **Dependencies:**
-- **Tailscale tailnet:** connects nodes and the central server.
+- **Tailscale tailnet:** connects nodes and the central server, directly or through the deployment's subnet router when the central server is not on the tailnet.
 - **Docker** on the central server.
 - **Kismet `2026-10-R1`** on both nodes and server.
 - **Fusion service MQTT broker:** the development broker in `central/` stands in for it until it is available.
@@ -228,6 +228,7 @@ Focus checks on business rules, event definitions, and contracts with connected 
 
 | Date | Change |
 |---|---|
+| 2026-11-11 | Central moved from sf-dev to the deployment's JOC server, which is reached through the site's subnet router instead of joining the tailnet. Nodes accept subnet routes; docs cover the setup, the Headscale rule, the real node tag (`tag:sensor-fusion`) and moving console data between hosts. |
 | 2026-11-08 | `rf-dfviz` became the **WBT Console** (`console/`, compose service `rf-console`, profile `console`): one workspace per building (new, switch, rename, export, clear history, wipe, retention), node placement in the page, Live/Setup modes, and sign-in with operator and admin roles. Existing calibration and walls were moved into the first site. |
 | 2026-11-08 | Bluetooth capture fixed: UB500 dongles stayed "discovering" after a helper exited, so their sources delivered nothing after Kismet restarts. `rf-bt-capture` (systemd unit) clears discovery before every start, reconnects through systemd (`--disable-retry`), and picks the adapter by address instead of `hci` index; `rf-bt-doctor` diagnoses and repairs; the direction-finding page warns about silent or stopped capture sources. Verified: all four nodes recover within 10 s of a Kismet restart. |
 | 2026-11-07 | Added `rf-dfviz`, a live direction-finding page (compose profile `dfviz`): Wi-Fi, Bluetooth and TPMS positions from per-node RSSI with smoothing; walls with uncertain positions; live calibration recorded from the Kismet packet log, with automatic model selection by measured error, suggested next spots, position-accuracy weighting and a journal with restore; demo emitters. |

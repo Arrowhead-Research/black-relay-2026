@@ -2,7 +2,7 @@
 
 The WBT Console is the operator page of the RF subsystem. It shows where nearby Wi-Fi, Bluetooth and TPMS (tire sensor) devices are, based on what the four WBT nodes hear, and raises alerts for devices you care about. This guide covers using it. For installing and running it, see [`README.md`](README.md).
 
-*Last updated 2026-11-09. Screenshots show the console's demo mode (synthetic devices and an example layout), not a real site.*
+*Last updated 2026-11-11. Screenshots show the console's demo mode (synthetic devices and an example layout), not a real site.*
 
 ## Contents
 
@@ -20,7 +20,7 @@ The WBT Console is the operator page of the RF subsystem. It shows where nearby 
 
 ## 1. Opening the console
 
-Open `http://<central host>:8080` in a browser on the team network or the tailnet (on the shared host: `http://sf-dev:8080`). Sign in with the operator or admin password.
+Open `http://<central host>:8080` in a browser on a laptop that is on the team's tailnet. Ask whoever runs the central host for its address. The central host usually sits behind the deployment's router rather than on the tailnet itself, so your laptop must use the router's routes: in the Tailscale app, turn on **Use Tailscale subnets** (on Linux: `sudo tailscale set --accept-routes`). Sign in with the operator or admin password.
 
 | Role | Can |
 |---|---|
@@ -188,8 +188,10 @@ Each building is a **site** with its own nodes, walls, areas, calibration, marks
 
 | You see | What it means / what to do |
 |---|---|
+| The page does not load at all | Check that Tailscale is connected and **Use Tailscale subnets** is on (section 1). If it still fails, the deployment's router may have dropped off the tailnet: tell whoever runs the network. |
 | Header says **Kismet error** or **console server unreachable** | The console has lost Kismet or the page has lost the console. Check the central host; the page reconnects by itself. |
 | **⚠ N silent** / **sources down** in the header | A node's capture has stopped or delivers nothing. Hover to see which. Nodes restart a stuck Wi-Fi or Bluetooth capture by themselves within about 10 minutes, so a short *silent* usually clears on its own. If it stays, check the node's power, USB adapters and network connection. A *node offline* alert follows if a node stops completely. |
+| **All nodes go offline at once** | The nodes cannot reach the central host. The nodes reach it through the deployment's router, so the router has usually dropped off the tailnet or lost its connection: tell whoever runs the network. The nodes reconnect by themselves once it is back. |
 | A device is in the list but not on the map | Only one node hears it, so there is no position. |
 | Positions look wrong everywhere | Check node positions first (Setup → Nodes), then calibrate (section 8). Before calibration, positions use rough defaults. |
 | One device jumps around | It is heard weakly or by two nodes only (faint dot). Its position is rough. |

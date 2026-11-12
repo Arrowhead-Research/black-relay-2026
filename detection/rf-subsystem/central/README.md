@@ -34,6 +34,17 @@ COMPOSE_PROFILES=console
 
 `docker-compose.fusion.yml` publishes only 3501 (node capture) and the console port, keeps Kismet's 2501 on the host's loopback (use an SSH tunnel), and puts `mqtt` on the external `fusion` network as `rf-mqtt`. Claim published ports in the host's `PORTS.md` first. Nodes point `CENTRAL_HOST` in `/etc/rf-node/rf-node.env` at the host's tailnet address.
 
+**Host behind a site's subnet router** (not on the tailnet itself): use the same `.env`, with `BIND_ADDR=0.0.0.0`, and create the external network once with `docker network create fusion` if no other team has yet. Nodes reach the host through the router: they need `tailscale set --accept-routes` and a Headscale rule for ports 3501 and 8080 on the host's network, and `CENTRAL_HOST` is the host's LAN address (see [`../node/README.md`](../node/README.md#tailscale-headscale-tailnet)). When copying the tree, carry `central/.env` over separately (it holds the Kismet and console credentials). For a new building, leave out the git-ignored `console/site/` and start the site fresh. To move the same deployment to another host, also carry over `console/site/layout.yaml` and the console's data (sites, calibration, areas, marks, history, sign-in sessions). Stop `rf-console` on both hosts, then:
+
+```sh
+# old host
+docker run --rm -v rf-central_rf-console-data:/d:ro alpine tar -C /d -czf - . > rf-console-data.tgz
+# new host, after copying the file across
+docker run --rm -i -v rf-central_rf-console-data:/d alpine sh -c 'find /d -mindepth 1 -delete && tar -C /d -xzf -' < rf-console-data.tgz
+```
+
+Bring the old host's stack down with `docker compose down` (no `-v`: its volumes stay until you decide to delete them).
+
 ## Live analytics (Kismet → alerts → MQTT)
 
 ```sh
@@ -95,7 +106,7 @@ WebSocket remote capture on port 2501 (with `--user`/`--password` or `--apikey`)
 
 ## Security notes
 
-- Leave `BIND_ADDR` set to `127.0.0.1` or the host's Tailscale IP. Never use a public interface.
+- Leave `BIND_ADDR` set to `127.0.0.1` or the host's Tailscale IP. Use `0.0.0.0` only on a host behind a subnet router with `docker-compose.fusion.yml`, which publishes just 3501 and the console. Never expose it on a public interface.
 - The Mosquitto configuration allows anonymous clients and is for development only.
 - `.env` is git-ignored. Never commit real credentials.
 

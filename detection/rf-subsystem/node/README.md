@@ -59,8 +59,13 @@ tailscale status && tailscale ip -4
 ```
 
 - `--accept-routes=false` (the Linux default, stated explicitly): a node on the Detection VLAN must not route that VLAN through the subnet router as well.
-- Then point capture at the central server's tailnet name: set `CENTRAL_HOST` in `/etc/rf-node/rf-node.env` to its MagicDNS name and restart the `kismet-cap-*` units. Do this one node at a time and confirm its sources in Kismet before the next; LAN SSH keeps working if anything goes wrong.
-- The central server must join the tailnet too (Kismet's remote-capture port 3501 bound where tailnet clients can reach it).
+- Then point capture at the central server: set `CENTRAL_HOST` in `/etc/rf-node/rf-node.env` and restart the `kismet-cap-*` units and `rf-node-agent`. Do this one node at a time and confirm its sources in Kismet before the next; LAN SSH keeps working if anything goes wrong.
+
+**Where `CENTRAL_HOST` points** depends on how the central server is reached:
+
+- **Central server on the tailnet:** its MagicDNS name. Kismet's remote-capture port 3501 must be bound where tailnet clients can reach it.
+- **Central server behind a site's subnet router** (the server stays off the tailnet and all traffic goes through the site router): its LAN address on the routed network. Each node then needs `sudo tailscale set --accept-routes`, and the Headscale policy must let the nodes' tag reach that network's capture and console ports, or the router never appears as a peer on the nodes and its routes are not installed, for example `{"action": "accept", "src": ["tag:sensor-fusion"], "dst": ["<routed network>:3501,8080"]}`. Check from the node with `tailscale status` (the router is listed) and `ip route show table 52` (the network is routed via `tailscale0`). Only do this on nodes that are not themselves on the routed network (see `--accept-routes=false` above).
+- The WBT nodes are tagged `tag:sensor-fusion` in Headscale (the DESIGN.md name `tag:rf-node` is not in use).
 
 ## Node agent (rf-node-agent)
 
