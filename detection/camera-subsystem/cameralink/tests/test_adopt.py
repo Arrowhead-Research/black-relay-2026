@@ -94,6 +94,9 @@ class FakeCamera:
         self.calls = []  # every setting call, by name
         self.settings = {}
         self.script = {}  # operation name -> list of exceptions to raise, one per call
+        # Kit 1's camera, 2026-11-13, three times: a stream write that changes the mode is
+        # accepted, the next call gets rspCode -6, and the camera restarts.
+        self.stream_mode_set = False
         self.after_applied = set()  # operation names whose exception comes after they apply
 
     def judge(self, channel, password, remain=True):
@@ -117,6 +120,7 @@ class FakeCamera:
         self.http = False
         self.failures = 0
         self.settings = {}
+        self.stream_mode_set = False
 
     def ports(self):
         return {80: self.up and self.http, 9000: self.up}
@@ -143,6 +147,9 @@ class FakeClient:
         if error is not None and name not in camera.after_applied:
             raise error
         apply()
+        if name == "set_streams" and not camera.stream_mode_set:
+            camera.stream_mode_set = True
+            self.token = False  # the session is gone, as after a change of mode
         if error is not None:
             raise error  # the camera acted, and the reply was lost
         camera.power.after(index)
@@ -1535,7 +1542,7 @@ def test_resume_repeats_only_the_unfinished_steps(adopted):
     adopted.known(applied={"disable_p2p": True, "enable_rtsp": True, "set_clock": True})
 
     assert adopted.link_up() is LinkState.ADOPTED
-    assert adopted.camera.calls == ["disable_onvif", "set_name", "set_streams", "set_rotation"]
+    assert adopted.camera.calls == ["disable_onvif", "set_name", "set_rotation", "set_streams"]
     assert set(adopted.record().applied) == set(STEPS)
 
 
@@ -1548,8 +1555,8 @@ def test_steps_run_in_the_required_order(factory):
         "disable_onvif",
         "set_clock",
         "set_name",
-        "set_streams",
         "set_rotation",
+        "set_streams",
     )
 
 
@@ -2254,6 +2261,40 @@ def test_no_log_line_holds_a_password(path, caplog):
         assert "somebody-elses" not in record.getMessage()
 
 
+def test_the_stream_mode_is_written_last_as_the_camera_drops_the_session_after_it(factory):
+    """Kit 1, 2026-11-13: GetIsp, the call after SetEnc, failed with rspCode -6 on both factory
+    adoptions, and each ended failed until the camera's own restart began the next generation."""
+    assert STEPS[-1] == "set_streams"
+
+    assert factory.link_up() is LinkState.ADOPTED
+
+    assert factory.camera.calls[-1] == "set_streams"
+    assert set(factory.record().applied) == set(STEPS)
+
+
+def test_a_call_the_camera_refuses_is_named_in_the_log(factory, caplog):
+    """Kit 1, 2026-11-13: the first adoption stopped on "ApiError", and the log could not say
+    which call. The client writes these messages itself: a command and a code, never a secret."""
+    caplog.set_level(logging.WARNING)
+    factory.camera.script["set_name"] = [
+        ApiError("camera 10.77.0.10: SetOsd failed, rspCode -4", -4)
+    ]
+
+    assert factory.link_up() is LinkState.FAILED
+
+    assert "adoption stopped: camera 10.77.0.10: SetOsd failed, rspCode -4" in caplog.text
+
+
+def test_any_other_error_after_login_is_logged_by_its_type_alone(factory, caplog):
+    caplog.set_level(logging.DEBUG)
+    factory.camera.script["set_name"] = [Unreachable("PASSWORD-IN-MESSAGE")]
+
+    assert factory.link_up() is LinkState.FAILED
+
+    assert "adoption stopped: Unreachable" in caplog.text
+    assert "PASSWORD-IN-MESSAGE" not in caplog.text
+
+
 def test_unexpected_enable_error_does_not_log_its_message(factory, caplog):
     caplog.set_level(logging.DEBUG)
 
@@ -2316,6 +2357,7 @@ class _Reply(io.BytesIO):
 def test_adoption_order_on_the_wire_with_the_real_client(path):
     commands = []
     ports = {"rtspEnable": 0, "onvifEnable": 1}
+    clock = {}
 
     def opener(request, timeout=None):
         body = json.loads(request.data)[0]
@@ -2328,6 +2370,10 @@ def test_adoption_order_on_the_wire_with_the_real_client(path):
             value = {"NetPort": dict(ports)}
         elif command == "SetNetPort":
             ports.update(body["param"]["NetPort"])
+        elif command == "SetTime":
+            clock.update(body["param"]["Time"])
+        elif command == "GetTime":
+            value = {"Time": dict(clock)}
         elif command == "GetOsd":
             value = {"Osd": {"osdChannel": {"name": "x"}}}
         elif command == "GetIsp":
@@ -2367,12 +2413,13 @@ def test_adoption_order_on_the_wire_with_the_real_client(path):
         "Login",
         "SetNtp",
         "SetTime",
+        "GetTime",
         "GetOsd",
         "SetDevName",
         "SetOsd",
-        "SetEnc",
         "GetIsp",
         "SetIsp",
+        "SetEnc",
         "Logout",
     ]
 
@@ -2471,7 +2518,9 @@ def _steps_finished_at(scenario, index, when):
     completed = index if when == "before" else index + 1
     finished = set(STEPS) if scenario == "reset_known" else set()
     for position, name in enumerate(trace[:completed]):
-        if name == "save" and trace[position + 1] == "set_password":
+        # The last save has nothing after it: the session went with the stream mode, so no
+        # logout is sent.
+        if name == "save" and trace[position + 1 : position + 2] == ["set_password"]:
             finished = set()  # blank proved a reset, so no setting survived
         if name in STEPS:
             save = trace.index("save", position)

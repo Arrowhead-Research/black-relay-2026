@@ -33,6 +33,8 @@ _RSP_LOGIN_FAILED = -7
 
 # reolink_aio's api.py treats these camera wordings as credential errors. No
 # exception type separates a lockout, and the HTTP API has no types at all.
+# The smallest error a time zone can cause is 15 minutes. A slow camera link is seconds.
+_CLOCK_TOLERANCE_SECONDS = 120
 _LOCKED_WORDING = "Login has been locked"
 _REJECTED_WORDINGS = ("invalid user", "login failed", "password wrong")
 
@@ -178,11 +180,35 @@ class ReolinkClient:
         self.login(self._user, self._password)
 
     def set_clock(self, now: datetime) -> None:
+        """Turn NTP off and set UTC, then read the clock back.
+
+        A write that also changes the time zone lands hours out: kit 1's factory camera, at
+        timeZone 28800, read 8 h ahead after one write. The same write again, with the zone
+        now 0, read right. So the reading decides, and one more write is all it gets."""
         utc = now.astimezone(UTC)
         self._call(
             "SetNtp",
             {"Ntp": {"enable": 0, "interval": 1440, "port": 123, "server": "pool.ntp.org"}},
         )
+        self._set_time(utc)
+        if self._clock_reads(utc):
+            return
+        self._set_time(utc)
+        if not self._clock_reads(utc):
+            raise ApiError(f"camera {self._host}: the clock does not read back as it was set")
+
+    def _clock_reads(self, utc: datetime) -> bool:
+        time = self._read("GetTime", "Time", {})
+        fields = [time.get(key) for key in ("year", "mon", "day", "hour", "min", "sec")]
+        if time.get("timeZone") != 0 or any(_int_or_none(field) is None for field in fields):
+            return False
+        try:
+            reading = datetime(*fields, tzinfo=UTC)
+        except ValueError:
+            return False
+        return abs((reading - utc).total_seconds()) <= _CLOCK_TOLERANCE_SECONDS
+
+    def _set_time(self, utc: datetime) -> None:
         self._call(
             "SetTime",
             {

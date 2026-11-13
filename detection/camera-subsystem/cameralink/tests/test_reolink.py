@@ -518,6 +518,7 @@ def exercise_every_call(caplog) -> None:
         SetNetPort=[{"cmd": "SetNetPort", "code": 0, "value": {"rspCode": 200}}],
         SetNtp=recorded("setntp")["response"],
         SetTime=recorded("settime")["response"],
+        GetTime=camera_time(datetime(2026, 11, 5, tzinfo=UTC)),
         SetDevName=recorded("setdevname")["response"],
         GetOsd=recorded("getosd")["response"],
         SetOsd=recorded("setosd")["response"],
@@ -653,25 +654,117 @@ def test_disable_p2p_also_turns_off_upnp():
     assert opener.bodies("Login") == [recorded("setp2p")["request"], recorded("setupnp")["request"]]
 
 
-def test_set_clock_turns_ntp_off_then_sets_utc_time():
-    client, opener = logged_in(
-        SetNtp=recorded("setntp")["response"], SetTime=recorded("settime")["response"]
+SET_AT = datetime(2026, 11, 5, 16, 58, 42, tzinfo=UTC)
+
+
+def camera_time(when: datetime, zone: int = 0, **changed) -> list:
+    """A GetTime reply in which the camera's clock reads ``when``."""
+    time = {
+        "year": when.year,
+        "mon": when.month,
+        "day": when.day,
+        "hour": when.hour,
+        "min": when.minute,
+        "sec": when.second,
+        "hourFmt": 0,
+        "timeFmt": "DD/MM/YYYY",
+        "timeZone": zone,
+        **changed,
+    }
+    return [{"cmd": "GetTime", "code": 0, "value": {"Dst": {"enable": 0}, "Time": time}}]
+
+
+def clock_client(*readings) -> tuple[ReolinkClient, FakeOpener]:
+    """A camera that takes every write, and answers GetTime with each reading in turn."""
+    answers = iter(readings)
+    return logged_in(
+        SetNtp=recorded("setntp")["response"],
+        SetTime=recorded("settime")["response"],
+        GetTime=lambda: next(answers),
     )
 
-    client.set_clock(datetime(2026, 11, 5, 16, 58, 42, tzinfo=UTC))
 
-    assert opener.bodies("Login") == [recorded("setntp")["request"], recorded("settime")["request"]]
+def test_set_clock_turns_ntp_off_then_sets_utc_time_and_reads_it_back():
+    client, opener = clock_client(camera_time(SET_AT))
+
+    client.set_clock(SET_AT)
+
+    assert opener.bodies("Login") == [
+        recorded("setntp")["request"],
+        recorded("settime")["request"],
+        recorded("gettime")["request"],
+    ]
 
 
 def test_set_clock_converts_to_utc():
-    client, opener = logged_in(
-        SetNtp=recorded("setntp")["response"], SetTime=recorded("settime")["response"]
-    )
+    client, opener = clock_client(camera_time(SET_AT))
     plus_eight = timezone(timedelta(hours=8))
 
     client.set_clock(datetime(2026, 11, 6, 0, 58, 42, tzinfo=plus_eight))
 
     assert opener.bodies("Login")[1] == recorded("settime")["request"]
+
+
+def test_set_clock_writes_again_when_a_zone_change_left_the_clock_hours_out():
+    """Kit 1, 2026-11-13: a factory camera at timeZone 28800 took the write and read 8 h ahead.
+    The same write again, with its zone now 0, read right."""
+    client, opener = clock_client(camera_time(SET_AT + timedelta(hours=8)), camera_time(SET_AT))
+
+    client.set_clock(SET_AT)
+
+    assert opener.cmds() == ["Login", "SetNtp", "SetTime", "GetTime", "SetTime", "GetTime"]
+    assert opener.bodies("Login")[3] == recorded("settime")["request"]
+
+
+def test_set_clock_takes_a_few_seconds_difference_as_set():
+    client, opener = clock_client(camera_time(SET_AT + timedelta(seconds=9)))
+
+    client.set_clock(SET_AT)
+
+    assert opener.cmds() == ["Login", "SetNtp", "SetTime", "GetTime"]
+
+
+def test_set_clock_writes_again_when_the_zone_did_not_take():
+    client, opener = clock_client(camera_time(SET_AT, zone=28800), camera_time(SET_AT))
+
+    client.set_clock(SET_AT)
+
+    assert opener.cmds().count("SetTime") == 2
+
+
+def test_set_clock_fails_when_the_clock_still_reads_wrong_after_the_second_write():
+    wrong = camera_time(SET_AT + timedelta(hours=8))
+    client, opener = clock_client(wrong, wrong)
+
+    with pytest.raises(ApiError) as info:
+        client.set_clock(SET_AT)
+
+    assert opener.cmds().count("SetTime") == 2
+    assert "clock" in str(info.value)
+    assert_clean(info.value, PASSWORD, TOKEN)
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [{"mon": 0}, {"year": "2026"}, {"hour": 24}, {"sec": None}, {"day": True}, {"timeZone": "0"}],
+)
+def test_set_clock_takes_an_unusable_reading_as_not_set(changed):
+    """The factory reading is year 0, month 0. It must not crash the step."""
+    unusable = camera_time(SET_AT, **changed)
+    client, opener = clock_client(unusable, unusable)
+
+    with pytest.raises(ApiError):
+        client.set_clock(SET_AT)
+
+    assert opener.cmds().count("SetTime") == 2
+
+
+def test_set_clock_fails_when_get_time_returns_no_time():
+    reply = [{"cmd": "GetTime", "code": 0, "value": {}}]
+    client, _ = clock_client(reply)
+
+    with pytest.raises(ApiError):
+        client.set_clock(SET_AT)
 
 
 def test_set_name_sets_devname_and_changes_only_the_osd_name():

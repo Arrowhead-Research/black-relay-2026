@@ -63,14 +63,19 @@ FAILURE_WINDOW_SECONDS = 24 * 3600
 MIN_REMAIN_TIMES = 3
 _CANCEL_GRACE = 5.0
 
+# set_streams is last, and must stay last. A stream write that changes the mode is accepted, and
+# then the camera drops the session and restarts: the next call gets rspCode -6, and RTSP and
+# port 9000 close within a second (kit 1, 2026-11-13, on two factory adoptions and twice more by
+# hand). Nothing can follow it in the same login. The restart is a new link generation, in which
+# the saved password logs in and finds nothing left to do.
 STEPS = (
     "disable_p2p",
     "enable_rtsp",
     "disable_onvif",
     "set_clock",
     "set_name",
-    "set_streams",
     "set_rotation",
+    "set_streams",
 )
 
 
@@ -409,7 +414,10 @@ class _Adoption:
         if isinstance(failure, (AuthFailed, LockedOut, LoginOutcomeUnknown)):
             self._update(failures=(*self.rec.failures, self.now().timestamp()))
             return self._login_failed(failure)
-        _log.warning("camera %s: adoption stopped: %s", self.mac, type(failure).__name__)
+        # An ApiError's message is the client's own: a command and the camera's code, with no
+        # secret in it. Without it, a refused call cannot be told from any other.
+        what = failure if isinstance(failure, ApiError) else type(failure).__name__
+        _log.warning("camera %s: adoption stopped: %s", self.mac, what)
         self._update(phase=LinkState.FAILED.value)
         return LinkState.FAILED
 
