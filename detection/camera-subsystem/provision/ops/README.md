@@ -241,8 +241,11 @@ old build, so it starts from [`field-run-kit1.md`](field-run-kit1.md) instead, a
    ```bash
    sudo apt-get update
    sudo apt-get install -y network-manager dnsmasq-base nftables gpiod python3-venv \
-     mosquitto mosquitto-clients systemd-timesyncd avahi-daemon iw rsync curl
+     mosquitto mosquitto-clients systemd-timesyncd avahi-daemon iw rsync curl libnss-myhostname
    ```
+
+   `libnss-myhostname` makes the node's own name resolve whatever the portal sets it to. Without it,
+   `/etc/hosts` still holds the image's name, and every `sudo` prints "unable to resolve host" (kit 1).
 
 3. **Set the WiFi country.** The radio stays blocked until this is set.
 

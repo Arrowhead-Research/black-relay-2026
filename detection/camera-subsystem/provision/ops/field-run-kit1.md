@@ -1034,7 +1034,7 @@ C73  date 2026-11-13  count 6 in the first 2 s  events object_update, label pers
      schema, and see the end event.  result PARTLY RUN, the path works
 ```
 
-## C74. Stream, snapshot, and who can reach the node. NOT YET RUN.
+## C74. Stream, snapshot, and who can reach the node. PARTLY RUN 2026-11-13: central's side passes.
 
 Plan C51, with the Frigate UI replaced by the tunnel, per the ruling. *Agent:*
 
@@ -1063,7 +1063,12 @@ host times out on all three; Tailscale works for both, and `ping` from there to 
 the full version, and run it now.
 
 ```
-C74  date ________  video ___  snapshot ___  proxy ___  no token ___  other host ___  Tailscale ___  result ________
+C74  date 2026-11-13  video h264  snapshot 200, image/jpeg, 25639 bytes  proxy 200, Frigate 0.18.2-cfa08c5
+     no token 401 on /nodes and on the snapshot  other host NOT RUN  Tailscale NOT RUN
+     The tunnel reached Frigate's API on the node's port 5000. From central, the node's 22, 8971 and 8554 are open,
+     and 5000, 1883 and 80 are not. The set holds central's address alone, and its three rules have counted
+     packets. X-Ingress-Path was not looked at. Still to do: a second site host, which must time out on all three
+     ports, and a remote user over Tailscale. The API port here is 8082, as in C50.  result PARTLY RUN
 ```
 
 ## C45 and C46, from the README. NOT YET RUN.
