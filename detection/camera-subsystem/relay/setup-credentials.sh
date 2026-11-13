@@ -3,6 +3,10 @@
 # an existing file without --force.
 set -euo pipefail
 
+# Fleet default for the two passwords people type: the kits' broker login and the video viewer's.
+# Change either one later with ./change-passwords.sh broker or ./change-passwords.sh viewer.
+readonly DEFAULT_PASSWORD='BlackRelay2026'
+
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 output="$here/.env"
 force=0
@@ -49,22 +53,29 @@ random() {
 
 # Each in its own assignment, as set -e does not see a failure inside an argument's $(...).
 api_token="$(random 48)"
-broker_password="$(random 40)"
 api_broker_password="$(random 40)"
 client_id="relay-api-$(random 32)"
-read_password="$(random 32)"
 control_password="$(random 32)"
 
 umask 077
 temporary="$(mktemp "$output.XXXXXX")"
 trap 'rm -f "$temporary"' EXIT
-# With --force, every setting but the secrets stays as it was in the existing file.
+# With --force, every setting but the random secrets stays as it was in the existing file. That
+# includes the two passwords people type: every kit and viewer holds them, so only
+# ./change-passwords.sh changes them. A missing or empty one gets the default.
 existing=""
 [[ -e "$output" ]] && existing="$(cat "$output")"
 while IFS= read -r line || [[ -n "$line" ]]; do
     case "$line" in
-    RELAY_API_TOKEN=* | RELAY_BROKER_PASSWORD=* | RELAY_API_BROKER_PASSWORD=* | \
-        RELAY_MQTT_CLIENT_ID=* | RELAY_READ_PASSWORD=* | RELAY_MEDIAMTX_API_PASSWORD=*) ;;
+    RELAY_API_TOKEN=* | RELAY_API_BROKER_PASSWORD=* | RELAY_MQTT_CLIENT_ID=* | \
+        RELAY_MEDIAMTX_API_PASSWORD=*) ;;
+    RELAY_BROKER_PASSWORD=* | RELAY_READ_PASSWORD=*)
+        kept="$(grep -m1 "^${line%%=*}=" <<<"$existing" || true)"
+        if [[ -n "${kept#*=}" && "${kept#*=}" != "''" ]]; then
+            printf '%s\n' "$kept"
+            continue
+        fi
+        ;;
     *=*)
         kept="$(grep -m1 "^${line%%=*}=" <<<"$existing" || true)"
         if [[ -n "$kept" ]]; then
@@ -76,12 +87,12 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     case "$line" in
     RELAY_API_TOKEN=*) printf "RELAY_API_TOKEN='%s'\n" "$api_token" ;;
     RELAY_BROKER_USER=*) printf "RELAY_BROKER_USER='relay'\n" ;;
-    RELAY_BROKER_PASSWORD=*) printf "RELAY_BROKER_PASSWORD='%s'\n" "$broker_password" ;;
+    RELAY_BROKER_PASSWORD=*) printf "RELAY_BROKER_PASSWORD='%s'\n" "$DEFAULT_PASSWORD" ;;
     RELAY_API_BROKER_USER=*) printf "RELAY_API_BROKER_USER='relay-api'\n" ;;
     RELAY_API_BROKER_PASSWORD=*) printf "RELAY_API_BROKER_PASSWORD='%s'\n" "$api_broker_password" ;;
     RELAY_MQTT_CLIENT_ID=*) printf "RELAY_MQTT_CLIENT_ID='%s'\n" "$client_id" ;;
     RELAY_READ_USER=*) printf "RELAY_READ_USER='viewer'\n" ;;
-    RELAY_READ_PASSWORD=*) printf "RELAY_READ_PASSWORD='%s'\n" "$read_password" ;;
+    RELAY_READ_PASSWORD=*) printf "RELAY_READ_PASSWORD='%s'\n" "$DEFAULT_PASSWORD" ;;
     RELAY_MEDIAMTX_API_PASSWORD=*) printf "RELAY_MEDIAMTX_API_PASSWORD='%s'\n" "$control_password" ;;
     *) printf '%s\n' "$line" ;;
     esac
@@ -92,8 +103,11 @@ trap - EXIT
 
 echo "Wrote $output, mode 0600."
 if [[ "$force" == 1 ]]; then
-    echo "Secrets replaced, other settings kept. Change the new broker password on every node as"
-    echo "well, or they stop reporting."
+    echo "Random secrets replaced. The broker and viewer passwords and all other settings are kept,"
+    echo "so kits need no change. API clients need the new RELAY_API_TOKEN."
+else
+    echo "The broker and viewer passwords are the fleet default in README.md. To change one, run"
+    echo "./change-passwords.sh broker or ./change-passwords.sh viewer."
 fi
 if ! grep -qE "^RELAY_SITE_SUBNET=.+" "$output"; then
     echo "Next: set RELAY_SITE_SUBNET and RELAY_WEBRTC_HOSTS in it, then see README.md."

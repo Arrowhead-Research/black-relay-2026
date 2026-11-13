@@ -168,7 +168,7 @@ check "--force keeps the site subnet" grep -qx 'RELAY_SITE_SUBNET=192.168.77.0/2
 check "--force keeps the ports" grep -qx 'RELAY_API_PORT=18080' "$work/kept.env"
 check "--force keeps a login's user name" grep -qx "RELAY_BROKER_USER='someone'" "$work/kept.env"
 refuted "--force replaces the token" grep -qxF "$kept_token" "$work/kept.env"
-refuted "--force replaces the broker password" grep -qxF "$kept_password" "$work/kept.env"
+check "--force keeps the broker password, which every kit holds" grep -qxF "$kept_password" "$work/kept.env"
 check "--force leaves it 0600" test "$(stat -c %a "$work/kept.env")" = 600
 if grep -qE '(^|[^0-9])1935([^0-9]|$)|\blatest\b' "$relay/compose.yaml" "$relay/mediamtx.yml"; then
     not_ok "no port 1935 and no latest tag in the bundle"

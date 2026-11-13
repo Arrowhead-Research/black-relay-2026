@@ -31,6 +31,16 @@ Pi, a laptop and a server.
    ./setup-credentials.sh
    ```
 
+   Two passwords are for people to type, so they start as the fleet default, `BlackRelay2026`:
+
+   | Password | Who needs it |
+   |---|---|
+   | `RELAY_BROKER_PASSWORD`, user `relay` | Whoever sets up a camera kit. It goes into the kit's setup portal, on a phone. All kits share it |
+   | `RELAY_READ_PASSWORD`, user `viewer` | Everyone who watches video over RTSP or WebRTC |
+
+   The default is written in this repository, so anyone can read it. Change both on a real site,
+   with `./change-passwords.sh`, below. Every other secret is random and never needs typing.
+
 3. In `.env`, set:
    - `RELAY_SITE_SUBNET`, the site LAN, for example `192.168.8.0/24`. **Required.** It must be a private range
      (RFC 1918). The relay sends logins and video requests only to node addresses inside it, and the API does
@@ -49,10 +59,11 @@ Pi, a laptop and a server.
    field. So two builds a while apart can differ in the package's `-rN` revision.
 
 5. In each node's portal, set the broker address to this host's LAN IP, the broker login to
-   `RELAY_BROKER_USER` and `RELAY_BROKER_PASSWORD` from `.env`, and leave the time server on its
-   default, which follows the broker address. A `node_id` must be at most 63 lowercase letters, digits
-   and hyphens, and not `all`. The portal refuses any other at save, but a node saved before that
-   rule keeps its old value until it is saved again, and the relay refuses that value.
+   `RELAY_BROKER_USER` and `RELAY_BROKER_PASSWORD` from `.env` (the default, unless you changed it),
+   and leave the time server on its default, which follows the broker address. A `node_id` must be at
+   most 63 lowercase letters, digits and hyphens, and not `all`. The portal refuses any other at save,
+   but a node saved before that rule keeps its old value until it is saved again, and the relay
+   refuses that value.
 6. Check it. A node appears within a status interval, about 30 s.
 
    ```bash
@@ -201,22 +212,41 @@ clock at stratum 10 and never sets it, so it needs no clock privilege. Keep the 
 it has internet, its usual time service does that. A wrong clock here shows up as `future_heartbeat` in
 `GET /nodes`.
 
-## Changing the broker password
+## Changing the broker or viewer password
+
+Both start as the fleet default (see Install). To change one, run this on this host:
+
+```bash
+./change-passwords.sh broker    # the login every kit holds
+./change-passwords.sh viewer    # the login for watching video
+```
+
+It asks for the new password twice, and shows nothing as you type. The password must be 8 to 63
+characters of printable ASCII, with no space, quote, backslash, `$` or backtick. A viewer password
+cannot start with `sha256:` or `argon2:`, as MediaMTX would read it as a hash. If the two entries
+differ, or the password breaks a rule, nothing changes. Otherwise it replaces that one line in `.env`,
+keeps the file at mode 0600, and runs `docker compose up -d` so the bundle uses it. That recreates
+the containers that hold the password, and for `broker` the API updates every video path within 15 s.
+`COMPOSE_PROFILES=broker` in `.env` is what includes the bundled broker. It needs `.env`, so run
+`./setup-credentials.sh` first.
 
 **The broker password also drives the Frigate proxy secret, and is the login MediaMTX pulls video
-with, so it changes on this host and on all nodes together.** Until both ends match, a node's Frigate
+with, so it changes on this host and on all kits together.** Until both ends match, a kit's Frigate
 route returns a `502` saying the secret was refused, its video will not start, and it cannot report.
+After `./change-passwords.sh broker`, run this on every kit, and type the same password:
 
-1. Change `RELAY_BROKER_PASSWORD` in `.env`. Keep it inside what a node's portal accepts: printable ASCII with
-   no space, quote, backslash or `$`.
-2. Run `docker compose up -d`. This recreates the broker and the API, and the API updates every video path within
-   15 s. `COMPOSE_PROFILES=broker` in `.env` is what includes the broker. Without it, add `--profile broker`.
-3. Re-provision each node with the new password.
+```bash
+sudo /opt/black-relay/ops/change-passwords.sh broker
+```
 
-With another broker, change it there first. The API's own login is separate, and is unaffected.
-`./setup-credentials.sh --force` replaces every secret at once, and keeps the site subnet, ports, user names and
-other settings. All API and video clients then need the new secrets, and the new client id loses whatever the
-broker has queued for the API.
+With another broker, change the password there first. The API's own login is separate, and is unaffected.
+The viewer password changes only here. Give it to everyone who watches video.
+
+`./setup-credentials.sh --force` replaces every random secret at once: the API token, the API's broker login and
+client id, and MediaMTX's control password. It keeps the broker and viewer passwords, the site subnet, ports,
+user names and other settings, so kits and viewers need no change. API clients need the new token, and the new
+client id loses whatever the broker has queued for the API. Only `./change-passwords.sh` changes the two
+passwords people type.
 
 ## What is not encrypted
 
@@ -232,9 +262,10 @@ Frigate traffic is TLS, with a self-signed certificate the API does not verify, 
 verify it against. The secret therefore relies on the network path for protection from an active attacker.
 Protection against this rests on the site's WiFi security and on node firewalls admitting this host only.
 
-All nodes share one broker login in v0, which the WiFi list above exposes. Whoever holds it can report as any
-node, and can claim for it any address the rule above allows, so any host on the site LAN. That node's Frigate
-and video requests would go there, with the proxy secret and the broker login.
+All nodes share one broker login in v0, which the WiFi list above exposes. While it is still the default, anyone
+who has read this repository holds it. Whoever holds it can report as any node, and can claim for it any address
+the rule above allows, so any host on the site LAN. That node's Frigate and video requests would go there, with
+the proxy secret and the broker login.
 
 MediaMTX follows an RTSP redirect from whatever answers on a node's address, and sends the broker login with it.
 Neither MediaMTX nor its RTSP library has a setting to stop that (gortsplib v5.6.7 `client.go:1524-1547`, MediaMTX
@@ -264,7 +295,7 @@ or the broker until it is back.
 ## Testing
 
 ```bash
-cd api && uv run pytest      # the API, with fakes
+cd api && uv run pytest      # the API, with fakes, and both credential scripts on scratch files
 tests/test_relay.sh          # the bundle, in real containers
 ```
 
