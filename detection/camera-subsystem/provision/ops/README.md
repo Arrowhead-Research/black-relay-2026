@@ -15,6 +15,8 @@ Builds the SD image for a camera edge node and defines how to check it in the fi
 | `black-relay-setup-ap.nmconnection.tmpl` | `/etc/NetworkManager/system-connections/black-relay-setup-ap.nmconnection` (by `seed-kit.sh`) | Setup AP profile |
 | `seed-kit.sh` | `/opt/black-relay/ops/` | Makes the kit's user, renders the profile, prints the kit label |
 | `change-passwords.sh` | `/opt/black-relay/ops/` | Changes a kit's console password, setup passphrase or broker password |
+| `first-boot.sh` | `/opt/black-relay/ops/` | Seeds a kit on its first boot, from the number on its boot partition |
+| `black-relay-first-boot.service` | `/etc/systemd/system/` | Runs `first-boot.sh`, only while that number is there |
 | `black-relay-captive.conf` | `/etc/NetworkManager/dnsmasq-shared.d/` | Captive DNS |
 | `black-relay.nft` | `/etc/nftables.conf` | Firewall |
 | `central-hosts.nft` | `/etc/black-relay/central-hosts.nft` | The element of the `central_hosts` set, the address admitted to SSH, Frigate and RTSP. None in the image, and replaced by each portal save |
@@ -294,7 +296,9 @@ old build, so it starts from [`field-run-kit1.md`](field-run-kit1.md) instead, a
      /etc/systemd/system/mosquitto.service.d /etc/systemd/system/ssh.service.d /etc/black-relay
    sudo install -m 0644 README.md black-relay-setup-ap.nmconnection.tmpl central-hosts.nft \
      /opt/black-relay/ops/
-   sudo install -m 0755 seed-kit.sh change-passwords.sh /opt/black-relay/ops/
+   sudo install -m 0755 seed-kit.sh change-passwords.sh first-boot.sh /opt/black-relay/ops/
+   sudo install -m 0644 black-relay-first-boot.service /etc/systemd/system/
+   sudo systemctl enable black-relay-first-boot.service
    sudo install -m 0644 black-relay-captive.conf /etc/NetworkManager/dnsmasq-shared.d/
    sudo install -m 0644 mosquitto-black-relay.conf /etc/mosquitto/conf.d/black-relay.conf
    sudo install -m 0644 mosquitto-service-override.conf \
@@ -392,7 +396,12 @@ old build, so it starts from [`field-run-kit1.md`](field-run-kit1.md) instead, a
     # The node's name from the portal, which a clone would otherwise announce over mDNS until its own save.
     sudo hostnamectl set-hostname black-relay-node
     sudo rm -f /root/.bash_history "$HOME/.bash_history" /var/lib/systemd/random-seed
+    # The installer's output, kept by the field run.
+    rm -f "$HOME"/install-run*.log
     sudo rm -rf "$HOME/camera-subsystem" /root/kit1-uplink-saved /root/kit1-camera-saved
+    # A kit number or a label from a seed of this card. A clone gets its own number when its card is written.
+    sudo rm -f /boot/firmware/black-relay-kit /boot/firmware/black-relay-label.txt \
+      /boot/firmware/black-relay-first-boot.log
     # What the field run may have left, if a stop rule ended a part early, and a seed of this card.
     sudo rm -f /root/central-hosts.saved /root/hailo_pci.conf /var/tmp/field-24h.log \
       /etc/NetworkManager/dnsmasq-shared.d/zz-field-debug.conf /etc/black-relay/kit-seeded \
@@ -415,7 +424,8 @@ old build, so it starts from [`field-run-kit1.md`](field-run-kit1.md) instead, a
       /opt/black-relay/src/relay /opt/black-relay/src/docs /etc/black-relay/kit-seeded \
       /root/kit1-uplink-saved /root/kit1-camera-saved /root/central-hosts.saved /root/hailo_pci.conf \
       /var/tmp/field-24h.log /etc/NetworkManager/dnsmasq-shared.d/zz-field-debug.conf \
-      /tmp/adopt.log /tmp/ports.log /tmp/one-attempt.log /var/lib/NetworkManager/secret_key
+      /tmp/adopt.log /tmp/ports.log /tmp/one-attempt.log /var/lib/NetworkManager/secret_key \
+      /boot/firmware/black-relay-kit /boot/firmware/black-relay-label.txt /boot/firmware/black-relay-first-boot.log
     # Must print nothing.
     sudo find /opt/black-relay/src \( -name .env -o -name '.env.*' -o -name '*.local.env' \) -print
     # Must print only the file's comments, so no address.
@@ -466,20 +476,33 @@ old build, so it starts from [`field-run-kit1.md`](field-run-kit1.md) instead, a
     next card means this step did not take.
 
 12. **Write the image to each kit's card,** the same size as the build card or larger, and to kit 1's own card if it
-    is reused. Then seed each kit, including kit 1, on its own Pi: step 10 removed kit 1's passphrase too.
+    is reused. Then give the card its kit's number, on its boot partition, so that the kit seeds itself the first
+    time it is powered: step 10 removed kit 1's passphrase too, so kit 1 needs this as well.
 
     ```bash
     # On the build host, for each card. Check with lsblk that <sdX> is the card.
     lsblk
     sudo dd if=black-relay-camera-node.img of=/dev/<sdX> bs=4M status=progress conv=fsync
+    # The kit's number, 1 to 99: kit 2 here. Without it the kit waits to be seeded at a console.
+    sudo mount /dev/<sdX>1 /mnt && echo 2 | sudo tee /mnt/black-relay-kit && sudo umount /mnt
     ```
 
 ## Seed each kit
 
-Do this once per kit, on the kit's own Pi, with the kit's own card. This is what makes clones of one image into
-separate kits: each gets its own console user, SSH host keys and machine ID, and its serial sets its default name.
-Use a console (micro-HDMI and USB keyboard), because the firewall is now active and `eth0` allows no SSH.
-Log in as the image's user. Until seeding, the daemon logs failures to start the AP. That is expected.
+Seeding is what makes clones of one image into separate kits: each gets its own console user, SSH host keys and
+machine ID, and its serial sets its default name. It happens once per kit, on the kit's own Pi, with the kit's own card.
+
+**With no screen or keyboard,** which is the usual way: step 12 put the kit's number on the card's boot partition, in
+the file `black-relay-kit`. Put the card in the kit's Pi and power it. On that first boot `first-boot.sh` grows the
+root filesystem to the card, runs `seed-kit.sh` with the number, and reboots. Allow two to three minutes. The kit's
+setup WiFi, `BlackRelay-CAM-` and its serial, then appears, and takes the default passphrase. The number file is gone
+from the card, and the label text is beside where it was, in `black-relay-label.txt`. If no setup WiFi appears,
+power the kit off and read `black-relay-first-boot.log` on the card's boot partition from another computer: it holds
+the reason, and the number file is still there, so the next boot tries again.
+
+**At a console** (micro-HDMI and USB keyboard), for a card with no number on it: the firewall is active and `eth0`
+allows no SSH, so there is no other way in. Log in as the image's user. Until seeding, the daemon logs failures to
+start the AP. That is expected.
 
 ```bash
 sudo raspi-config nonint do_expand_rootfs

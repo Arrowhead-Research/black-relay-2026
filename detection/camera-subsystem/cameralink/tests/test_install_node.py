@@ -162,6 +162,12 @@ INSTALLED = [
     ("opt/black-relay/ops/central-hosts.nft", 0o644, "provision/ops/central-hosts.nft"),
     ("opt/black-relay/ops/seed-kit.sh", 0o755, "provision/ops/seed-kit.sh"),
     ("opt/black-relay/ops/change-passwords.sh", 0o755, "provision/ops/change-passwords.sh"),
+    ("opt/black-relay/ops/first-boot.sh", 0o755, "provision/ops/first-boot.sh"),
+    (
+        "etc/systemd/system/black-relay-first-boot.service",
+        0o644,
+        "provision/ops/black-relay-first-boot.service",
+    ),
 ]
 
 
@@ -342,6 +348,7 @@ def test_frigate_is_not_enabled_and_wait_online_is_masked_after_the_enable(rig):
         "docker.service",
         "camera-link.service",
         "camera-link-dhcp.service",
+        "black-relay-first-boot.service",
     ):
         assert unit in enable.split()
     assert "frigate.service" not in enable

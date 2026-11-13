@@ -204,7 +204,7 @@ install_files() {
     put "$cameralink_ops/black-relay-camera.nmconnection" "$nm_dir/black-relay-camera.nmconnection" 0600
 
     for file in camera-provision.service camerabridge.service camerabridge-config.path \
-        camerabridge-config-changed.service; do
+        camerabridge-config-changed.service black-relay-first-boot.service; do
         put "$provision_ops/$file" "$unit_dir/$file" 0644
     done
     put "$provision_ops/ssh-needs-firewall.conf" "$unit_dir/ssh.service.d/black-relay.conf" 0644
@@ -218,6 +218,7 @@ install_files() {
     done
     put "$provision_ops/seed-kit.sh" "$root/opt/black-relay/ops/seed-kit.sh" 0755
     put "$provision_ops/change-passwords.sh" "$root/opt/black-relay/ops/change-passwords.sh" 0755
+    put "$provision_ops/first-boot.sh" "$root/opt/black-relay/ops/first-boot.sh" 0755
 }
 
 install_firewall() {
@@ -257,7 +258,8 @@ enable_units() {
     # frigate.service is left out on purpose: camera-link starts it once the camera is adopted.
     systemctl enable nftables.service NetworkManager.service mosquitto.service \
         systemd-timesyncd.service docker.service camera-provision.service \
-        camerabridge.service camerabridge-config.path camera-link-dhcp.service camera-link.service
+        camerabridge.service camerabridge-config.path camera-link-dhcp.service camera-link.service \
+        black-relay-first-boot.service
     # After the enable, which turns wait-online back on through Also=.
     systemctl mask NetworkManager-wait-online.service
 }
@@ -300,7 +302,8 @@ verify_units() {
     if output=$(systemd-analyze verify --man=no "$unit_dir/camera-link.service" \
         "$unit_dir/camera-link-dhcp.service" "$unit_dir/frigate.service" "$unit_dir/$cache_mount" \
         "$unit_dir/camera-provision.service" "$unit_dir/camerabridge.service" \
-        "$unit_dir/camerabridge-config.path" "$unit_dir/camerabridge-config-changed.service" 2>&1); then
+        "$unit_dir/camerabridge-config.path" "$unit_dir/camerabridge-config-changed.service" \
+        "$unit_dir/black-relay-first-boot.service" 2>&1); then
         printf 'systemd-analyze verify: passed.\n'
     else
         not_ready+=("systemd-analyze verify")

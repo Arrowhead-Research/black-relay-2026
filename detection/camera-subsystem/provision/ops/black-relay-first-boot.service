@@ -1,0 +1,19 @@
+# Install as /etc/systemd/system/black-relay-first-boot.service.
+# Seeds a kit with no screen or keyboard. Whoever writes the card puts the kit's number in a file
+# on its boot partition, and this runs seed-kit.sh with it on the first boot, then reboots.
+# It does nothing on any other boot: the file is gone once the seed has worked.
+[Unit]
+Description=Black Relay first boot (seed this kit from the number on its boot partition)
+Documentation=file:/opt/black-relay/ops/README.md
+ConditionPathExists=/boot/firmware/black-relay-kit
+# seed-kit.sh ends by having NetworkManager reload its profiles.
+After=local-fs.target NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/black-relay/ops/first-boot.sh
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

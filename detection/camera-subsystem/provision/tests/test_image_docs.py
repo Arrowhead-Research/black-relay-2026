@@ -114,6 +114,18 @@ def test_step_10_removes_and_checks_each_file_the_field_run_leaves(path: str) ->
     assert path in _verify_block()
 
 
+def test_step_10_clears_a_kit_number_so_a_clone_takes_only_the_one_written_to_its_card() -> None:
+    for name in ("black-relay-kit", "black-relay-label.txt", "black-relay-first-boot.log"):
+        assert f"/boot/firmware/{name}" in _clean_block()
+        assert f"/boot/firmware/{name}" in _verify_block()
+
+
+def test_step_12_gives_each_card_its_kit_number() -> None:
+    step = README[README.index("12. **Write the image") : README.index("## Seed each kit")]
+    assert "/mnt/black-relay-kit" in step
+    assert "first-boot.sh" in README[README.index("## Seed each kit") :]
+
+
 def test_step_10_clears_the_seed_marker_so_a_clone_can_seed() -> None:
     assert "/etc/black-relay/kit-seeded" in _clean_block()
     assert "/etc/black-relay/kit-seeded" in _verify_block()
