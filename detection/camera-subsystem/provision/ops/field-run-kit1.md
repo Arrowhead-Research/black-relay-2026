@@ -259,7 +259,7 @@ console login fails.** The next check can leave a node nobody can reach without 
 C51  date ________  console login ___  sudo ___  card reader ___  result ________
 ```
 
-## C52. First reboot, through the portal, with no button. NOT RUN AS WRITTEN 2026-11-13.
+## C52. First reboot, through the portal, with no button. PASS 2026-11-13, on a seeded clone of the image.
 
 **The setup button is unwired,** so the README's "hold the button at boot" cannot be done. The daemon opens the full
 portal on a boot with no saved config, and "no config" is defined as no WiFi profile or no hostname. So moving the WiFi
@@ -370,6 +370,12 @@ C52  date 2026-11-13  AP seen after n/a  saved, joined after n/a  heartbeat afte
      SSH seen from the laptop; uplink on wlan0, no `Wired connection 1`, no docker0; services active, frigate static,
      wait-online masked; NTP yes from the laptop; journal on disk; node in `nodes` with camera_link_state no_camera.
      Still to show: the portal form itself, and `ap_up + config_received -> joining`.  result OPEN
+     Later the same day, after the image was captured: kit 1's own card, scrubbed by step 10 and given its kit
+     number, seeded itself on its first boot with no screen or keyboard, and its setup WiFi came up. The owner joined
+     it from a phone with the default passphrase and saved the form. The journal: `unprovisioned + boot -> ap_up`,
+     `ap_up + config_received -> joining`, `joining + uplink_up -> provisioned`, and no firewall failure. After the
+     save: SSH seen from central, the set and bridge.yaml hold central, NTP yes, heartbeat fresh with
+     camera_link_state no_camera. The times were not taken.  result PASS
 ```
 
 ## C53. Docker and systemd reach, under the hardening, as real root. PASS 2026-11-13.

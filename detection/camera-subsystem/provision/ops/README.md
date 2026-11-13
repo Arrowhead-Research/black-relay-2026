@@ -475,6 +475,25 @@ old build, so it starts from [`field-run-kit1.md`](field-run-kit1.md) instead, a
     job: use `pishrink.sh -s`, as `-s` leaves the expansion to the seeding step below. An image too large for the
     next card means this step did not take.
 
+    **Or copy only the used blocks,** which is what kit 1's image was made with, on a card reader that reads at
+    17 MB/s: a whole 128 GB card would have taken two hours to read and two more for each card written. This needs
+    cards of the build card's size or larger, and no shrinking. `e2image -ra` reads and writes only the blocks the
+    filesystem uses, 14 GB here, and each card took 21 minutes.
+
+    ```bash
+    # On the build host, as root. Capture, once:
+    sfdisk -d /dev/<sdX> > kit-image.sfdisk
+    dd if=/dev/<sdX>1 of=kit-image-boot.img bs=4M conv=fsync
+    e2fsck -fn /dev/<sdX>2 && e2image -ra /dev/<sdX>2 kit-image-rootfs.raw
+    # Write, for each card, in place of the dd of step 12. Then give it its kit number, as step 12 does.
+    sed "s|/dev/sd[a-z]|/dev/<sdX>|g" kit-image.sfdisk | sfdisk /dev/<sdX>
+    dd if=kit-image-boot.img of=/dev/<sdX>1 bs=4M conv=fsync
+    e2image -ra kit-image-rootfs.raw /dev/<sdX>2 && e2fsck -fn /dev/<sdX>2
+    ```
+
+    The image file is sparse: it lists at the card's size and takes up only what the filesystem uses. The check
+    after each write must report the same file and block counts as the build card's.
+
 12. **Write the image to each kit's card,** the same size as the build card or larger, and to kit 1's own card if it
     is reused. Then give the card its kit's number, on its boot partition, so that the kit seeds itself the first
     time it is powered: step 10 removed kit 1's passphrase too, so kit 1 needs this as well.

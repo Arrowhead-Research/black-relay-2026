@@ -1,7 +1,9 @@
 """first-boot.sh seeds a kit from the number on its boot partition, once, with nobody there.
 
 Runs the real script on a scratch tree, with a stub in place of seed-kit.sh and of everything
-that would change this machine: getent, raspi-config and systemctl.
+that would change this machine: getent, raspi-config and systemctl. sync is stubbed too: the real
+one waits for every disk on the host, and held this suite for as long as an SD card was being
+written.
 """
 
 from __future__ import annotations
@@ -51,6 +53,7 @@ class Card:
             (self.bin, "getent"),
             (self.bin, "raspi-config"),
             (self.bin, "systemctl"),
+            (self.bin, "sync"),
             (self.ops, "seed-kit.sh"),
         ):
             stub = directory / name
@@ -111,7 +114,7 @@ def test_it_leaves_the_label_removes_the_number_and_reboots_last(card: Card) -> 
     assert card.label.read_text() == LABEL
     assert not card.number.exists()
     assert not card.failure.exists()
-    assert card.calls()[-1] == "systemctl --no-block reboot"
+    assert card.calls()[-2:] == ["sync ", "systemctl --no-block reboot"]
     assert not [p for p in card.boot.iterdir() if p.name.startswith(".")]
 
 
