@@ -44,6 +44,7 @@ frigate/const.py:16 for the path, and frigate/record/maintainer.py:63 for the la
 cache is a host tmpfs so that this daemon can see it.
 """
 
+import errno
 import ipaddress
 import json
 import logging
@@ -88,6 +89,9 @@ DHCP_UNIT = "camera-link-dhcp.service"
 # as well, so the port only has to be one a camera is likely to be listening on.
 HOLDER_PROBE_PORT = 9000
 HOLDER_PROBE_SECONDS = 2.0
+# The node's end of the camera link, as ops/black-relay-camera.nmconnection sets it.
+CAMERA_INTERFACE = "eth0"
+NODE_LINK_ADDRESS = "10.77.0.1"
 _ARP_COMPLETE = 0x2
 FIREWALL_UNIT = "nftables.service"
 
@@ -317,25 +321,34 @@ def read_lease(path: Path, now: float | None) -> Lease | None:
     return best
 
 
-def lease_holder_answers(lease: Lease, arp_table: Path) -> bool:
-    """True if a device answers at the lease's address now, and it has the lease's MAC.
+def lease_holder_answers(lease: Lease, arp_table: Path) -> bool | None:
+    """True if a device answers at the lease's address now, and it has the lease's MAC. None if
+    the link cannot say yet, because the node's own address is not on it.
 
     The connection is what makes it "now": the kernel's table can still name a camera that was
     unplugged a moment ago, and that one sends nothing back. A refusal is an answer too. Nothing
-    is sent that a camera counts as a login."""
+    is sent that a camera counts as a login.
+
+    The dial leaves from the node's link address. At boot the carrier can be up before
+    NetworkManager has put that address on eth0, and a dial would then find no route, or go out
+    by the site's gateway, and silence there says nothing about the camera."""
     try:
-        socket.create_connection((lease.ip, HOLDER_PROBE_PORT), HOLDER_PROBE_SECONDS).close()
+        socket.create_connection(
+            (lease.ip, HOLDER_PROBE_PORT),
+            HOLDER_PROBE_SECONDS,
+            source_address=(NODE_LINK_ADDRESS, 0),
+        ).close()
     except ConnectionRefusedError:
         pass
-    except OSError:
-        return False
+    except OSError as err:
+        return None if err.errno == errno.EADDRNOTAVAIL else False
     try:
         rows = arp_table.read_text(encoding="ascii", errors="replace").splitlines()
     except OSError:
         return False
     for row in rows:
         fields = row.split()
-        if len(fields) < 4 or fields[0] != lease.ip:
+        if len(fields) < 6 or fields[0] != lease.ip or fields[5] != CAMERA_INTERFACE:
             continue
         try:
             complete = int(fields[2], 16) & _ARP_COMPLETE
@@ -517,9 +530,13 @@ class Daemon:
             self._save_link(carrier_changes=flaps)
         if not carrier:
             return None
-        if self._link.dhcp_reset_owed and not self._keep_live_lease():
-            self._reset_dhcp(problems)
-            return None
+        if self._link.dhcp_reset_owed:
+            kept = self._keep_live_lease(problems)
+            if kept is None:
+                return None  # the reset stays owed, and the next tick asks again
+            if not kept:
+                self._reset_dhcp(problems)
+                return None
 
         lease = self._current_lease()
         if lease is not None and (lease.ip, lease.mac) != (self._link.ip, self._link.held_mac):
@@ -542,14 +559,29 @@ class Daemon:
             return None
         return Lease(held, self._link.ip)
 
-    def _keep_live_lease(self) -> bool:
+    def _keep_live_lease(self, problems: list) -> bool | None:
         """Settle an owed reset without one, if the camera the file describes is on the wire.
-        It is then held like a lease seen in this generation, whatever the clock says of it."""
+        It is then held like a lease seen in this generation, whatever the clock says of it.
+        None means the link could not be asked, and nothing was settled.
+
+        The reset this replaces always ended by starting dnsmasq, which is what repaired a unit
+        left stopped by a failed reset or by hand. So this starts it too: without it the camera's
+        renewal would go unanswered, with no carrier change to bring the daemon back."""
         lease = read_lease(self._paths.lease_file, None)
-        if lease is None or not self._holder_answers(lease):
+        if lease is None:
             return False
+        answers = self._holder_answers(lease)
+        if answers is None:
+            problems.append("the camera link has no address yet, so its DHCP reset waits")
+            return None
+        if not answers:
+            return False
+        try:
+            self._systemd.start(DHCP_UNIT)
+        except SystemdError:
+            return False  # the reset reports why
         _log.info("camera %s answers at %s, so its lease is kept", lease.mac, lease.ip)
-        self._save_link(dhcp_reset_owed=False, held_mac=lease.mac)
+        self._save_link(dhcp_reset_owed=False, held_mac=lease.mac, ip=lease.ip)
         return True
 
     def _reset_dhcp(self, problems: list) -> None:

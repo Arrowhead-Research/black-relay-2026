@@ -732,16 +732,17 @@ def test_set_clock_writes_again_when_the_zone_did_not_take():
     assert opener.cmds().count("SetTime") == 2
 
 
-def test_set_clock_fails_when_the_clock_still_reads_wrong_after_the_second_write():
+def test_a_clock_that_still_reads_wrong_is_logged_and_does_not_stop_the_adoption(caplog):
+    """It costs the overlay its time. Raising would stop the name, rotation and streams too."""
+    caplog.set_level(logging.WARNING)
     wrong = camera_time(SET_AT + timedelta(hours=8))
     client, opener = clock_client(wrong, wrong)
 
-    with pytest.raises(ApiError) as info:
-        client.set_clock(SET_AT)
+    client.set_clock(SET_AT)
 
     assert opener.cmds().count("SetTime") == 2
-    assert "clock" in str(info.value)
-    assert_clean(info.value, PASSWORD, TOKEN)
+    assert "the clock does not read back as it was set" in caplog.text
+    assert PASSWORD not in caplog.text and TOKEN not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -753,18 +754,40 @@ def test_set_clock_takes_an_unusable_reading_as_not_set(changed):
     unusable = camera_time(SET_AT, **changed)
     client, opener = clock_client(unusable, unusable)
 
-    with pytest.raises(ApiError):
-        client.set_clock(SET_AT)
+    client.set_clock(SET_AT)
 
     assert opener.cmds().count("SetTime") == 2
 
 
-def test_set_clock_fails_when_get_time_returns_no_time():
+def test_set_clock_takes_a_reply_with_no_time_as_not_set():
     reply = [{"cmd": "GetTime", "code": 0, "value": {}}]
-    client, _ = clock_client(reply)
+    client, opener = clock_client(reply, reply)
 
-    with pytest.raises(ApiError):
+    client.set_clock(SET_AT)
+
+    assert opener.cmds().count("SetTime") == 2
+
+
+def test_set_clock_still_fails_when_the_camera_refuses_get_time():
+    refused = [{"cmd": "GetTime", "code": 1, "error": {"rspCode": -6}}]
+    client, _ = clock_client(refused)
+
+    with pytest.raises(ApiError) as info:
         client.set_clock(SET_AT)
+
+    assert info.value.rsp_code == -6
+
+
+@pytest.mark.parametrize("code", ["evil\ninjected line", {"a": 1}, 1.5, True, None])
+def test_a_code_that_is_not_a_number_never_reaches_the_message(code):
+    """The message is logged now, and the camera chooses the code."""
+    client, _ = logged_in(SetP2p=[{"cmd": "SetP2p", "code": 1, "error": {"rspCode": code}}])
+
+    with pytest.raises(ApiError) as info:
+        client.disable_p2p()
+
+    assert str(info.value) == f"camera {HOST}: SetP2p failed, rspCode None"
+    assert info.value.rsp_code is None
 
 
 def test_set_name_sets_devname_and_changes_only_the_osd_name():

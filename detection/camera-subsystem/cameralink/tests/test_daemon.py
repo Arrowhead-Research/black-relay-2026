@@ -1,6 +1,7 @@
 """The link daemon: what it decides each tick, what it persists, and what it never does."""
 
 import configparser
+import errno
 import fcntl
 import functools
 import hashlib
@@ -421,7 +422,7 @@ def test_a_lease_given_between_a_flap_and_its_tick_is_kept_when_its_holder_answe
     live.daemon.tick()
     assert live.step.last.lease == Lease(MAC, IP)
     assert live.step.last.generation == first + 1
-    assert live.systemd.dhcp_calls() == []
+    assert live.systemd.dhcp_calls() == ["start"]  # never a stop, and never a wipe
     assert live.paths.lease_file.exists()
     assert live.probed == [Lease(MAC, IP)]
 
@@ -446,7 +447,7 @@ def test_a_rising_carrier_keeps_the_lease_of_a_holder_that_answers(live):
     live.holder_answers = True
     live.daemon.tick()
     assert live.step.last.lease == Lease(MAC, IP)
-    assert live.systemd.dhcp_calls() == []
+    assert live.systemd.dhcp_calls() == ["start"]
 
 
 def test_a_boot_keeps_the_lease_of_a_camera_that_stayed_plugged_in(live):
@@ -458,7 +459,69 @@ def test_a_boot_keeps_the_lease_of_a_camera_that_stayed_plugged_in(live):
     live.daemon.tick()
     assert live.step.last.lease == Lease(MAC, IP)
     assert live.step.last.generation == first + 1
+    assert live.systemd.dhcp_calls() == ["start"]
+
+
+def test_a_kept_lease_on_a_first_run_carries_its_address(node):
+    """With no address saved yet and a lease the clock calls expired, the held lease once came out
+    with no address at all, and the camera would have been dialled at a host called None."""
+    node.provision()
+    node.set_lease(expiry=NOW - 1)
+    node.holder_answers = True
+    node.daemon.tick()
+    assert node.step.last.lease == Lease(MAC, IP)
+    node.daemon.tick()
+    assert node.step.last.lease == Lease(MAC, IP)
+
+
+def test_keeping_a_lease_starts_a_dhcp_server_that_was_left_stopped(live):
+    """The reset this replaces always ended in a start. A unit stopped by a failed reset, or by
+    hand, would otherwise never answer the camera's renewal."""
+    live.daemon.tick()
+    live.systemd.running.discard("camera-link-dhcp.service")
+    live.paths.carrier_changes.write_text("4\n")
+    live.daemon.tick()
+    live.systemd.calls.clear()
+    live.paths.carrier_changes.write_text("6\n")
+    live.holder_answers = True
+    live.daemon.tick()
+    assert "camera-link-dhcp.service" in live.systemd.running
+    assert live.step.last.lease == Lease(MAC, IP)
+
+
+def test_a_lease_is_not_kept_while_systemd_cannot_start_the_dhcp_server(live):
+    live.paths.carrier_changes.write_text("4\n")
+    live.daemon.tick()
+    live.paths.carrier_changes.write_text("6\n")
+    live.holder_answers = True
+    live.systemd.broken = True
+    live.daemon.tick()
+    assert live.step.last.lease is None
+    assert "DHCP server could not be reset" in live.state()["reason"]
+    live.systemd.broken = False
+    live.daemon.tick()
+    assert live.step.last.lease == Lease(MAC, IP)
+    assert live.systemd.dhcp_calls() == ["start"]
+    assert live.paths.lease_file.exists()
+
+
+def test_a_link_with_no_address_yet_keeps_the_reset_owed_and_wipes_nothing(live):
+    """At boot the carrier can be up before NetworkManager has addressed eth0. Silence then says
+    nothing about the camera, and a wipe would be the fault this check exists to stop."""
+    live.daemon.tick()
+    live.set_boot("boot-b")
+    live.holder_answers = None
+    live.restart_daemon()
+    live.daemon.tick()
+    assert live.step.last.lease is None
     assert live.systemd.dhcp_calls() == []
+    assert live.paths.lease_file.exists()
+    assert "no address yet" in live.state()["reason"]
+    live.holder_answers = True
+    live.daemon.tick()
+    assert live.step.last.lease == Lease(MAC, IP)
+    assert live.systemd.dhcp_calls() == ["start"]
+    assert live.state()["reason"] is None
 
 
 def test_a_kept_lease_is_held_though_the_clock_calls_it_expired(live):
@@ -495,7 +558,7 @@ def test_a_kept_lease_owes_no_reset_after_a_daemon_restart(live):
     live.restart_daemon()
     live.daemon.tick()
     assert live.step.last.lease == Lease(MAC, IP)
-    assert live.systemd.dhcp_calls() == []
+    assert live.systemd.dhcp_calls() == ["start"]
 
 
 ARP_HEADER = "IP address       HW type     Flags       HW address            Mask     Device\n"
@@ -511,8 +574,8 @@ def answering(monkeypatch, outcome):
     """Make the probe's connection accept, or raise ``outcome``. Returns the addresses dialled."""
     dialled = []
 
-    def create_connection(address, timeout):
-        dialled.append((address, timeout))
+    def create_connection(address, timeout, source_address=None):
+        dialled.append((address, timeout, source_address))
         if outcome is not None:
             raise outcome
         return SimpleNamespace(close=lambda: None)
@@ -525,7 +588,7 @@ def test_a_holder_that_accepts_and_has_the_leases_mac_answers(tmp_path, monkeypa
     dialled = answering(monkeypatch, None)
     table = arp_table(tmp_path, f"{IP}       0x1         0x2         {MAC}     *        eth0")
     assert lease_holder_answers(Lease(MAC, IP), table) is True
-    assert dialled == [((IP, 9000), daemon_module.HOLDER_PROBE_SECONDS)]
+    assert dialled == [((IP, 9000), daemon_module.HOLDER_PROBE_SECONDS, ("10.77.0.1", 0))]
 
 
 def test_a_refusal_is_an_answer(tmp_path, monkeypatch):
@@ -543,9 +606,17 @@ def test_silence_is_no_answer_whatever_the_arp_table_remembers(tmp_path, monkeyp
     assert lease_holder_answers(Lease(MAC, IP), table) is False
 
 
+def test_a_dial_that_cannot_leave_from_the_nodes_link_address_says_nothing(tmp_path, monkeypatch):
+    answering(monkeypatch, OSError(errno.EADDRNOTAVAIL, "Cannot assign requested address"))
+    table = arp_table(tmp_path, f"{IP}       0x1         0x2         {MAC}     *        eth0")
+    assert lease_holder_answers(Lease(MAC, IP), table) is None
+
+
 @pytest.mark.parametrize(
     "row",
     [
+        f"{IP}       0x1         0x2         {MAC}     *        wlan0",  # not on the camera link
+        f"{IP}       0x1         0x2         {MAC}     *",
         f"{IP}       0x1         0x2         {OTHER_MAC}     *        eth0",  # another device
         f"{IP}       0x1         0x0         00:00:00:00:00:00     *        eth0",  # unresolved
         f"10.77.0.11       0x1         0x2         {MAC}     *        eth0",  # another address

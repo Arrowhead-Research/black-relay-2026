@@ -195,10 +195,13 @@ class ReolinkClient:
             return
         self._set_time(utc)
         if not self._clock_reads(utc):
-            raise ApiError(f"camera {self._host}: the clock does not read back as it was set")
+            # Not an error: a clock that reads wrong, or in a form this cannot follow, costs the
+            # overlay its time and nothing else, and raising here would stop every adoption of
+            # such a camera before its name, rotation and streams.
+            _log.warning("camera %s: the clock does not read back as it was set", self._host)
 
     def _clock_reads(self, utc: datetime) -> bool:
-        time = self._read("GetTime", "Time", {})
+        time = _child(_child(self._call("GetTime", {}, 1), "value"), "Time")
         fields = [time.get(key) for key in ("year", "mon", "day", "hour", "min", "sec")]
         if time.get("timeZone") != 0 or any(_int_or_none(field) is None for field in fields):
             return False
@@ -277,7 +280,8 @@ class ReolinkClient:
             raise ApiError(f"camera {self._host}: {cmd} needs a login first")
         entry = self._exchange(cmd, param, action)
         if entry.get("code") != 0:
-            rsp_code = _child(entry, "error").get("rspCode")
+            # The code is the camera's, and now reaches the log: anything but a number is dropped.
+            rsp_code = _int_or_none(_child(entry, "error").get("rspCode"))
             raise ApiError(f"camera {self._host}: {cmd} failed, rspCode {rsp_code}", rsp_code)
         return entry
 
@@ -357,4 +361,5 @@ def _raise_login_failure(host: str, entry: dict) -> None:
         )
     if rsp_code == _RSP_LOGIN_FAILED or detail in _REJECTED_WORDINGS:
         raise AuthFailed(f"camera {host}: login rejected, {remain_times} tries left", remain_times)
+    rsp_code = _int_or_none(rsp_code)
     raise ApiError(f"camera {host}: Login failed, rspCode {rsp_code}", rsp_code)

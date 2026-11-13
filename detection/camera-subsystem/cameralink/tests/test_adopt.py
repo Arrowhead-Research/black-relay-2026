@@ -132,6 +132,7 @@ class FakeClient:
     def __init__(self, camera):
         self.camera = camera
         self.token = False
+        self.dropped = False  # the camera ended this session, and answers every call with -6
         self.user = None
         self.current = None
 
@@ -142,6 +143,8 @@ class FakeClient:
             raise ApiError(f"{name} needs a login first")
         if not (camera.up and camera.http):
             raise Unreachable(f"{name} not delivered")
+        if self.dropped:
+            raise ApiError(f"{name} failed, rspCode -6", -6)
         camera.calls.append(name)
         error = camera.scripted(name)
         if error is not None and name not in camera.after_applied:
@@ -149,7 +152,7 @@ class FakeClient:
         apply()
         if name == "set_streams" and not camera.stream_mode_set:
             camera.stream_mode_set = True
-            self.token = False  # the session is gone, as after a change of mode
+            self.dropped = True  # the session is gone, as after a change of mode
         if error is not None:
             raise error  # the camera acted, and the reply was lost
         camera.power.after(index)
@@ -171,6 +174,7 @@ class FakeClient:
         finally:
             camera.power.after(index)  # the cut can come with the verdict on its way back
         self.token, self.user, self.current = True, user, password
+        self.dropped = False
 
     def logout(self):
         if not self.token:
@@ -180,7 +184,9 @@ class FakeClient:
         error = self.camera.scripted("logout")
         if error is not None:
             raise error
-        self.camera.power.after(index)
+        self.camera.power.after(index)  # a cut can come with the reply on its way back
+        if self.dropped:
+            raise ApiError("Logout failed, rspCode -6", -6)  # as the real client is told
 
     def set_password(self, new):
         def apply():
@@ -2272,6 +2278,19 @@ def test_the_stream_mode_is_written_last_as_the_camera_drops_the_session_after_i
     assert set(factory.record().applied) == set(STEPS)
 
 
+def test_a_logout_the_camera_refuses_after_the_stream_mode_leaves_the_camera_adopted(
+    factory, caplog
+):
+    """The real client still sends Logout, and the camera answers -6 like any call after SetEnc."""
+    caplog.set_level(logging.DEBUG)
+
+    assert factory.link_up() is LinkState.ADOPTED
+
+    assert "logout failed: ApiError" in caplog.text
+    assert factory.record().phase == LinkState.ADOPTED.value
+    assert factory.record().failures == ()
+
+
 def test_a_call_the_camera_refuses_is_named_in_the_log(factory, caplog):
     """Kit 1, 2026-11-13: the first adoption stopped on "ApiError", and the log could not say
     which call. The client writes these messages itself: a command and a code, never a secret."""
@@ -2518,8 +2537,6 @@ def _steps_finished_at(scenario, index, when):
     completed = index if when == "before" else index + 1
     finished = set(STEPS) if scenario == "reset_known" else set()
     for position, name in enumerate(trace[:completed]):
-        # The last save has nothing after it: the session went with the stream mode, so no
-        # logout is sent.
         if name == "save" and trace[position + 1 : position + 2] == ["set_password"]:
             finished = set()  # blank proved a reset, so no setting survived
         if name in STEPS:
