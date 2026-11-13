@@ -41,7 +41,7 @@ FROM debian:trixie
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends systemd systemd-sysv dbus \
     network-manager dnsmasq-base nftables gpiod python3-venv mosquitto mosquitto-clients \
-    systemd-timesyncd avahi-daemon iw rsync curl docker.io docker-cli openssh-server kmod iproute2 \
+    systemd-timesyncd avahi-daemon iw rsync curl docker.io docker-cli openssh-server kmod iproute2 sudo \
     ca-certificates >/dev/null
 # Nested Docker is not what is under test, and nothing here may wait on it.
 RUN systemctl disable docker.service docker.socket containerd.service >/dev/null 2>&1
@@ -93,8 +93,10 @@ check "the Frigate template is in the package" on /opt/black-relay/cameralink/bi
     'from cameralink.frigate_config import _template; assert "go2rtc" in _template().template'
 check "the camera library imports" on /opt/black-relay/cameralink/bin/python -c 'import cameralink.reolink'
 
-printf '\n--- seeding gives a clone its own identity, on real ssh-keygen, chpasswd and systemd\n'
-on useradd -m -p '!' seed-test
+printf '\n--- seeding gives a clone its own identity, on real ssh-keygen, chpasswd, useradd, visudo and systemd\n'
+on useradd -m -p '!' -G adm,video seed-test
+sh_on 'install -d -m 700 -o seed-test -g seed-test /home/seed-test/.ssh
+  printf "ssh-ed25519 AAAA build-host\n" > /home/seed-test/.ssh/authorized_keys'
 sh_on 'printf 00000000abcdef01 > /tmp/serial; cat /etc/machine-id > /tmp/old-id
   sha256sum /etc/ssh/ssh_host_ed25519_key.pub > /tmp/old-key'
 seed() {
@@ -102,24 +104,49 @@ seed() {
         /opt/black-relay/ops/seed-kit.sh "$@"
 }
 on systemctl start NetworkManager # seed-kit.sh ends by reloading its connections
-if output=$(printf 'seed test password\nseed test password\n' | seed 2>&1); then ok "seed-kit.sh ran"; else
+if output=$(seed --kit 7 2>&1 </dev/null); then ok "seed-kit.sh ran"; else
     bad "seed-kit.sh ran: $output"
 fi
 check "it printed the label" matches 'Setup WiFi:  BlackRelay-CAM-00000000abcdef01' "$output"
-check "the password is not in its output" not_matches 'seed test password' "$output"
+check "the label carries the default passphrase" matches 'Passphrase:  BlackRelay2026' "$output"
+check "it names the kit's login" matches 'log in as kit-7' "$output"
+check "the kit's user exists, with the image user's groups" sh_on \
+    '[ "$(id -Gn kit-7 | tr " " "\n" | grep -vx kit-7 | sort)" = "$(id -Gn seed-test | tr " " "\n" | grep -vx seed-test | sort)" ]'
+check "the kit's user has the build host's key, 0600 and its own" sh_on \
+    '[ "$(stat -c "%a %U" /home/kit-7/.ssh/authorized_keys)" = "600 kit-7" ] && grep -q build-host /home/kit-7/.ssh/authorized_keys'
+check "the kit's user may use sudo, and sudoers still parses" sh_on \
+    'visudo -c >/dev/null && sudo -l -U kit-7 | grep -q NOPASSWD'
+check "the kit's console password took" sh_on 'passwd -S kit-7 | grep -q " P "'
+check "the image's user is closed" sh_on 'passwd -S seed-test | grep -q " L " && chage -l seed-test | grep -q "Account expires.*1970"'
 check "the machine ID changed" sh_on '! cmp -s /tmp/old-id /etc/machine-id'
 check "the machine ID is world readable" sh_on '[ "$(stat -c %a /etc/machine-id)" = 444 ]'
 check "the SSH host key changed" sh_on '! sha256sum -c /tmp/old-key'
 check "the private host key is 0600" sh_on '[ "$(stat -c %a /etc/ssh/ssh_host_ed25519_key)" = 600 ]'
 check "sshd accepts the new keys" on sshd -t
-check "the console password took" sh_on 'passwd -S seed-test | grep -q " P "'
 check "the AP profile is 0600" sh_on \
     '[ "$(stat -c %a /etc/NetworkManager/system-connections/black-relay-setup-ap.nmconnection)" = 600 ]'
-if printf 'seed test password\nseed test password\n' | seed >/dev/null 2>&1; then
+if seed --kit 7 >/dev/null 2>&1 </dev/null; then
     bad "a second seed must refuse"
 else
     ok "a second seed refuses"
 fi
+change() {
+    docker exec -i -e CONSOLE_USER=kit-7 "$name" /opt/black-relay/ops/change-passwords.sh "$@"
+}
+sh_on 'getent shadow kit-7 | cut -d: -f2 > /tmp/old-hash'
+if output=$(printf 'A-new_Passw0rd\nA-new_Passw0rd\n' | change console 2>&1); then ok "change-passwords.sh console ran"; else
+    bad "change-passwords.sh console ran: $output"
+fi
+check "the console password changed" sh_on '[ "$(getent shadow kit-7 | cut -d: -f2)" != "$(cat /tmp/old-hash)" ]'
+check "the new password is not in its output" not_matches 'A-new_Passw0rd' "$output"
+on systemctl start NetworkManager
+if output=$(printf 'A-new_Passw0rd\nA-new_Passw0rd\n' | change setup-wifi 2>&1); then ok "change-passwords.sh setup-wifi ran"; else
+    bad "change-passwords.sh setup-wifi ran: $output"
+fi
+check "the setup WiFi profile holds the new passphrase, still 0600" sh_on \
+    'f=/etc/NetworkManager/system-connections/black-relay-setup-ap.nmconnection; grep -qx "psk=A-new_Passw0rd" "$f" && [ "$(stat -c %a "$f")" = 600 ]'
+check "NetworkManager loaded the changed profile" sh_on \
+    '[ "$(nmcli -s -g 802-11-wireless-security.psk connection show black-relay-setup-ap)" = A-new_Passw0rd ]'
 on systemctl stop NetworkManager
 
 printf '\n--- nothing started, frigate not enabled\n'

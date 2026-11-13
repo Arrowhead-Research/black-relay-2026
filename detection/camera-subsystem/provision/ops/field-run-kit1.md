@@ -278,8 +278,9 @@ address the form saves, so no part of this hand-applies the set, as the plan req
 must not spend a login before C53 and C54 pass.
 
 *Agent, in the open session.* If the AP profile is missing, the block below stops and moves nothing. Then run
-`sudo /opt/black-relay/ops/seed-kit.sh` at the console, which prints the label. It also asks for a new console password
-and replaces the host keys, so afterwards run `ssh-keygen -R "$NODE"` on the laptop, and run the block again.
+`sudo /opt/black-relay/ops/seed-kit.sh --kit 1` at the console, which prints the label. It also sets the console
+password to the default and replaces the host keys, so afterwards run `ssh-keygen -R "$NODE"` on the laptop, and run
+the block again.
 
 ```bash
 # Read the last two out to the owner, once. They are the kit's label.
@@ -1213,7 +1214,7 @@ C78  date started ________  ended ________  disk ___  max temp ___  inference __
    real ones from C55, C59 and C76.
 2. Remove `frigate-spike` and everything else site-specific with README build step 10, which also clears every file
    this run may have left, on a kit that has passed,
-   then capture, shrink, write and seed, steps 11 and 12, and "Seed each kit", which sets each kit's console password. C41 checks two of the clones.
+   then capture, shrink, write and seed, steps 11 and 12, and "Seed each kit", which makes each kit's console user. C41 checks two of the clones.
 3. Report: every failed check, with its output.
 
 # Where each binding item is checked

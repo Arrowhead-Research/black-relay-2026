@@ -13,7 +13,8 @@ Builds the SD image for a camera edge node and defines how to check it in the fi
 | File | Installed as | Purpose |
 |---|---|---|
 | `black-relay-setup-ap.nmconnection.tmpl` | `/etc/NetworkManager/system-connections/black-relay-setup-ap.nmconnection` (by `seed-kit.sh`) | Setup AP profile |
-| `seed-kit.sh` | `/opt/black-relay/ops/` | Renders the profile, prints the kit label |
+| `seed-kit.sh` | `/opt/black-relay/ops/` | Makes the kit's user, renders the profile, prints the kit label |
+| `change-passwords.sh` | `/opt/black-relay/ops/` | Changes a kit's console password, setup passphrase or broker password |
 | `black-relay-captive.conf` | `/etc/NetworkManager/dnsmasq-shared.d/` | Captive DNS |
 | `black-relay.nft` | `/etc/nftables.conf` | Firewall |
 | `central-hosts.nft` | `/etc/black-relay/central-hosts.nft` | The element of the `central_hosts` set, the address admitted to SSH, Frigate and RTSP. None in the image, and replaced by each portal save |
@@ -293,7 +294,7 @@ old build, so it starts from [`field-run-kit1.md`](field-run-kit1.md) instead, a
      /etc/systemd/system/mosquitto.service.d /etc/systemd/system/ssh.service.d /etc/black-relay
    sudo install -m 0644 README.md black-relay-setup-ap.nmconnection.tmpl central-hosts.nft \
      /opt/black-relay/ops/
-   sudo install -m 0755 seed-kit.sh /opt/black-relay/ops/
+   sudo install -m 0755 seed-kit.sh change-passwords.sh /opt/black-relay/ops/
    sudo install -m 0644 black-relay-captive.conf /etc/NetworkManager/dnsmasq-shared.d/
    sudo install -m 0644 mosquitto-black-relay.conf /etc/mosquitto/conf.d/black-relay.conf
    sudo install -m 0644 mosquitto-service-override.conf \
@@ -427,7 +428,7 @@ old build, so it starts from [`field-run-kit1.md`](field-run-kit1.md) instead, a
     sudo poweroff
     ```
 
-    `seed-kit.sh` replaces the machine ID, SSH host keys and console password per kit, in the next section. A clone
+    `seed-kit.sh` replaces the machine ID and SSH host keys and makes the kit's own console user, in the next section. A clone
     is no use until then: it has no setup WiFi, and its firewall admits nobody. C41 checks all of it.
 
 11. **Capture the image once,** with the card in the build host. Kits 2-4 are identical to kit 1, so one image
@@ -476,26 +477,51 @@ old build, so it starts from [`field-run-kit1.md`](field-run-kit1.md) instead, a
 ## Seed each kit
 
 Do this once per kit, on the kit's own Pi, with the kit's own card. This is what makes clones of one image into
-separate kits: each gets its own passphrase, SSH host keys, machine ID and console password, and its serial sets its
-default name. Use a console (micro-HDMI and USB keyboard), because the firewall is now active and `eth0` allows no SSH.
-Log in with the image's password. Until seeding, the daemon logs failures to start the AP. That is expected.
+separate kits: each gets its own console user, SSH host keys and machine ID, and its serial sets its default name.
+Use a console (micro-HDMI and USB keyboard), because the firewall is now active and `eth0` allows no SSH.
+Log in as the image's user. Until seeding, the daemon logs failures to start the AP. That is expected.
 
 ```bash
 sudo raspi-config nonint do_expand_rootfs
 
-# Everything that makes this kit its own. It asks for the new console password, twice.
-sudo /opt/black-relay/ops/seed-kit.sh
+# Everything that makes this kit its own. Give it the kit's number: kit 2 here.
+sudo /opt/black-relay/ops/seed-kit.sh --kit 2
 ```
 
-The script first asks for a console password for the user running `sudo`, at least 8 characters, never echoed and
-never in an argument or a log. **Choose one per kit, and keep it in your password manager, not on the label.** Nothing
-has changed until the two entries match. It then replaces the SSH host keys and machine ID, installs the AP profile as
-root-only 0600, writes `/etc/black-relay/kit-seeded`, and prints the label text once. The only stored copy of the
-passphrase is the 0600 profile.
+The number names the kit's console user: `kit-1`, `kit-2`, and so on, up to 99. It asks for nothing else.
 
-It refuses to run on a kit with that marker or that profile, since a second passphrase would make the label wrong.
-`--force` overrides that, and replaces all of the above. If it stops partway, for a power cut or any error, run it again:
-with neither the marker nor the profile written yet, it needs no `--force`.
+**Every kit starts with one default password, `BlackRelay2026`,** so that nobody handed a kit has to guess one. It is
+the password of the kit's console user and the passphrase of its setup WiFi. The central node gives the broker and
+viewer logins the same default: see `relay/README.md`. Whoever owns a kit changes them with `change-passwords.sh`,
+below. The default is in this repository, so treat a kit that still has it as open to anyone who has read this page
+and can reach its console or its setup WiFi.
+
+The script makes the kit's user beside the image's, with the same groups, the same SSH key and the same `sudo` rule,
+and sets its password. It then replaces the SSH host keys and machine ID, removes the image's console autologin so
+that the console asks for a login, closes the image's user on every kit but the one it names, installs the AP profile
+as root-only 0600, writes `/etc/black-relay/kit-seeded`, and prints the label text once. The image's user is closed
+only after the kit's user, its key and its `sudo` rule are in place. From the reboot on, log in as `kit-N`, at the
+console and over SSH.
+
+It refuses to run on a kit with that marker or that profile, since seeding again puts both passwords back to the
+default. `--force` overrides that, and replaces all of the above. If it stops partway, for a power cut or any error,
+run it again: with neither the marker nor the profile written yet, it needs no `--force`.
+
+### Changing a kit's passwords
+
+On the kit, as its console user, at the console or over SSH from the central node:
+
+```bash
+sudo /opt/black-relay/ops/change-passwords.sh console      # this user's console password
+sudo /opt/black-relay/ops/change-passwords.sh setup-wifi   # the setup WiFi passphrase. Prints the new label
+sudo /opt/black-relay/ops/change-passwords.sh broker       # the broker password this kit logs in with
+```
+
+Each asks for the new password twice, never shows it, and changes nothing until the two match. A password is 8 to 63
+characters with no space, quote, backtick, backslash or dollar sign, which is what all three places can take. After
+`setup-wifi`, replace the label on the kit. After `broker`, give the central node the same password, with
+`./change-passwords.sh broker` in its `relay` directory: until the two match, this kit's events queue on the kit and
+its video cannot be pulled.
 
 **Print the label:** the image has no printing stack, so enter the four printed lines into your
 label printer's workstation, and do not save them to a file. Fix the label to the kit. Then reboot,
@@ -1397,8 +1423,9 @@ sudo nmcli --show-secrets --get-values 802-11-wireless-security.psk connection s
 ```
 
 Expect: no `bridge.yaml`, `node.json`, or time server drop-in, no `black-relay-uplink` profile, and a `central_hosts` set with no elements.
-Between the two kits, a different machine ID, SSH key fingerprint, AP passphrase, console password, and form default
-for `node_id`. The password each kit was seeded with works at its console, and the image's does not. Then provision both with their defaults, on one site: both kits' heartbeats keep arriving, with no repeated connect and disconnect for either
+Between the two kits, a different machine ID, SSH key fingerprint, console user (`kit-N`), and form default
+for `node_id`. Each kit's console asks for a login, takes its own user with the default password, and refuses the
+image's user on every kit but the one that user names. Then provision both with their defaults, on one site: both kits' heartbeats keep arriving, with no repeated connect and disconnect for either
 `node_id` in the central broker's log. Two kits sharing an ID would share an MQTT client ID, and
 disconnect each other.
 

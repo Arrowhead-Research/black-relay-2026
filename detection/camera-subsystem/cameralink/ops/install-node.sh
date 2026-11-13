@@ -217,6 +217,7 @@ install_files() {
         put "$provision_ops/$file" "$root/opt/black-relay/ops/$file" 0644
     done
     put "$provision_ops/seed-kit.sh" "$root/opt/black-relay/ops/seed-kit.sh" 0755
+    put "$provision_ops/change-passwords.sh" "$root/opt/black-relay/ops/change-passwords.sh" 0755
 }
 
 install_firewall() {

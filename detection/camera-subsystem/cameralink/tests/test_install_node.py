@@ -161,6 +161,7 @@ INSTALLED = [
     ),
     ("opt/black-relay/ops/central-hosts.nft", 0o644, "provision/ops/central-hosts.nft"),
     ("opt/black-relay/ops/seed-kit.sh", 0o755, "provision/ops/seed-kit.sh"),
+    ("opt/black-relay/ops/change-passwords.sh", 0o755, "provision/ops/change-passwords.sh"),
 ]
 
 
