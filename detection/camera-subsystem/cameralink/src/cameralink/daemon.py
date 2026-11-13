@@ -14,6 +14,13 @@ swapped camera gets "no address available" for up to an hour (measured with thes
 why a boot or a rising carrier wipes the lease and restarts dnsmasq, and why no lease is believed
 until that is done: at those moments the file may describe a camera that has gone.
 
+A camera that has not gone keeps its lease. dnsmasq is already running when the carrier rises, so
+the camera can have its lease before the tick that sees the change, and wiping that one leaves the
+camera holding an address dnsmasq has forgotten: it does not ask again until it renews, half the
+lease time later, and the node says no_camera until then (kit 1, three times in one afternoon). So
+before a wipe the daemon asks the wire: a device that answers at the lease's address, with the
+lease's MAC, is the camera the file describes.
+
 A node with no RTC boots on an old clock and NTP later steps it, which makes a live lease look
 expired. So the expiry only decides whether to believe a lease not yet seen in this generation.
 One already seen is held until the generation changes or the file names another MAC.
@@ -43,6 +50,7 @@ import logging
 import os
 import re
 import secrets
+import socket
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, fields, replace
@@ -76,6 +84,11 @@ TICK_SECONDS = 5
 FRIGATE_DOWN_TICKS = 6
 FRIGATE_UNIT = "frigate.service"
 DHCP_UNIT = "camera-link-dhcp.service"
+# The camera's Baichuan port, which answers in every state the camera can be in. A refusal counts
+# as well, so the port only has to be one a camera is likely to be listening on.
+HOLDER_PROBE_PORT = 9000
+HOLDER_PROBE_SECONDS = 2.0
+_ARP_COMPLETE = 0x2
 FIREWALL_UNIT = "nftables.service"
 
 _SYSTEMCTL = "/usr/bin/systemctl"
@@ -151,6 +164,7 @@ class Paths:
     carrier: Path = Path("/sys/class/net/eth0/carrier")
     carrier_changes: Path = Path("/sys/class/net/eth0/carrier_changes")
     boot_id: Path = Path("/proc/sys/kernel/random/boot_id")
+    arp_table: Path = Path("/proc/net/arp")
     bridge_config: Path = Path("/etc/camerabridge/bridge.yaml")
     node_file: Path = Path("/var/lib/camera-provision/node.json")
     frigate_config: Path = Path("/var/lib/frigate/config/config.yml")
@@ -303,6 +317,35 @@ def read_lease(path: Path, now: float | None) -> Lease | None:
     return best
 
 
+def lease_holder_answers(lease: Lease, arp_table: Path) -> bool:
+    """True if a device answers at the lease's address now, and it has the lease's MAC.
+
+    The connection is what makes it "now": the kernel's table can still name a camera that was
+    unplugged a moment ago, and that one sends nothing back. A refusal is an answer too. Nothing
+    is sent that a camera counts as a login."""
+    try:
+        socket.create_connection((lease.ip, HOLDER_PROBE_PORT), HOLDER_PROBE_SECONDS).close()
+    except ConnectionRefusedError:
+        pass
+    except OSError:
+        return False
+    try:
+        rows = arp_table.read_text(encoding="ascii", errors="replace").splitlines()
+    except OSError:
+        return False
+    for row in rows:
+        fields = row.split()
+        if len(fields) < 4 or fields[0] != lease.ip:
+            continue
+        try:
+            complete = int(fields[2], 16) & _ARP_COMPLETE
+        except ValueError:
+            continue
+        if complete and fields[3].lower() == lease.mac:
+            return True
+    return False
+
+
 def clear_limits(store_path: Path, out=None) -> int:
     """Clear the rolling cap and the signature limit of the latest camera. Everything else in
     its record stays: passwords, the lockout flag, and the attempt of this generation."""
@@ -338,9 +381,13 @@ class Daemon:
         clock=None,
         client_factory=ReolinkClient,
         frigate_log=None,
+        holder_answers=None,
     ):
         self._paths = paths
         self._systemd = systemd
+        self._holder_answers = holder_answers or (
+            lambda lease: lease_holder_answers(lease, paths.arp_table)
+        )
         self._step = step_fn
         self._clock = clock or (lambda: datetime.now(UTC))
         self._client_factory = client_factory
@@ -470,7 +517,7 @@ class Daemon:
             self._save_link(carrier_changes=flaps)
         if not carrier:
             return None
-        if self._link.dhcp_reset_owed:
+        if self._link.dhcp_reset_owed and not self._keep_live_lease():
             self._reset_dhcp(problems)
             return None
 
@@ -494,6 +541,16 @@ class Daemon:
             self._save_link(held_mac=None)
             return None
         return Lease(held, self._link.ip)
+
+    def _keep_live_lease(self) -> bool:
+        """Settle an owed reset without one, if the camera the file describes is on the wire.
+        It is then held like a lease seen in this generation, whatever the clock says of it."""
+        lease = read_lease(self._paths.lease_file, None)
+        if lease is None or not self._holder_answers(lease):
+            return False
+        _log.info("camera %s answers at %s, so its lease is kept", lease.mac, lease.ip)
+        self._save_link(dhcp_reset_owed=False, held_mac=lease.mac)
+        return True
 
     def _reset_dhcp(self, problems: list) -> None:
         failure = None

@@ -39,6 +39,7 @@ from cameralink.daemon import (
     Daemon,
     FrigateLog,
     Paths,
+    lease_holder_answers,
     Systemctl,
     SystemdError,
     clear_limits,
@@ -196,6 +197,8 @@ class Node:
         self.clock_epoch = NOW
         self.systemd = FakeSystemd(self.paths)
         self.step = FakeStep()
+        self.holder_answers = False  # nothing answers at the lease's address unless a test says so
+        self.probed = []
         self.set_carrier(True)
         self.set_boot("boot-a")
         self.daemon = self.start_daemon()
@@ -205,7 +208,17 @@ class Node:
         return datetime.fromtimestamp(self.clock_epoch, UTC)
 
     def start_daemon(self, step_fn=None):
-        return Daemon(self.paths, self.systemd, step_fn=step_fn or self.step, clock=self.clock)
+        return Daemon(
+            self.paths,
+            self.systemd,
+            step_fn=step_fn or self.step,
+            clock=self.clock,
+            holder_answers=self._holder_answers,
+        )
+
+    def _holder_answers(self, lease):
+        self.probed.append(lease)
+        return self.holder_answers
 
     def restart_daemon(self):
         self.daemon = self.start_daemon()
@@ -393,6 +406,162 @@ def test_a_boot_ends_a_held_lease(live):
     live.set_lease(expiry=NOW - 1)
     live.daemon.tick()
     assert live.step.last.lease is None
+
+
+def test_a_lease_given_between_a_flap_and_its_tick_is_kept_when_its_holder_answers(live):
+    """Kit 1, 2026-11-13: dnsmasq was already up when the carrier rose, the camera had its lease
+    within two seconds, and the tick after that wiped it. The camera then held an address dnsmasq
+    had forgotten, and the node said no_camera until the camera renewed."""
+    live.paths.carrier_changes.write_text("4\n")
+    live.daemon.tick()
+    first = live.step.last.generation
+    live.paths.carrier_changes.write_text("6\n")
+    live.set_lease()  # given after the flap, before the tick that sees it
+    live.holder_answers = True
+    live.daemon.tick()
+    assert live.step.last.lease == Lease(MAC, IP)
+    assert live.step.last.generation == first + 1
+    assert live.systemd.dhcp_calls() == []
+    assert live.paths.lease_file.exists()
+    assert live.probed == [Lease(MAC, IP)]
+
+
+def test_a_lease_whose_holder_does_not_answer_is_wiped_on_a_flap(live):
+    live.paths.carrier_changes.write_text("4\n")
+    live.daemon.tick()
+    live.paths.carrier_changes.write_text("6\n")
+    live.daemon.tick()
+    assert live.probed == [Lease(MAC, IP)]
+    assert live.step.last.lease is None
+    assert live.systemd.dhcp_calls() == ["stop_and_wait", "start"]
+    assert not live.paths.lease_file.exists()
+
+
+def test_a_rising_carrier_keeps_the_lease_of_a_holder_that_answers(live):
+    live.daemon.tick()
+    live.set_carrier(False)
+    live.daemon.tick()
+    live.systemd.calls.clear()
+    live.set_carrier(True)
+    live.holder_answers = True
+    live.daemon.tick()
+    assert live.step.last.lease == Lease(MAC, IP)
+    assert live.systemd.dhcp_calls() == []
+
+
+def test_a_boot_keeps_the_lease_of_a_camera_that_stayed_plugged_in(live):
+    live.daemon.tick()
+    first = live.step.last.generation
+    live.set_boot("boot-b")
+    live.holder_answers = True
+    live.restart_daemon()
+    live.daemon.tick()
+    assert live.step.last.lease == Lease(MAC, IP)
+    assert live.step.last.generation == first + 1
+    assert live.systemd.dhcp_calls() == []
+
+
+def test_a_kept_lease_is_held_though_the_clock_calls_it_expired(live):
+    """A node with no RTC boots on an old clock, and the camera on the wire is the better proof."""
+    live.daemon.tick()
+    live.set_boot("boot-b")
+    live.set_lease(expiry=NOW - 1)
+    live.holder_answers = True
+    live.restart_daemon()
+    live.daemon.tick()
+    assert live.step.last.lease == Lease(MAC, IP)
+    live.daemon.tick()
+    assert live.step.last.lease == Lease(MAC, IP)
+
+
+def test_with_no_lease_in_the_file_a_reset_asks_nothing_of_the_wire(live):
+    live.paths.lease_file.unlink()
+    live.paths.carrier_changes.write_text("4\n")
+    live.daemon.tick()
+    live.paths.carrier_changes.write_text("6\n")
+    live.holder_answers = True
+    live.daemon.tick()
+    assert live.probed == []
+    assert live.systemd.dhcp_calls() == ["stop_and_wait", "start"]
+
+
+def test_a_kept_lease_owes_no_reset_after_a_daemon_restart(live):
+    live.paths.carrier_changes.write_text("4\n")
+    live.daemon.tick()
+    live.paths.carrier_changes.write_text("6\n")
+    live.holder_answers = True
+    live.daemon.tick()
+    live.holder_answers = False
+    live.restart_daemon()
+    live.daemon.tick()
+    assert live.step.last.lease == Lease(MAC, IP)
+    assert live.systemd.dhcp_calls() == []
+
+
+ARP_HEADER = "IP address       HW type     Flags       HW address            Mask     Device\n"
+
+
+def arp_table(tmp_path, *rows):
+    table = tmp_path / "arp"
+    table.write_text(ARP_HEADER + "".join(row + "\n" for row in rows))
+    return table
+
+
+def answering(monkeypatch, outcome):
+    """Make the probe's connection accept, or raise ``outcome``. Returns the addresses dialled."""
+    dialled = []
+
+    def create_connection(address, timeout):
+        dialled.append((address, timeout))
+        if outcome is not None:
+            raise outcome
+        return SimpleNamespace(close=lambda: None)
+
+    monkeypatch.setattr(daemon_module.socket, "create_connection", create_connection)
+    return dialled
+
+
+def test_a_holder_that_accepts_and_has_the_leases_mac_answers(tmp_path, monkeypatch):
+    dialled = answering(monkeypatch, None)
+    table = arp_table(tmp_path, f"{IP}       0x1         0x2         {MAC}     *        eth0")
+    assert lease_holder_answers(Lease(MAC, IP), table) is True
+    assert dialled == [((IP, 9000), daemon_module.HOLDER_PROBE_SECONDS)]
+
+
+def test_a_refusal_is_an_answer(tmp_path, monkeypatch):
+    """A camera one second into its lease may not be listening yet, and it is there all the same."""
+    answering(monkeypatch, ConnectionRefusedError())
+    table = arp_table(tmp_path, f"{IP}       0x1         0x2         {MAC.upper()}     *        eth0")
+    assert lease_holder_answers(Lease(MAC, IP), table) is True
+
+
+@pytest.mark.parametrize("outcome", [TimeoutError(), OSError(113, "No route to host")])
+def test_silence_is_no_answer_whatever_the_arp_table_remembers(tmp_path, monkeypatch, outcome):
+    """The table can still name a camera that was unplugged a moment ago."""
+    answering(monkeypatch, outcome)
+    table = arp_table(tmp_path, f"{IP}       0x1         0x2         {MAC}     *        eth0")
+    assert lease_holder_answers(Lease(MAC, IP), table) is False
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        f"{IP}       0x1         0x2         {OTHER_MAC}     *        eth0",  # another device
+        f"{IP}       0x1         0x0         00:00:00:00:00:00     *        eth0",  # unresolved
+        f"10.77.0.11       0x1         0x2         {MAC}     *        eth0",  # another address
+        f"{IP}       0x1         zz         {MAC}     *        eth0",
+        f"{IP}       0x1",
+        "",
+    ],
+)
+def test_an_answer_from_anything_but_the_leases_mac_does_not_count(tmp_path, monkeypatch, row):
+    answering(monkeypatch, None)
+    assert lease_holder_answers(Lease(MAC, IP), arp_table(tmp_path, row)) is False
+
+
+def test_an_unreadable_arp_table_is_no_answer(tmp_path, monkeypatch):
+    answering(monkeypatch, None)
+    assert lease_holder_answers(Lease(MAC, IP), tmp_path / "missing") is False
 
 
 def test_read_lease_with_no_clock_ignores_expiry(tmp_path):
