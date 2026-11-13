@@ -125,7 +125,7 @@ at a console or with C56's procedure, save the new address in the portal, set it
 
 # Part A. Install and get back in
 
-## C49. Copy the code and run the installer. NOT YET RUN.
+## C49. Copy the code and run the installer. PASS 2026-11-13.
 
 *Agent.* The node is still on its old build, and the old firewall is live, so SSH works as before. First, the state
 it starts from:
@@ -183,11 +183,15 @@ the hash matches; the last `Storage=` is `persistent`, after any Raspberry Pi OS
 describes. **Do not reboot, and leave `frigate-spike` in place until C55.** Also run C01 of the README now.
 
 ```
-C49  date ________  rc, first run ___  rc, second run ___  Files changed ___
-     output ______________________________________________________________  result ________
+C49  date 2026-11-13  rc, first run 0  rc, second run 0  Files changed 0 (17 on the first run)
+     output READY on both runs; hef hash matches; driver 4.21.0; Tailscale gone; journald persistent; no `Wired connection 1`
+     notes: run at a different site from the first bring-up, with the uplink profile edited on the card. The laptop's
+     Ethernet share on eth0 took the default route and blocked NTP (clock 8 days behind) until eth0 was disconnected.
+     `sudo` prints "unable to resolve host" for the node name (no /etc/hosts line). `modinfo` needs /usr/sbin for kit-1.
+     C01 rerun with the new firewall file: nft rc=0, verify rc=0, syntax check OK, network-pre.target.  result PASS
 ```
 
-## C50. Relay bundle on the laptop. NOT YET RUN.
+## C50. Relay bundle on the laptop. PASS 2026-11-13.
 
 *Agent.* A wildcard bind fails on any port a host service already holds, on any address. Check what this laptop runs.
 The commands below assume it holds some of these, so they use API port 8081 and bind the broker and NTP to the LAN
@@ -218,7 +222,9 @@ Pass: `api`, `netguard`, `mediamtx`, `chrony` and `mosquitto` all up, `central_c
 a separate check if a Pi becomes the central host.
 
 ```
-C50  date ________  output ___________________________________________________  result ________
+C50  date 2026-11-13  output api, netguard, mediamtx, chrony, mosquitto up; central_check ok;
+     broker.connected true, guard_ready true, nodes []. API on port 8082, because bettercap holds 127.0.0.1:8081
+     on this laptop, so the helpers use 8082.  result PASS
 ```
 
 ## C51. A backup way back in. NOT YET RUN.
