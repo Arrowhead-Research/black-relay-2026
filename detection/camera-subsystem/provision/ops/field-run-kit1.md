@@ -259,7 +259,7 @@ console login fails.** The next check can leave a node nobody can reach without 
 C51  date ________  console login ___  sudo ___  card reader ___  result ________
 ```
 
-## C52. First reboot, through the portal, with no button. NOT YET RUN.
+## C52. First reboot, through the portal, with no button. NOT RUN AS WRITTEN 2026-11-13.
 
 **The setup button is unwired,** so the README's "hold the button at boot" cannot be done. The daemon opens the full
 portal on a boot with no saved config, and "no config" is defined as no WiFi profile or no hostname. So moving the WiFi
@@ -361,11 +361,17 @@ Pass, all of these:
 C51, and stop.
 
 ```
-C52  date ________  AP seen after ___ s  saved, joined after ___ s  heartbeat after ___ s
-     output ______________________________________________________________  result ________
+C52  date 2026-11-13  AP seen after n/a  saved, joined after n/a  heartbeat after under 60 s
+     output The portal was NOT used, so this check stays open. The node was power-cycled before C51, which applied the
+     firewall with an empty set and locked SSH out. Recovery was by SD card (C51's second route): the laptop's address
+     went into central-hosts.nft. The broker was then saved over SSH through NodeStore.save, the portal's own code
+     path, followed by a reboot. After it: state provisioned; the set, the file and bridge.yaml hold the laptop;
+     SSH seen from the laptop; uplink on wlan0, no `Wired connection 1`, no docker0; services active, frigate static,
+     wait-online masked; NTP yes from the laptop; journal on disk; node in `nodes` with camera_link_state no_camera.
+     Still to show: the portal form itself, and `ap_up + config_received -> joining`.  result OPEN
 ```
 
-## C53. Docker and systemd reach, under the hardening, as real root. NOT YET RUN.
+## C53. Docker and systemd reach, under the hardening, as real root. PASS 2026-11-13.
 
 *Agent.* If this fails, `detector_ok` stays false for good, with a reason, and Frigate may never start. It has been
 shown only under a container's root. The camera stays out. The script takes the sandbox from the installed units,
@@ -385,10 +391,11 @@ show restarts from before the save, if it could not use the old `bridge.yaml`: r
 to read yet: C59 shows `log_read_at` advancing on the running daemon.
 
 ```
-C53  date ________  failures ___  output _____________________________________  result ________
+C53  date 2026-11-13  failures 0  output six `ok` lines; state no_camera; NRestarts 0 0 0; no SECCOMP or
+     AppArmor denials  result PASS
 ```
 
-## C54. The DHCP unit, under its hardening, as real root. NOT YET RUN.
+## C54. The DHCP unit, under its hardening, as real root. PARTLY RUN 2026-11-13, WITH A DEFECT.
 
 *Owner:* plug a **laptop's USB Ethernet dongle** into `eth0`, not the camera. A lease costs the camera nothing if this
 fails, but this way no adoption starts at all. Any device that asks for DHCP will do. If there is none, use the
@@ -422,11 +429,23 @@ the 60 s backoff. *Proposed:* 10 s. Record the real number either way.
 removes it.
 
 ```
-C54  date ________  user ___  CapEff ___  lease ___  carrier to serving ___ s
-     output ______________________________________________________________  result ________
+C54  date 2026-11-13  user not read  CapEff not read  lease 10.77.0.10 to the camera  carrier to serving not timed
+     output No dongle was to hand, so the camera was used. The unit serves, and gave 10.77.0.10 with the link up.
+     DEFECT: the daemon wipes a lease the camera has just been given. dnsmasq is already running when the carrier
+     rises, the camera asks within seconds, and the next tick (5 s) then resets DHCP and deletes the lease file.
+     Seen three times: ACK at :49.42 and reset at :51.49; ACK at :51.37 and reset at :51.69; OFFER at :04.99 and
+     reset in the same second, where the camera's retry then won. After a lost race the camera holds the address
+     and does not ask again until it renews, at 30 min, so the node reports no_camera for that long.
+     With no link the unit exits 2 with "unknown interface eth0" and restarts on its backoff, as expected.
+     Process user, CapEff and the renewal are still to read.  result FAIL (lease wiped after the grant)
+     FIXED the same day, in cameralink/daemon.py: before a wipe the daemon dials the lease's address and reads the
+     kernel's ARP table, and keeps the lease of a camera that answers with the lease's MAC. Rerun on kit 1 under
+     the unit's sandbox, with the link taken down and up from the node: ACK at :20.78, and the tick at :22.74 logged
+     "answers at 10.77.0.10, so its lease is kept"; adopting 2 s later and adopted after 51 s, with no restart of
+     dnsmasq. A factory camera's first plug-in is still to rerun.
 ```
 
-## C55. Real HailoRT lines at clean start and stop. NOT YET RUN.
+## C55. Real HailoRT lines at clean start and stop. PASS WITH A NOTE 2026-11-13.
 
 A line matching camera-link's pattern at a clean start or stop **restarts Frigate every 10 minutes** on a healthy node,
 and the pattern was written from Frigate's source, not its real output. So read the real thing, before adoption, with
@@ -455,8 +474,10 @@ match at a clean start or stop **stops the run**: the pattern or Frigate needs c
 C59 repeats this with the real unit.
 
 ```
-C55  date ________  matches at start ___  at stop ___
-     hailo lines ________________________________________________________  result ________
+C55  date 2026-11-13  matches at start 0  at stop 0
+     hailo lines none at all: Frigate 0.18.2 printed no line with `hailo` in it in 120 s of a clean run or at stop,
+     and no line naming a detection process, so nothing here shows the detector came up. Frigate itself started
+     cleanly. C59 must show the detector on the real unit.  result PASS (no false match), detector unproven
 ```
 
 ## C56. Re-provision with no button, on a provisioned node. NOT YET RUN.
@@ -533,7 +554,7 @@ cam_stream() { sudo docker exec -e STREAM="$1" -e ACTION="$2" frigate sh -c '
   eval "$ACTION"'; }
 ```
 
-## C57. A factory camera is adopted with no operator action, with timings. NOT YET RUN.
+## C57. A factory camera is adopted with no operator action, with timings. PASS 2026-11-13, on the third run, after three fixes.
 
 Plan C45. Also: real `SetNetPort`, `disable_onvif`, `set_clock`, login right after `ModifyUser`, and the 45 s settle.
 
@@ -585,8 +606,32 @@ Fill in the timings. They are the `Tracker for Task 8 bench` items, and later co
 | `adopted` to Frigate's first segment | |
 
 ```
-C57  date ________  ports before ________  final state ________
-     output ______________________________________________________________  result ________
+C57  date 2026-11-13  ports before 9000 only, after the pinhole reset  final state adopted, reason null
+     output Not unattended. (1) C54's defect left the node at no_camera for 5 min, until the wiped lease line was
+     written back by hand. (2) The first pass then stopped: `password changed` at +51 s, `adoption stopped: ApiError`
+     0.9 s later, state failed. The camera rebooted by itself 17 s after that, and the second pass, on the new link
+     generation, reached adopted 46 s after its lease. So the login right after ModifyUser did not work at first try,
+     and the log names no call. (3) The camera's overlay clock read 8 h ahead of UTC after adoption: Time is still
+     to read with cam_read. After adoption: Frigate healthy, camera_fps 15.0, Hailo inference 8.25 ms, segments
+     written, and camera_online, recording_ok and detector_ok all true at central 64 s after `adopted`.
+     Live view through central MediaMTX: h264, 2304x1296, 25 fps. Timings table not filled: no clock on the cable.
+     The node's WiFi address also moved during this check (a new DHCP lease after a reassociation), and central
+     followed it from the heartbeat.  result FAIL
+     Since then: (3) is explained and fixed. A SetTime that also moves the zone from the factory 28800 lands 8 h
+     out, and the same write again reads right (shown on the camera), so set_clock now reads the clock back and
+     writes once more if it is out. (2) is not explained: SetNetPort in either direction, on the adopted camera,
+     was accepted, the login after it worked, and the camera did not reboot. The log now names the refused call
+     and its code, so the next factory adoption will say which it is.
+     Second run, after the lease and clock fixes: unattended, adopted 2 min 32 s after the pinhole reset, but
+     the first pass again went failed, and the log named it: `GetIsp failed, rspCode -6`. By hand, twice: a SetEnc
+     that changes the mode is accepted, the next call gets -6, RTSP and port 9000 close within a second, and the
+     camera restarts about 15 s later and is back at about 34 s. Fix: set_streams is now the last step.
+     Third run, with that fix: no_camera, adopting (+22 s), `password changed` (+70 s), adopted (+73 s), with no
+     failed and no warning; then the camera's own restart: no_camera (+88 s), "its lease is kept", adopting,
+     adopted (+149 s). Ports before adoption: 9000 only. After it: camera clock within 1 s of the node's UTC, zone 0;
+     RTSP on, ONVIF off, P2P, UPnP and NTP off; main 2304*1296 at 25, sub 640*480 at 15; NRestarts 0 0 0; Frigate
+     healthy at 15 fps; camera_online, recording_ok and detector_ok true at central 38 s after the last `adopted`.
+     Not read: the file modes, and the timings table, which needs a clock on the cable.  result PASS
 ```
 
 ## C58. `set_streams` on the real camera, and h264 kept after the mode change. NOT YET RUN.
@@ -957,7 +1002,7 @@ detection runs on a walk, and a heartbeat reaches `nodes`. No journal line waits
 C72  date ________  output ___________________________________________________  result ________
 ```
 
-## C73. A person produces `camera.detection.v0` on the central broker. NOT YET RUN.
+## C73. A person produces `camera.detection.v0` on the central broker. PARTLY RUN 2026-11-13: the event arrives.
 
 Plan C50. *Owner* walks through. *Agent*:
 
@@ -982,7 +1027,11 @@ Pass: `object_start`, `object_end`, and some `object_update`, with `label` `pers
 typed name, or empty out of view; the API has the same `event_id`s; times right to a second or two.
 
 ```
-C73  date ________  count ___  events ________  valid ___  result ________
+C73  date 2026-11-13  count 6 in the first 2 s  events object_update, label person  valid not checked against the schema
+     One walk in view. Frigate made one person event, top score 0.84, in the node's zone. The central API held six
+     `camera.detection.v0` messages for it within 2 s, confidence 0.71 to 0.82, with bbox, zone and a snapshot URL.
+     Model yolov6n.hef at 320x320 on the Hailo. Still to do: read the broker with central_sub, validate against the
+     schema, and see the end event.  result PARTLY RUN, the path works
 ```
 
 ## C74. Stream, snapshot, and who can reach the node. NOT YET RUN.
