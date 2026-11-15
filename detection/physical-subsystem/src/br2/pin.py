@@ -41,6 +41,23 @@ from pathlib import Path
 log = logging.getLogger("br2.pin")
 
 PIN_FILE = "panel_pin.json"
+_ID12 = re.compile(r"[A-Fa-f0-9]{12}")
+
+
+def pki_folders(pki_dir: str | os.PathLike) -> tuple[Path, list[Path]]:
+    """Where the pairing material lives. Looks in `<pki_dir>/<12hex>/`, then `<pki_dir>/pki/<12hex>/` (the layout
+    qolsys-controller writes: given D it stores `D/pki/<12hex>/`), else the
+    pki dir itself (flat). Returns (container, identity folders found in it); the container holds the identity folder
+    and is where the pin file lives, so either spelling of the path finds the same pin."""
+    root = Path(pki_dir)
+    for c in (root, root / "pki"):
+        try:
+            found = sorted(d for d in c.iterdir() if d.is_dir() and _ID12.fullmatch(d.name))
+        except OSError:
+            continue
+        if found:
+            return c, found
+    return root, []
 
 
 class PinMismatch(ssl.SSLError):
@@ -136,7 +153,7 @@ def fmt(fp: str | None) -> str:
 class PanelPin:
     def __init__(self, pki_dir: str | os.PathLike, preset: str | None = None, accept_rotation: bool = False,
                  source: str = "tofu", mode: str = "required", owner: str | None = None):
-        self.dir = Path(pki_dir)
+        self.dir = pki_folders(pki_dir)[0]
         self.path = self.dir / PIN_FILE
         self.preset = norm_hex(preset)
         if preset and not self.preset:

@@ -66,3 +66,6 @@ captures/
 # harness run output
 harness/work/
 harness/certs/
+
+# bench run (scripts/bench.sh)
+bench/

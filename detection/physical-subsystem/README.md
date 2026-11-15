@@ -384,6 +384,28 @@ all services as separate processes under a supervisor. The script sets `BR2_IQ_P
 `BR2_IQ_PIN_ACCEPT_ROTATION=1`, because the harness has no pairing step and rotates the simulated panel's certificate on
 purpose; no shipped config or compose file does. Run just the team output with `python -m br2 service fusion --config <config.yaml>`.
 
+### Bench run without Docker
+
+For a developer machine (Linux or macOS) with a panel that is already paired and pinned, `scripts/bench.sh` runs the whole
+bridge (normalizer, outbound API, event log, consumer broker, team broker, fusion output) with no Docker:
+
+```sh
+scripts/bench.sh --panel-ip <ip> --pki-dir <dir>      # <dir> as given to the pairing tool; see Troubleshooting
+```
+
+It needs python3, openssl, curl and mosquitto (`brew install mosquitto` or `apt install mosquitto`; it also looks in the
+Homebrew `opt/mosquitto` folders). It uses the tree's own `.venv` (created and installed on first use; that is the only
+step that needs the network) and puts everything else in the git-ignored `bench/` folder: a test CA and server certificate,
+a fresh API key (printed once; only its key_id and argon2 hash are written), a TLS consumer broker on 127.0.0.1:18883, a
+plaintext "team" broker on 127.0.0.1:11883 standing in for the fusion broker, the generated config (`fusion.enabled: true`,
+API on 127.0.0.1:18443) and the event log. It keeps `iq_remote.pin_mode: required`: with no pin recorded it refuses to start
+and says to run `br2 repin --yes`. When the API is healthy it prints copy-paste commands for health and zones (curl), the SSE
+stream, `mosquitto_sub` on `detection/physical/#`, and a sqlite3 query of the last 10 events. Ctrl-C stops everything it
+started. `--simulator --ca-file <sim CA>` (harness simulator only, never a real panel) switches to `pin_mode: tofu` and
+trusts that CA. Tested here on Linux against the harness simulator (a simulated door open and close reached the API, the
+SQLite log and the team broker, and the team messages validated against `schemas/event.v0.schema.json`); macOS itself has
+not been tested.
+
 ## What the bridge ever sends to the panel
 
 Everything is enforced by an exact-match allow-list in code (`GuardedPanel`, `GuardedC4Writer`, `PairGuard`), checked
@@ -442,15 +464,13 @@ suites (unit, integration, harness): the interfaces, session handling, failover 
 log (replaying the log from seq 0 rebuilds the cache exactly; a seeded model test checks it), keypad exclusion, the team
 output against a real mosquitto.
 
-Against a real IQ5 Hub (7-inch, software 5.0.x, product type IQ_HUB_5), over the panel's own access point: only the
-reference tool `tools/pair_reference.py` (built on the qolsys-controller library) was used. It paired, then completed
-connect, pingevent, pair_status_request and syncdatabase, and listed one PowerG door contact (Open, battery 100%) and the
-IQ Remote zone, receiving a zone update for the IQ Remote zone. No live sensor state change has been observed yet, and no
-real sensor event has been seen end to end.
+Against a real IQ5 Hub (software 5.0.x), over the panel's own access point, in November 2026: the reference tool
+`tools/pair_reference.py` paired. The bridge's own code (`br2 repin`, `br2 snapshot`, `br2 watch`), reusing that pairing,
+connected with TLS 1.3 (TLS_AES_256_GCM_SHA384), completed the read-only sync, listed a PGP9303 door contact and the IQ
+Remote keypad zone, and reported one event per door open and one per door close.
 
-Not yet run against real hardware: `br2 pair`, `br2 snapshot`, `br2 watch`, the bridge's own IQ Remote adapter, the
-Control4 fallback, IQ Remote pairing over the Ethernet card, and anything about the motion delay beyond the one
-observation of 310 s.
+Not yet run on real hardware: `br2 pair`; the Docker Compose stack, the event log, the brokers and the API; motion and
+glass break sensors; the Control4 fallback; failover and reconnect behaviour (simulator only).
 
 The harness simulator does not implement pairing, so `br2 pair` is tested only against a small in-process fake panel
 (`tests/test_pairing.py`); `br2 snapshot` and `br2 watch` are tested against the simulator
@@ -479,7 +499,9 @@ relying on the stack; no result of such a run is recorded in this document.
 | Symptom | Check |
 |---|---|
 | `/v1/health` says `offline`, no zones | Panel address, pairing files in `pki_dir`, `docker compose logs iq-remote`. A `FileNotFoundError: no pairing key` means the pairing material is missing |
+| Pairing made with `tools/pair_reference.py`: "no pairing key" or "no pin" | Point `--pki-dir` (or `iq_remote.pki_dir`) at the folder you gave that tool (the material is found in `<dir>/pki/<12hex>/`; `<dir>/<12hex>/` and a flat folder work too, and the pin file lives next to the material, so either spelling finds the same pin). Private key files must be mode 600 |
 | TLS errors to the panel | The panel CA file (`<id>.qolsys`) must be the one from pairing. Certificates from another panel are refused by design |
+| Want to see the TLS version the panel negotiated | `snapshot`, `watch` and `repin` print it on stderr; in the real-hardware test the panel negotiated TLS 1.3 (TLS_AES_256_GCM_SHA384) |
 | Zones show `stale: true` | The adapter link is down or data is not being refreshed. See `links` in `/v1/health` |
 | Control4 never takes over | `control4.enabled`, host, `token_file`, `cert_sha256` all set; the integration enabled on the panel |
 | Bridge refuses to start: "mqtt.tls is false" | Intended. Use TLS, or `mqtt.insecure_dev: true` on a throw-away broker only |

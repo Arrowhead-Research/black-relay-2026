@@ -29,7 +29,7 @@ import aiomqtt
 from . import beacon
 from .. import config as C
 from .base import AdapterBase, OneWayViolation
-from ..pin import PanelPin, PinMismatch, pinned_socket_class
+from ..pin import PanelPin, PinMismatch, pinned_socket_class, pki_folders
 from ..keyperm import require_private_key
 
 log = logging.getLogger("br2.iq_remote")
@@ -219,10 +219,9 @@ def harden_paho(client: Any, guard: GuardedPanel) -> None:
 
 # ------------------------------------------------------------------ PKI / TLS
 def find_pki(pki_dir: str, ca_override: str | None) -> tuple[str, str, str, str]:
-    """Return (id12, key, secure, ca). Layout: <pki_dir>/<12hex>/<id>.{key,secure,qolsys} (or flat)."""
-    cand = [d for d in sorted(glob.glob(os.path.join(pki_dir, "*"))) if os.path.isdir(d)
-            and re.fullmatch(r"[A-Fa-f0-9]{12}", os.path.basename(d))]
-    base = cand[0] if cand else pki_dir
+    """Return (id12, key, secure, ca). Layout: <pki_dir>/<12hex>/<id>.{key,secure,qolsys}, else
+    <pki_dir>/pki/<12hex>/ (the qolsys-controller library layout), else flat."""
+    base = str(pki_folders(pki_dir)[1][0]) if pki_folders(pki_dir)[1] else pki_dir
     keys = glob.glob(os.path.join(base, "*.key"))
     if not keys:
         raise FileNotFoundError(f"no pairing key in {pki_dir}")
@@ -615,12 +614,14 @@ class IQRemoteAdapter(AdapterBase):
                     raw = {**cur.get("raw", {}), **o.get("raw", {})}
                     cur.update(o)
                     cur["raw"] = raw
-                    o = {**o, "raw": raw}
                 if emit and self.up:
+                    # the panel's update carries only the changed columns: emit the MERGED zone (name, battery,
+                    # partition... carried forward), never the bare delta
+                    z = {**self.zones[zid], "raw": dict(self.zones[zid].get("raw", {}))}
                     if op == "insert":
-                        await self.emit(t="zone", zone=self.zones[zid], new=True)
+                        await self.emit(t="zone", zone=z, new=True)
                     else:
-                        await self.emit(t="zone", zone=o)
+                        await self.emit(t="zone", zone=z)
             elif op == "delete":
                 zid_s = cv.get("zoneid") or (sel_args(d) or [None])[0]
                 if zid_s is None:

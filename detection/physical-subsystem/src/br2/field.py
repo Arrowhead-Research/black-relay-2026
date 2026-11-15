@@ -254,8 +254,13 @@ async def run_watch(settings: dict, minutes: float, out=None, err=None) -> int:
         nonlocal count
         line = _event_line(m)
         if line["event"] == "zone":                      # print only real changes
+            prev = seen.get(line["id"])
+            if prev:                                     # carry forward what a partial update left out
+                for f, old in zip(("status", "battery", "name", "partition_id"), prev):
+                    if line[f] is None:
+                        line[f] = old
             key = (line["status"], line["battery"], line["name"], line["partition_id"])
-            if seen.get(line["id"]) == key:
+            if prev == key:
                 return
             seen[line["id"]] = key
         count += 1
