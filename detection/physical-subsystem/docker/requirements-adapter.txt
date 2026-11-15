@@ -1,0 +1,5 @@
+# Direct dependencies (exact). The hashed, fully resolved set that the images install is requirements-adapter.lock.txt.
+# paho-mqtt: br2.outbound.fusion overrides two private paho internals (_handle_publish, _packet_read); re-test on any bump.
+aiomqtt==2.5.1
+paho-mqtt==2.2.0
+pyyaml==6.0.3

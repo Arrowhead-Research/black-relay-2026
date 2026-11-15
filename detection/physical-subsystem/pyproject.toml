@@ -1,0 +1,25 @@
+[project]
+name = "physical-subsystem"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["aiomqtt>=2.0", "paho-mqtt>=2.1,<2.3", "aiohttp>=3.9", "pyyaml", "argon2-cffi"]
+
+[project.optional-dependencies]
+pair = ["cryptography", "zeroconf"]          # only for `br2 pair` (run on the host, not in the service images)
+test = ["pytest", "pytest-asyncio", "cryptography", "jsonschema>=4.18", "httpx", "setuptools", "wheel"]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+br2 = ["schema.sql"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+markers = ["integration: needs mosquitto + subprocesses"]

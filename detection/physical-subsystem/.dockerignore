@@ -1,0 +1,12 @@
+tools/
+tests/
+.venv/
+.git/
+.pytest_cache/
+__pycache__/
+*.egg-info/
+data/
+deploy/data/
+deploy/certs/
+deploy/secrets/
+deploy/ca-private/

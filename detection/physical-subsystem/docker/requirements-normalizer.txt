@@ -1,0 +1,2 @@
+# Direct dependencies (exact). Hashed lock: requirements-normalizer.lock.txt
+pyyaml==6.0.3

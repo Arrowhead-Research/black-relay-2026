@@ -1,0 +1,23 @@
+# syntax=docker/dockerfile:1
+# BlackRelay F2 -- normalizer service image. Build context = repo root (f2-py-micro/).
+# Base image pinned by digest (python:3.12-slim, resolved 2026-11-15 from the Docker Hub index; multi-arch). Bump deliberately:
+#   docker buildx imagetools inspect python:3.12-slim   -> copy the new Digest, rebuild, run the tests.
+ARG PY_BASE=python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
+FROM ${PY_BASE}
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1
+RUN groupadd --gid 10000 br && useradd --uid 10004 --gid 10000 --no-create-home --shell /usr/sbin/nologin brnormalizer
+RUN mkdir -p /ipc /beacon /data /config /state && chown 10004:10000 /ipc /beacon /data /state
+COPY docker/requirements-normalizer.lock.txt /tmp/req.txt
+# optional corporate/intercepting-proxy CA for pip:  docker build --secret id=cabundle,src=/path/ca.pem ...
+RUN --mount=type=secret,id=cabundle,required=false \
+    sh -c 'if [ -f /run/secrets/cabundle ]; then export PIP_CERT=/run/secrets/cabundle; fi; pip install --require-hashes --no-deps -r /tmp/req.txt' && rm /tmp/req.txt
+WORKDIR /app
+COPY src/br2/__init__.py src/br2/__main__.py src/br2/cli.py src/br2/config.py src/br2/ipc.py src/br2/model.py src/br2/keyperm.py src/br2/pin.py src/br2/schema.sql /app/br2/
+COPY src/br2/normalizer/ /app/br2/normalizer/
+ENV PYTHONPATH=/app BR2_IPC_IQ_DIR=/ipc-iq BR2_IPC_C4_DIR=/ipc-c4 BR2_IPC_OUT_DIR=/ipc-out BR2_BEACON_DIR=/beacon BR2_OUT_STATE_DIR=/state
+# Build-time smoke test: import the service's entry modules, so a dependency missing from the lock file fails the BUILD
+# (not the first start of the container). Regenerate the locks with docker/relock.sh.
+RUN python -c "import br2.cli, br2.normalizer.service"
+USER 10004:10000
+ENTRYPOINT ["python", "-m", "br2"]
+CMD ["service", "normalizer", "--config", "/config/config.yaml"]

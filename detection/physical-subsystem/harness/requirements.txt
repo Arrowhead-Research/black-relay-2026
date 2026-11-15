@@ -1,0 +1,6 @@
+pytest
+paho-mqtt
+httpx
+cryptography
+pyyaml
+argon2-cffi
