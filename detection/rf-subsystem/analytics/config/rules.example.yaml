@@ -1,0 +1,58 @@
+# Alert rules for rf-analytics (DESIGN.md 7.3.8). Zone names match
+# simulator/sites/dev-site.yaml; adjust them for the real site.
+#
+# Common keys: id, type, severity (info|low|medium|high|critical), enabled,
+# cooldown_s (per emitter; per site for camera_cue), zones, emitter_types,
+# description. See src/rfanalytics/alerts.py for each rule type's keys.
+
+# Local time zone for `hours` windows. UTC matches the simulator scenarios;
+# set the site's zone (e.g. America/New_York) for real deployments.
+timezone: UTC
+
+rules:
+  - id: loiter-exterior
+    type: loiter
+    description: Someone or something stays near the building's exterior.
+    severity: medium
+    zones: [north-entrance, east-lot, west-yard]
+    # Below the ~15 min address rotation of phones, so a single address
+    # can reach it (see analytics/README.md findings).
+    min_dwell_s: 600
+    cooldown_s: 3600
+
+  - id: new-device-overnight
+    type: new_device
+    description: A never-before-seen stable device appears overnight.
+    severity: low
+    hours: { start: "22:00", end: "05:00" }
+    min_duration_s: 120      # ignore traffic passing on the road
+    learn_s: 3600            # build a baseline for the first hour
+    include_randomized: false
+
+  - id: repeat-visitor
+    type: repeat_visitor
+    description: The same stable device returns repeatedly.
+    severity: medium
+    min_visits: 3
+    window_s: 86400
+
+  - id: watchlist
+    type: watchlist
+    severity: high
+    emitter_ids: []          # e.g. tpms:1a2b3c4d, aa:bb:cc:dd:ee:ff
+    ssids: ["FBI Surveillance Van"]
+
+  - id: node-offline
+    type: node_offline
+    severity: high
+    # Proxy until node heartbeats exist: a quiet site can also go silent.
+    silence_s: 300
+
+  - id: tpms-camera-cue
+    type: camera_cue
+    description: Cue cameras when a vehicle's tire sensors are heard.
+    emitter_types: [tpms]
+    cooldown_s: 60
+    # Every passing car triggers a cue (hundreds per day on a busy road).
+    # To cue only vehicles heard near the building, list the hearing node zones:
+    # zones: [east-lot, north-entrance]

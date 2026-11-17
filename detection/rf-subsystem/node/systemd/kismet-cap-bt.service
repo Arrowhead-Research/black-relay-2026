@@ -1,0 +1,25 @@
+[Unit]
+Description=Kismet remote capture (Bluetooth/BLE)
+Documentation=file:///etc/rf-node/rf-node.env
+Wants=network-online.target
+After=network-online.target bluetooth.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/rf-node/rf-node.env
+Environment=CENTRAL_HOST=rf-central
+Environment=CENTRAL_PORT=3501
+Environment=NODE_NAME=rf-node-01
+Environment=BT_IFACE=hci0
+Environment=BT_SOURCE_OPTS=
+# Picks the adapter by BT_ADDR / BT_PREFER (see rf-node.env), waits for it,
+# keeps it awake and powered, then runs kismet_cap_linux_bluetooth.
+ExecStart=/usr/local/sbin/rf-bt-capture
+Restart=always
+RestartSec=5
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

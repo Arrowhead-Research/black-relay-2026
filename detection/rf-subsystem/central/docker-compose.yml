@@ -1,0 +1,126 @@
+# RF subsystem central stack (DESIGN.md, section 7.1).
+#
+#   cp .env.example .env   # then edit
+#   docker compose up -d --build
+#
+# BIND_ADDR controls where ports are exposed on the host. Use 127.0.0.1 for
+# local development or the host's Tailscale IP (100.x.y.z) on the tailnet.
+# Never bind to 0.0.0.0 on a host with a public interface.
+
+name: rf-central
+
+services:
+  kismet-server:
+    build:
+      context: ./kismet
+      args:
+        KISMET_VERSION: ${KISMET_VERSION:-2026-10-R1}
+    image: black-relay/rf-kismet-server:${KISMET_VERSION:-2026-10-R1}
+    restart: unless-stopped
+    environment:
+      KISMET_ADMIN_USER: ${KISMET_ADMIN_USER:-}
+      KISMET_ADMIN_PASSWORD: ${KISMET_ADMIN_PASSWORD:-}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:2501:2501"
+      - "${BIND_ADDR:-127.0.0.1}:3501:3501"
+    volumes:
+      - kismet-logs:/var/lib/kismet
+      - kismet-home:/root/.kismet
+    healthcheck:
+      # 401 means the server is up but wants auth; that is healthy.
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://localhost:2501/system/status.json | grep -qE '200|401'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  mqtt:
+    image: eclipse-mosquitto:2.0.22
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:1883:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mqtt-data:/mosquitto/data
+
+  # Live analytics: polls kismet-server, runs alert rules, publishes alerts,
+  # camera cues and node status to the broker. Opt in with
+  #   docker compose --profile analytics up -d --build
+  # Site, rules and friendly files come from ../analytics/config (mounted
+  # read-only); point RF_SITE / RF_RULES / RF_FRIENDLY at your real files in .env.
+  # It reuses the Kismet admin login from .env (read-only use: REST polling).
+  rf-analytics:
+    profiles: [analytics]
+    build:
+      context: ../analytics
+    image: black-relay/rf-analytics:dev
+    restart: unless-stopped
+    depends_on:
+      kismet-server:
+        condition: service_healthy
+      mqtt:
+        condition: service_started
+    environment:
+      KISMET_USER: ${KISMET_ADMIN_USER:-}
+      KISMET_PASSWORD: ${KISMET_ADMIN_PASSWORD:-}
+    command:
+      - live
+      - --kismet-url=http://kismet-server:2501
+      - --site=/config/${RF_SITE:-site.wbt-nodes.example.yaml}
+      - --rules=/config/${RF_RULES:-rules.wbt-live.example.yaml}
+      - --friendly=/config/${RF_FRIENDLY:-friendly.wbt-nodes.example.yaml}
+      - --publish-host=mqtt
+      - --topic-prefix=${RF_TOPIC_PREFIX:-detection/rf}
+      - --outbox=/data/rf-outbox.jsonl
+      - --events-out=/data/events.jsonl
+    volumes:
+      - ../analytics/config:/config:ro
+      - rf-analytics-data:/data
+
+  # WBT Console (web UI): live RF map, node placement, walls, calibration, and
+  # one workspace per building (Site menu: new, switch, export, clear, wipe).
+  # Opt in with
+  #   docker compose --profile console up -d --build
+  # then open http://<BIND_ADDR>:8080. Set CONSOLE_OPERATOR_PASSWORD and
+  # CONSOLE_ADMIN_PASSWORD in .env (unset = sign-in off). Site data is kept in
+  # the rf-console-data volume; ../console/site/layout.yaml (local, not
+  # committed) is the team template (node hardware, first site's layout).
+  rf-console:
+    profiles: [console]
+    build:
+      context: ..
+      dockerfile: console/Dockerfile
+    image: black-relay/rf-console:dev
+    restart: unless-stopped
+    depends_on:
+      kismet-server:
+        condition: service_healthy
+      mqtt:
+        condition: service_started
+    environment:
+      KISMET_URL: http://kismet-server:2501
+      KISMET_USER: ${KISMET_ADMIN_USER:-}
+      KISMET_PASSWORD: ${KISMET_ADMIN_PASSWORD:-}
+      CONSOLE_DATA: /data
+      CONSOLE_LAYOUT: /site/layout.yaml          # missing: falls back to the bundled example
+      CONSOLE_SITE: ${CONSOLE_SITE:-default}      # site to start on if none was chosen yet
+      CONSOLE_OPERATOR_PASSWORD: ${CONSOLE_OPERATOR_PASSWORD:-}
+      CONSOLE_ADMIN_PASSWORD: ${CONSOLE_ADMIN_PASSWORD:-}
+      CONSOLE_KISMET_LOGS: /kismet-data/logs      # read-only: calibration spots from packet logs
+      CONSOLE_DEMO: ${CONSOLE_DEMO:-}             # 1 = add synthetic emitters with known positions
+      CONSOLE_MQTT_HOST: ${CONSOLE_MQTT_HOST-mqtt}  # positions + node status out (set empty to turn off)
+      CONSOLE_TOPIC_PREFIX: ${RF_TOPIC_PREFIX:-detection/rf}
+      CONSOLE_NODE_TOKEN: ${CONSOLE_NODE_TOKEN:-}  # rf-node-agent heartbeats must send it (empty: accepted without)
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${CONSOLE_PORT:-8080}:8080"
+    volumes:
+      - ../console/site:/site:ro
+      - rf-console-data:/data
+      - kismet-logs:/kismet-data:ro
+
+volumes:
+  kismet-logs:
+  kismet-home:
+  mqtt-data:
+  rf-analytics-data:
+  rf-console-data:

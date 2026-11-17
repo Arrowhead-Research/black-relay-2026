@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WBT Console</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="logo" aria-hidden="true"></span>
+    <h1>WBT Console</h1>
+    <button id="site-btn" class="site-btn" aria-haspopup="true" aria-expanded="false"><span id="site-name">…</span><span class="caret">▾</span></button>
+  </div>
+  <div class="status">
+    <span class="pill" id="kismet-pill"><i></i><span>connecting…</span></span>
+    <span class="pill subtle" id="count-pill">0 devices</span>
+    <span class="pill warn" id="src-pill" hidden></span>
+    <span class="pill alert" id="alert-pill" hidden></span>
+    <div class="seg" id="mode" role="tablist"><button data-mode="live" class="on">Live</button><button data-mode="setup">Setup</button></div>
+    <button id="pause" class="btn">Pause</button>
+    <span class="pill warn" id="auth-off" hidden title="Set CONSOLE_OPERATOR_PASSWORD and CONSOLE_ADMIN_PASSWORD in central/.env">sign-in off</span>
+    <span class="user" id="user-box" hidden><span id="user-role"></span><button id="logout" class="btn small">Sign out</button></span>
+  </div>
+  <div id="site-menu" class="menu" hidden></div>
+</header>
+
+<main>
+  <section class="map-wrap">
+    <canvas id="map"></canvas>
+    <div class="overlay top-left"></div>
+    <div class="overlay top-center" id="setup-bar" hidden>
+      <button id="nodes-btn" class="btn">Nodes</button>
+      <button id="areas-btn" class="btn">Areas</button>
+      <button id="calibrate" class="btn">Calibrate</button>
+    </div>
+    <div id="nodes-bar" class="walls-bar" hidden>
+      <span id="nodes-chips" class="nodes-chips"></span>
+      <button class="btn small active" id="nodes-done">Done</button>
+      <div id="nodes-geo" class="nodes-geo"></div>
+      <div id="nodes-hint" class="walls-hint"></div>
+    </div>
+    <div id="areas-bar" class="walls-bar" hidden>
+      <input id="area-name" placeholder="Area name" size="14" maxlength="40" autocomplete="off">
+      <label class="muted">Linger <select id="area-linger"><option value="120">2 min</option><option value="300" selected>5 min</option><option value="900">15 min</option><option value="3600">1 h</option></select></label>
+      <span id="area-chips" class="nodes-chips"></span>
+      <button class="btn small active" id="areas-done">Done</button>
+      <div id="areas-hint" class="walls-hint"></div>
+    </div>
+    <div class="overlay bottom-right" id="cursor-readout"></div>
+    <div id="tooltip" hidden></div>
+  </section>
+
+  <aside>
+    <section class="card" id="alerts-card" hidden>
+      <div class="list-head"><h2>Alerts</h2><button id="alerts-ack" class="btn small">Acknowledge all</button></div>
+      <ul id="alert-list" class="alert-list"></ul>
+    </section>
+    <section class="card" id="calib-card" hidden>
+      <h2>Calibration</h2>
+      <div class="cal-row"><span class="muted">Device</span> <span id="cal-ref">select in list</span></div>
+      <div class="cal-row"><span class="muted">Spot</span> <span id="cal-spot">click map</span>
+        <select id="cal-acc" class="cal-acc"><option value="0.5">exact</option><option value="2" selected>±2 ft</option><option value="5">±5 ft</option></select></div>
+      <div class="cal-row"><button id="cal-record" class="btn" disabled>Record</button> <span id="cal-progress" class="muted"></span></div>
+      <div id="cal-quality" class="cal-quality"></div>
+      <div id="cal-suggest" class="cal-suggest"></div>
+      <div id="cal-live" class="cal-live"></div>
+      <div class="cal-sub">RSSI, 60 s</div>
+      <canvas id="cal-trace" height="90"></canvas>
+      <div id="cal-warn" class="cal-warn" hidden></div>
+      <details id="cal-points-box" class="cal-points-box" hidden><summary id="cal-points-sum">Spots</summary><table id="cal-points"></table></details>
+      <div class="cal-sub">RSSI vs distance</div>
+      <canvas id="cal-scatter" height="130"></canvas>
+      <div id="cal-fit" class="cal-fit muted"></div>
+      <details id="cal-cands-box" class="cands" hidden><summary id="cal-cands-sum">Candidates</summary><table id="cal-cands"></table></details>
+      <div class="row">
+        <button id="cal-clear" class="btn small">Delete spots</button>
+        <button id="cal-rebuild" class="btn small" title="Re-read every spot from Kismet's log (where it is still available)">Rebuild from log</button>
+      </div>
+      <details id="cal-deleted-box" class="cal-deleted" hidden><summary id="cal-deleted-sum">Deleted</summary><div id="cal-deleted"></div></details>
+    </section>
+    <section class="card" id="selected-card" hidden>
+      <div id="selected">
+        <div class="sel-head">
+          <span class="type-dot" id="sel-dot"></span>
+          <div>
+            <div class="sel-name" id="sel-name"></div>
+            <div class="mono muted" id="sel-id"></div>
+          </div>
+        </div>
+        <div class="kv">
+          <div><span>Position</span><b id="sel-pos">—</b></div>
+          <div><span>Nodes</span><b id="sel-nodes">—</b></div>
+          <div id="sel-truth-box" hidden><span>Error</span><b id="sel-truth">—</b></div>
+          <div id="sel-geo-box" class="wide" hidden><span>Lat, lon</span><b id="sel-geo" class="mono">—</b></div>
+        </div>
+        <div id="sel-mark" class="mark-row"></div>
+        <div id="sel-bars" class="bars"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="row">
+        <label class="toggle"><input type="checkbox" id="rings" checked><span>Rings</span></label>
+        <label class="toggle"><input type="checkbox" id="trail" checked><span>Trail</span></label>
+        <label class="toggle"><input type="checkbox" id="labels"><span>Labels</span></label>
+        <label class="toggle"><input type="checkbox" id="hide-friendly"><span>Hide friendly</span></label>
+      </div>
+        </section>
+
+    <section class="card grow">
+      <div class="list-head">
+        <h2>Devices</h2>
+        <input id="search" type="search" placeholder="Filter">
+      </div>
+      <div class="chips" id="type-chips"></div>
+      <ul id="device-list"></ul>
+    </section>
+  </aside>
+</main>
+<div id="login" class="login" hidden>
+  <form id="login-form" class="login-card">
+    <h2>WBT Console</h2>
+    <input id="login-pw" type="password" autocomplete="current-password" placeholder="Password" required>
+    <button class="btn active" type="submit">Sign in</button>
+    <div id="login-err" class="cal-warn" hidden></div>
+  </form>
+</div>
+<script src="app.js"></script>
+<script src="calib.js"></script>
+<script src="walls.js"></script>
+<script src="alerts.js"></script>
+<script src="console.js"></script>
+</body>
+</html>

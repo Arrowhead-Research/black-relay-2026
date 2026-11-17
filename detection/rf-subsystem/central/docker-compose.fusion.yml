@@ -1,0 +1,22 @@
+# Shared sensor-fusion host: join the teams' "fusion" network and publish only
+# what must be reachable from outside Docker. Enable it in .env with
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.fusion.yml
+# Other teams reach our broker as rf-mqtt:1883 on the fusion network. Claim
+# every published port in the host's PORTS.md first.
+
+services:
+  kismet-server:
+    ports: !override
+      - "${BIND_ADDR:-127.0.0.1}:3501:3501"   # node capture helpers
+      - "127.0.0.1:2501:2501"                  # Kismet UI/REST: SSH tunnel only
+
+  mqtt:
+    ports: !reset []
+    networks:
+      default: {}
+      fusion:
+        aliases: [rf-mqtt]
+
+networks:
+  fusion:
+    external: true
