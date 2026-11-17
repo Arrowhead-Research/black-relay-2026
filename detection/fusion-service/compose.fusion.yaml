@@ -1,0 +1,10 @@
+# docker compose -f compose.yaml -f compose.fusion.yaml up -d --build
+services:
+  fusion:
+    networks:
+      default: {}
+      fusion: {}
+networks:
+  fusion:
+    external: true
+    name: ${FUSION_NETWORK_NAME:-fusion}

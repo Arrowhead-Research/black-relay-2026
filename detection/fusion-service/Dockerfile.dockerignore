@@ -1,0 +1,18 @@
+# Dockerfile-specific ignore rules apply to the parent detection/ build context.
+**
+!fusion-service/
+!fusion-service/pyproject.toml
+!fusion-service/uv.lock
+!fusion-service/src/
+!fusion-service/src/**
+!camera-subsystem/
+!camera-subsystem/bridge/
+!camera-subsystem/bridge/schemas/
+!camera-subsystem/bridge/schemas/*.json
+!rf-subsystem/
+!rf-subsystem/schemas/
+!rf-subsystem/schemas/*.json
+!physical-subsystem/
+!physical-subsystem/schemas/
+!physical-subsystem/schemas/*.json
+**/__pycache__
