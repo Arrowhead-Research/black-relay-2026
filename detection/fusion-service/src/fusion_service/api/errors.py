@@ -38,7 +38,12 @@ COMMON_ERROR_RESPONSES = {
 
 
 def error_response(
-    status_code: int, code: str, *, message: str | None = None, headers=None, **extra
+    status_code: int,
+    code: str,
+    *,
+    message: str | None = None,
+    headers=None,
+    **extra,
 ) -> JSONResponse:
     body = ErrorResponse(error=ErrorBody(code=code, message=message, **extra))
     return JSONResponse(
@@ -49,6 +54,8 @@ def error_response(
 
 
 async def _validation_error(request: Request, error: RequestValidationError) -> JSONResponse:
+    # Deliberately code-only: error.errors() carries the caller's input values and pydantic's
+    # wording, neither of which belongs in the public contract. See API-CONTRACT.md, Errors.
     return error_response(422, "invalid_request")
 
 

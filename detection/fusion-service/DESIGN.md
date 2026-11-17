@@ -132,7 +132,11 @@ operations roll back on failure; new reliable messages remain unacknowledged for
 
 YAML settings reference secrets by environment-variable name. Missing required values fail
 startup. Duplicate YAML mapping keys are rejected instead of silently overriding connections.
-Bearer authentication protects all REST data routes; docs/OpenAPI are public. Default
+Bearer authentication protects all REST data routes; docs/OpenAPI are public. Error responses
+carry reason codes only. Request validation failures in particular do not include the offending
+input or the validation library's messages: the former reflects caller-controlled data, the latter
+would tie the public contract to pydantic's wording. This mirrors the ingest path, which logs reason
+codes and never payloads or exception text. Default
 host binding is loopback. MQTT supports a verified CA and optional client certificate. Deployment
 provides any HTTP TLS termination.
 

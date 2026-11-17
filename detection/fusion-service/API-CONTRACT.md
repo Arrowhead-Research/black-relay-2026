@@ -184,6 +184,8 @@ API queries return 503 when storage is unavailable.
 | 422 | `invalid_request` | Invalid query type, enum or limit |
 | 503 | `storage_unavailable` | Database cannot serve the query |
 
-Errors use `{"error":{"code":"..."}}` with optional explanatory fields. Undocumented paths
+Errors use `{"error":{"code":"..."}}` with optional explanatory fields. A 422 carries only the
+code: the response never echoes the rejected parameter value or the validator's own wording, so
+consumers should check the documented query parameters rather than parse a message. Undocumented paths
 return the framework's normal 404. OpenAPI describes the generated envelope/response models;
 this document defines timing, delivery and data semantics.
