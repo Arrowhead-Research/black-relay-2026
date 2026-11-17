@@ -43,7 +43,7 @@ wheels = [
 ]
 
 [[package]]
-name = "black-relay-fusion"
+name = "black-relay-event-fusion-api"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
