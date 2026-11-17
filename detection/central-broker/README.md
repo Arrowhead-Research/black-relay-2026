@@ -5,7 +5,8 @@ service reads from. This directory will hold its configuration: a Compose file, 
 configuration, an access-control template, a credentials script and this README. Nothing else
 runs here; the broker carries events and status, never video.
 
-Status: proposal. No files other than this README exist yet.
+Status: the broker files exist and start under Compose; nothing is deployed yet. See
+[RUNBOOK.md](RUNBOOK.md) for the step-by-step on the central node, the physical move and the RF move.
 
 ## 1. Rationale
 
@@ -74,7 +75,8 @@ change their own credential and ACL line by pull request here.
 | `compose.yaml` | One `mosquitto` service, hardened as the camera relay's is, publishing the VLAN listener | `camera-subsystem/relay/compose.yaml`, `mosquitto` service |
 | `mosquitto.conf` | `allow_anonymous false`, password file, ACL, persistence, queue and message size limits | `camera-subsystem/relay/mosquitto/mosquitto.conf` |
 | `aclfile` | Per-publisher write on its own prefix; fusion read on `detection/#` | `camera-subsystem/relay/mosquitto/aclfile`, extended |
-| `setup-credentials.sh` | Creates the password file from `.env`, one entry per client | `camera-subsystem/relay/setup-credentials.sh` |
+| `setup-credentials.sh` | Writes `.env` with one random password per client | `camera-subsystem/relay/setup-credentials.sh` |
+| `entrypoint.sh` | Builds the password and ACL files from `.env` inside the container at each start | `camera-subsystem/relay/mosquitto/entrypoint.sh` |
 | `.env.example` | Credential names, bind address, port | new |
 | `PORTS.md` | The one published port, claimed as the RF overlay asks | new |
 

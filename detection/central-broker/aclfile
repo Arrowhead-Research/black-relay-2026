@@ -1,0 +1,16 @@
+# Access control. User names come from .env; entrypoint.sh substitutes the @...@ markers.
+# Mosquitto denies anything not listed: a publisher cannot read, and cannot write outside its prefix.
+user @FUSION_USER@
+topic read detection/#
+
+user @PHYSICAL_USER@
+topic write detection/physical/#
+
+user @RF_USER@
+topic write detection/rf/#
+
+# Camera nodes, when they move here from the camera relay's broker: one block per node, as the
+# relay's aclfile has today. Nodes also read detection/rf/cues/camera.
+#   user camera-<node_id>
+#   topic write detection/camera/#
+#   topic read detection/rf/cues/camera
