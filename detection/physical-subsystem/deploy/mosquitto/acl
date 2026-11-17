@@ -1,0 +1,12 @@
+# ACL: ONLY the bridge may publish; every consumer is read-only. Anything not listed is denied.
+user blackrelay
+topic write blackrelay/v1/#
+topic write homeassistant/#
+
+user homeassistant
+topic read blackrelay/v1/#
+topic read homeassistant/#
+
+user nodered
+topic read blackrelay/v1/#
+topic read homeassistant/#

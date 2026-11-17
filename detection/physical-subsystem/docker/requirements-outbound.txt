@@ -1,0 +1,7 @@
+# Direct dependencies (exact). Hashed lock: requirements-outbound.lock.txt
+# paho-mqtt: br2.outbound.fusion overrides two private paho internals (_handle_publish, _packet_read); re-test on any bump.
+aiomqtt==2.5.1
+paho-mqtt==2.2.0
+aiohttp==3.14.5
+argon2-cffi==25.1.0
+pyyaml==6.0.3
