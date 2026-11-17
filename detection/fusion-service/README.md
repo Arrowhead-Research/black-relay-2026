@@ -34,6 +34,7 @@ fusion-service/
   Dockerfile.dockerignore   restricts the parent build context to code and schemas
   compose.yaml              API container and persistent data volume
   compose.fusion.yaml       optional existing fusion Docker network attachment
+  scripts/physical-sim-bench.sh  runs the physical simulator and bridge against a local team broker
   src/fusion_service/
     app.py                  create_app() factory and main() entrypoint (serve, check-config)
     runtime.py              builds store, ingest, connections and retention; starts and stops them
@@ -120,6 +121,44 @@ uv run --env-file .env fusion-service serve --config config.yaml --host 127.0.0.
 
 `check-config` checks YAML, required secret variables and reference schemas. It does not contact
 brokers or create the database. Missing storage/config/schema files fail startup clearly.
+
+### Local bench: the physical simulator
+
+`scripts/physical-sim-bench.sh` runs the physical subsystem's panel simulator and its bridge
+(`physical-subsystem/scripts/bench.sh --simulator`) against a plaintext team broker on
+`127.0.0.1:11883`, which is what `config.physical.example.yaml` expects. It needs the physical
+tree checked out beside this one, plus python3, openssl, curl and mosquitto; the first run creates
+`physical-subsystem/.venv`.
+
+Terminal 1, the simulator and bridge (Ctrl-C stops both):
+
+```sh
+scripts/physical-sim-bench.sh
+```
+
+Terminal 2, fusion against the physical-only config (the token is any non-empty string):
+
+```sh
+export FUSION_API_TOKEN=benchtoken
+uv run fusion-service serve --config config.physical.example.yaml --port 8090
+```
+
+Terminal 3, drive the simulated panel and read fusion back:
+
+```sh
+echo "zone 12 Open" > bench/sim.in      # zone 12 is "Front door"; zones 12-16 and 40 exist
+echo "zone 12 Closed" > bench/sim.in
+curl -s -H "Authorization: Bearer benchtoken" 'http://127.0.0.1:8090/api/v1/events?type=physical.event' | python3 -m json.tool
+curl -s -H "Authorization: Bearer benchtoken" http://127.0.0.1:8090/api/v1/nodes | python3 -m json.tool
+```
+
+Within a minute of the bridge starting, fusion holds a `physical.panel_status` and one
+`physical.zone_status` per zone, and `/api/v1/nodes` lists `physical-bridge-bench`. Each simulated
+change arrives as a `physical.event` (`zone_opened`, `zone_closed`) with `site_id: bench`, the
+bridge's `seq`/`prev_seq` chain and the source payload under `data`. `echo "iq outage" >
+bench/sim.in` drops the panel link and produces `zone_stale` events; `iq restore` brings it back.
+Stopping and restarting the broker while tripping zones shows the bridge's outbox replay arriving
+with the original ids, which fusion deduplicates.
 
 ### Central host containers
 

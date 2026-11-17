@@ -8,3 +8,4 @@ dist/
 config.yaml
 data/
 *.sqlite3*
+bench/
