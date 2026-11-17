@@ -1,0 +1,46 @@
+name: fusion-service
+services:
+  fusion:
+    build:
+      context: ..
+      dockerfile: fusion-service/Dockerfile
+    image: black-relay/fusion-service:dev
+    restart: unless-stopped
+    init: true
+    environment:
+      FUSION_DATABASE: /data/fusion.sqlite3
+      FUSION_CAMERA_SCHEMAS: /contracts/camera
+      FUSION_RF_SCHEMAS: /contracts/rf
+      FUSION_PHYSICAL_SCHEMAS: /contracts/physical
+      FUSION_API_TOKEN: ${FUSION_API_TOKEN:?Set FUSION_API_TOKEN in .env}
+      FUSION_CAMERA_MQTT_USER: ${FUSION_CAMERA_MQTT_USER:-}
+      FUSION_CAMERA_MQTT_PASSWORD: ${FUSION_CAMERA_MQTT_PASSWORD:-}
+    ports:
+      - "${FUSION_BIND_ADDRESS:-127.0.0.1}:${FUSION_API_PORT:-8090}:8090"
+    volumes:
+      - fusion-data:/data
+      - ${FUSION_CONFIG_FILE:-./config.yaml}:/config/config.yaml:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 45s
+    healthcheck:
+      # Broker outages degrade the API response but do not make its read API unavailable.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,json,urllib.request; r=urllib.request.Request('http://127.0.0.1:8090/api/v1/health',headers={'Authorization':'Bearer '+os.environ['FUSION_API_TOKEN']}); assert json.load(urllib.request.urlopen(r,timeout=3))['storage']['ready']"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+volumes:
+  fusion-data:
