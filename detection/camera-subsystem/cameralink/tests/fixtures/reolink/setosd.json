@@ -1,0 +1,35 @@
+{
+  "request": [
+    {
+      "cmd": "SetOsd",
+      "action": 0,
+      "param": {
+        "Osd": {
+          "bgcolor": 0,
+          "channel": 0,
+          "osdChannel": {
+            "enable": 1,
+            "name": "cam-8da040",
+            "pos": "Lower Right"
+          },
+          "osdTime": {
+            "enable": 1,
+            "pos": "Top Center"
+          },
+          "watermark": 1
+        }
+      }
+    }
+  ],
+  "http_status": 200,
+  "seconds": 0.12,
+  "response": [
+    {
+      "cmd": "SetOsd",
+      "code": 0,
+      "value": {
+        "rspCode": 200
+      }
+    }
+  ]
+}

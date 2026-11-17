@@ -1,0 +1,37 @@
+[project]
+name = "relayapi"
+version = "0.1.0"
+description = "Black Relay camera subsystem central API: node status, events and a proxy to each node's Frigate."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "httpx>=0.28,<0.29",
+    "jsonschema>=4.20",
+    "paho-mqtt>=2.2,<2.3",
+    "uvicorn>=0.32,<1",
+]
+
+[dependency-groups]
+dev = [
+    # Test-only: prove this package's proxy secret equals the one the node renders into Frigate,
+    # and the portal's node_id rule equals this package's. Never runtime dependencies of the API.
+    "cameralink",
+    "cameraprovision",
+    # Starlette's TestClient runs on this. The API itself and these tests' fakes use httpx.
+    "httpx2>=2.16.0",
+    "pytest>=8.0",
+]
+
+[tool.uv.sources]
+cameralink = { path = "../../cameralink", editable = true }
+cameraprovision = { path = "../../provision", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/relayapi"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

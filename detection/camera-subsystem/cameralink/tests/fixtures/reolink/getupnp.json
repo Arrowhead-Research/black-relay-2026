@@ -1,0 +1,32 @@
+{
+  "request": [
+    {
+      "cmd": "GetUpnp",
+      "action": 1,
+      "param": {}
+    }
+  ],
+  "http_status": 200,
+  "seconds": 0.08,
+  "response": [
+    {
+      "cmd": "GetUpnp",
+      "code": 0,
+      "initial": {
+        "Upnp": {
+          "enable": 0
+        }
+      },
+      "range": {
+        "Upnp": {
+          "enable": "boolean"
+        }
+      },
+      "value": {
+        "Upnp": {
+          "enable": 0
+        }
+      }
+    }
+  ]
+}

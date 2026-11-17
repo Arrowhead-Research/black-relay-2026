@@ -1,0 +1,31 @@
+# NetworkManager setup-AP profile. seed-kit.sh renders this to
+# /etc/NetworkManager/system-connections/black-relay-setup-ap.nmconnection, mode 0600.
+# The SSID and passphrase slots are filled per kit. Only camera-provision starts this profile.
+[connection]
+id=black-relay-setup-ap
+uuid=ba753ea6-fe3b-537f-a8ec-372882fcd15a
+type=wifi
+interface-name=wlan0
+autoconnect=false
+
+[wifi]
+mode=ap
+ssid=BlackRelay-CAM-@SERIAL@
+band=bg
+channel=6
+ap-isolation=1
+
+[wifi-security]
+key-mgmt=wpa-psk
+proto=rsn;
+pairwise=ccmp;
+group=ccmp;
+psk=@PASSPHRASE@
+
+[ipv4]
+method=shared
+address1=10.42.0.1/24
+never-default=true
+
+[ipv6]
+method=disabled

@@ -1,0 +1,8 @@
+{
+  "schema": "rf.camera-cue.v0",
+  "rf_cue_id": "rf-cue-7f3a9c",
+  "zone": "perimeter-north",
+  "ts_epoch": 1730749203.5,
+  "source_node": "rf-node-07",
+  "tpms_id": "tpms-4f2a1b"
+}

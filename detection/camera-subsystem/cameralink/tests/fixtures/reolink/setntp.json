@@ -1,0 +1,27 @@
+{
+  "request": [
+    {
+      "cmd": "SetNtp",
+      "action": 0,
+      "param": {
+        "Ntp": {
+          "enable": 0,
+          "interval": 1440,
+          "port": 123,
+          "server": "pool.ntp.org"
+        }
+      }
+    }
+  ],
+  "http_status": 200,
+  "seconds": 0.08,
+  "response": [
+    {
+      "cmd": "SetNtp",
+      "code": 0,
+      "value": {
+        "rspCode": 200
+      }
+    }
+  ]
+}

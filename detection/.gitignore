@@ -1,0 +1,4 @@
+# The owner's file. Never commit it.
+/ssh-pass
+# Site values for the field run, from provision/ops/field-run-kit1.md.
+field-run.local.env

@@ -1,0 +1,47 @@
+# Pinned to MediaMTX 1.21.3. Node paths are not listed here: the API creates each one through
+# the control API from that node's heartbeats, and the API holds the credentials that go in
+# them. compose.yaml supplies the logins and addresses marked below.
+
+logLevel: info
+logDestinations: [stdout]
+
+authMethod: internal
+authInternalUsers:
+  # Whoever watches. Separate from the broker's login, which only MediaMTX uses to pull.
+  - user: reader # RELAY_READ_USER
+    pass: "" # RELAY_READ_PASSWORD
+    ips: []
+    permissions:
+      - action: read
+  # The API, from its own address only.
+  - user: relay-api
+    pass: "" # RELAY_MEDIAMTX_API_PASSWORD
+    ips: [] # RELAY_API_CONTROL_IP
+    permissions:
+      - action: api
+
+api: yes
+apiAddress: 127.0.0.1:9997 # RELAY_MEDIAMTX_CONTROL_IP
+metrics: no
+pprof: no
+playback: no
+
+rtsp: yes
+rtspTransports: [tcp]
+rtspAddress: :8554
+
+webrtc: yes
+webrtcAddress: :8889
+webrtcLocalUDPAddress: :8189 # RELAY_WEBRTC_UDP_PORT
+webrtcLocalTCPAddress: ""
+# Addresses inside the container mean nothing to a browser. RELAY_WEBRTC_HOSTS names the host's.
+webrtcIPsFromInterfaces: no
+webrtcAdditionalHosts: [] # RELAY_WEBRTC_HOSTS
+
+# Nothing else listens. These all default to on.
+rtmp: no
+hls: no
+srt: no
+moq: no
+
+paths: {}
