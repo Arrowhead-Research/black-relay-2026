@@ -18,11 +18,14 @@ from fusion_service.settings import Settings, default_config_path, load_settings
 
 
 def create_app(
-    settings: Settings | None = None, *, start_mqtt: bool = True, clock: Clock = utcnow
+    settings: Settings | None = None,
+    *,
+    start_mqtt: bool = True,
+    clock: Clock = utcnow,
 ) -> FastAPI:
     settings = settings or load_settings(default_config_path())
     app = FastAPI(
-        title="Black Relay Fusion",
+        title="Black Relay Event Fusion API",
         version=__version__,
         lifespan=build_lifespan(settings, clock=clock, start_mqtt=start_mqtt),
         dependencies=[Depends(BearerTokenAuth.from_settings(settings))],
