@@ -39,7 +39,7 @@ def prune(db: sqlite3.Connection, settings: Settings, now: float, incoming: int 
     """
     for _ in range(10):
         rows = db.execute(
-            "SELECT cursor,size,received FROM events ORDER BY cursor LIMIT 500"
+            "SELECT cursor,size,received FROM events ORDER BY cursor LIMIT 500",
         ).fetchall()
         if not rows:
             break

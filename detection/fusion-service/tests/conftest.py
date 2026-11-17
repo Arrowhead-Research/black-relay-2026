@@ -34,7 +34,7 @@ def settings(tmp_path, monkeypatch) -> Settings:
                 "subsystems": ["camera", "rf", "physical"],
                 "physical_node_id": "bridge-test",
                 "site_id": "site-test",
-            }
+            },
         ],
     )
 

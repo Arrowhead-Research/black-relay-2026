@@ -23,7 +23,10 @@ TOPICS: dict[str, Contract] = {
     "detection/rf/status/nodes": Contract("rf", "node-status", "rf.node_status", True),
     "detection/physical/events": Contract("physical", "event", "physical.event"),
     "detection/physical/status/panel": Contract(
-        "physical", "panel-status", "physical.panel_status", True
+        "physical",
+        "panel-status",
+        "physical.panel_status",
+        True,
     ),
     "detection/physical/status/zones": Contract("physical", "zone-status", "physical.zone_status"),
 }

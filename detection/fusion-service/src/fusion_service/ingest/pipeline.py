@@ -16,7 +16,11 @@ log = logging.getLogger(__name__)
 
 class Ingest:
     def __init__(
-        self, settings: Settings, store: Store, contracts: Contracts, clock: Clock = utcnow
+        self,
+        settings: Settings,
+        store: Store,
+        contracts: Contracts,
+        clock: Clock = utcnow,
     ):
         self.settings, self.store, self.contracts, self.clock = settings, store, contracts, clock
         self.lock = threading.Lock()
@@ -46,7 +50,8 @@ class Ingest:
         except StorageUnavailable:
             self.count(broker.id, "storage_failure")
             log.warning(
-                "MQTT storage unavailable broker=%s; reconnecting without PUBACK", broker.id
+                "MQTT storage unavailable broker=%s; reconnecting without PUBACK",
+                broker.id,
             )
             return False
         except Exception:

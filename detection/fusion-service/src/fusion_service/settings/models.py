@@ -31,7 +31,9 @@ class Broker(StrictModel):
     client_id: str = Field(min_length=1, max_length=128)
     subsystems: list[Subsystem] = Field(min_length=1)
     physical_node_id: str | None = Field(
-        default=None, pattern=r"^[a-z0-9][a-z0-9-]*$", max_length=63
+        default=None,
+        pattern=r"^[a-z0-9][a-z0-9-]*$",
+        max_length=63,
     )
     site_id: str | None = Field(default=None, min_length=1, max_length=128)
     node_sites: dict[str, str] = Field(default_factory=dict)

@@ -46,11 +46,18 @@ class Health(BaseModel):
     brokers: list[BrokerHealth]
 
     @classmethod
-    def assess(cls, storage: dict[str, Any], brokers: list[dict[str, Any]]) -> "Health":
+    def assess(
+        cls,
+        storage: dict[str, Any],
+        brokers: list[dict[str, Any]],
+    ) -> "Health":
         """ok only when storage is ready and every broker is connected and subscribed."""
         storage_health = StorageHealth.model_validate(storage)
         broker_health = [BrokerHealth.model_validate(broker) for broker in brokers]
         good = storage_health.ready and all(b.connected and b.subscribed for b in broker_health)
+
         return cls(
-            status="ok" if good else "degraded", storage=storage_health, brokers=broker_health
+            status="ok" if good else "degraded",
+            storage=storage_health,
+            brokers=broker_health,
         )

@@ -37,7 +37,8 @@ class Contracts:
                 # Preserve them as data rather than discard otherwise valid events.
                 compatible["properties"]["event_type"] = {"type": "string", "minLength": 1}
             self.validators[topic] = Draft202012Validator(
-                compatible, format_checker=FormatChecker()
+                compatible,
+                format_checker=FormatChecker(),
             )
 
     def decode(self, topic: str, raw: bytes) -> dict:

@@ -12,7 +12,11 @@ from fusion_service.settings import Broker, Settings
 
 
 def normalize(
-    payload: dict, topic: str, broker: Broker, settings: Settings, now: datetime
+    payload: dict,
+    topic: str,
+    broker: Broker,
+    settings: Settings,
+    now: datetime,
 ) -> Event:
     contract = TOPICS[topic]
     if contract.subsystem not in broker.subsystems:

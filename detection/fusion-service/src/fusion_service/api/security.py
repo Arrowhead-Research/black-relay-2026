@@ -22,11 +22,15 @@ class BearerTokenAuth:
         return cls(settings.token().get_secret_value())
 
     def __call__(
-        self, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]
+        self,
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
     ) -> None:
         if credentials is None or not hmac.compare_digest(
-            credentials.credentials.encode(), self._expected
+            credentials.credentials.encode(),
+            self._expected,
         ):
             raise HTTPException(
-                401, "a bearer token is required", headers={"WWW-Authenticate": "Bearer"}
+                401,
+                "a bearer token is required",
+                headers={"WWW-Authenticate": "Bearer"},
             )

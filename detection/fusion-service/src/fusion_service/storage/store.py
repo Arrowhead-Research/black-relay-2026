@@ -71,7 +71,10 @@ class Store:
     def insert(self, event: Event, namespace: str) -> bool:
         """Store a normalized event. False when it is a duplicate of one already stored."""
         canonical = json.dumps(
-            event.source.payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            event.source.payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
         )
         digest = hashlib.sha256(canonical.encode()).hexdigest()
         body = event.model_dump_json()
@@ -107,7 +110,8 @@ class Store:
                     (now, event.site_id, event.subsystem, event.type, event.node_id, body, size),
                 )
                 self.db.execute(
-                    "UPDATE metadata SET value=value+? WHERE key='event_bytes'", (size,)
+                    "UPDATE metadata SET value=value+? WHERE key='event_bytes'",
+                    (size,),
                 )
                 if TOPICS[event.source.topic].status:
                     self._update_node(event, now, body)
@@ -167,7 +171,10 @@ class Store:
         )
 
     def nodes(
-        self, now: datetime, site_id: str | None = None, subsystem: str | None = None
+        self,
+        now: datetime,
+        site_id: str | None = None,
+        subsystem: str | None = None,
     ) -> list[Node]:
         where, params = [], []
         if site_id is not None:
@@ -179,7 +186,8 @@ class Store:
         clause = f" WHERE {' AND '.join(where)}" if where else ""
         with self.lock, self._storage_boundary(record=False):
             rows = self.db.execute(
-                f"SELECT * FROM nodes{clause} ORDER BY site_id,subsystem,node_id", params
+                f"SELECT * FROM nodes{clause} ORDER BY site_id,subsystem,node_id",
+                params,
             ).fetchall()
         result = []
         for row in rows:
@@ -192,7 +200,7 @@ class Store:
                     now=now.timestamp(),
                     stale_after_s=self.settings.stale_after_s(event.subsystem),
                     future_tolerance_s=self.settings.future_tolerance_s,
-                )
+                ),
             )
         return result
 

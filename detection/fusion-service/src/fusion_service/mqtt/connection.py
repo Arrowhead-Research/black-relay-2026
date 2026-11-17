@@ -37,7 +37,8 @@ class Connection:
         self.client.connect_timeout = 5
         if broker.username_env:
             self.client.username_pw_set(
-                required_env(broker.username_env), required_env(broker.password_env)
+                required_env(broker.username_env),
+                required_env(broker.password_env),
             )
         if broker.tls_ca:
             self.client.tls_set(

@@ -12,7 +12,7 @@ INITIAL_SCHEMA = SQL_DIR / "001_initial.sql"
 
 def _schema_version(db: sqlite3.Connection) -> int | None:
     if not db.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'"
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'",
     ).fetchone():
         return None
     row = db.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
@@ -38,7 +38,7 @@ def open_database(settings: Settings) -> sqlite3.Connection:
         if _schema_version(db) != SCHEMA_VERSION:
             raise ValueError("unsupported database version")
         db.execute(
-            "INSERT OR IGNORE INTO metadata SELECT 'event_bytes', COALESCE(SUM(size),0) FROM events"
+            "INSERT OR IGNORE INTO metadata SELECT 'event_bytes', COALESCE(SUM(size),0) FROM events",
         )
         db.commit()
     except BaseException:
