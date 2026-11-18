@@ -1,0 +1,15 @@
+**
+!physical-subsystem/**
+!fusion-service/scripts/physical-sim-bench.sh
+!deploy/physical-sim/run.sh
+**/.venv
+**/bench
+**/__pycache__
+**/.git
+**/.pytest_cache
+physical-subsystem/deploy/data
+physical-subsystem/deploy/secrets
+physical-subsystem/deploy/certs
+physical-subsystem/deploy/ca-private
+physical-subsystem/tests
+physical-subsystem/tools

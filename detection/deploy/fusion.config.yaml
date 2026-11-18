@@ -1,0 +1,16 @@
+# Fusion on sf-dev: one broker, the central broker in this compose project.
+database: /data/fusion.sqlite3
+camera_schemas: /contracts/camera
+rf_schemas: /contracts/rf
+physical_schemas: /contracts/physical
+brokers:
+  - id: central
+    namespace: central
+    host: broker
+    port: 1883
+    client_id: fusion-central-v1
+    subsystems: [rf, physical]
+    physical_node_id: physical-bridge-bench
+    site_id: sf-dev
+    username_env: FUSION_CENTRAL_MQTT_USER
+    password_env: FUSION_CENTRAL_MQTT_PASSWORD
