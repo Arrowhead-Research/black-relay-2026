@@ -93,8 +93,9 @@ user rf-console
 topic write detection/rf/#
 topic read detection/rf/sim/#      # simulator observations for rf-analytics
 
-user camera-<node_id>          # one per node, as today
-topic readwrite detection/#    # nodes also read detection/rf/cues/camera
+user relay                     # all camera kits share one login: their Frigate proxy secret derives from it
+topic write detection/camera/#
+topic read detection/rf/cues/camera
 ```
 
 Client ids stay as each subsystem already uses them: `fusion-*`, `physical-subsystem`,
