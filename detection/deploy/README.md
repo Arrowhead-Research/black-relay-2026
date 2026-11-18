@@ -32,3 +32,7 @@ curl -s -H "Authorization: Bearer $TOKEN" 'http://HOST_ADDRESS:8090/api/v1/event
 Only two ports leave the host: the broker on 1883 and the fusion API on 8090, both bound to the
 address given to make-env.sh. Simulator observations travel over the same broker on `detection/rf/sim/#`,
 which only the RF credential can read; fusion never subscribes to it.
+
+Camera video and the kits' NTP are a second compose project in `camera-relay-service/` inside the
+bundle (its images are in `images.tar` too). Fill its `.env` and `kits`, run `./render.sh`, then
+`docker compose up -d` there. See its README.
