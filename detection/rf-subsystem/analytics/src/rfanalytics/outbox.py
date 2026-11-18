@@ -109,7 +109,8 @@ class Outbox:
 class MqttPublisher:
     """paho-mqtt publisher bound to an outbox. QoS 1, auto-reconnect."""
 
-    def __init__(self, outbox: Outbox, host: str, port: int = 1883, client_id: str = "rfanalytics-out") -> None:
+    def __init__(self, outbox: Outbox, host: str, port: int = 1883, client_id: str = "rfanalytics-out",
+                 username: str | None = None, password: str | None = None) -> None:
         try:
             import paho.mqtt.client as mqtt
         except ImportError:
@@ -118,6 +119,8 @@ class MqttPublisher:
         self.outbox = outbox
         self.connected = threading.Event()
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
+        if username:
+            self.client.username_pw_set(username, password)
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
         self.client.on_publish = self._on_publish

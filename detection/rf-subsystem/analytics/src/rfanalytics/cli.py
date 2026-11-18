@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import sys
 from pathlib import Path
@@ -40,6 +41,8 @@ def main(argv: list[str] | None = None) -> int:
     src.add_argument("--mqtt-host", help="subscribe to observations on this MQTT broker")
     run.add_argument("--mqtt-port", type=int, default=1883)
     run.add_argument("--mqtt-topic", default="detection/rf/sim/observations")
+    run.add_argument("--mqtt-user", help="username for the observation broker")
+    run.add_argument("--mqtt-password-env", help="environment variable holding the observation broker password")
     run.add_argument("-o", "--out", default="-", help="events JSONL output (default: stdout; 'none' to skip)")
     run.add_argument("--method", choices=METHODS, default="strongest")
     run.add_argument("--stats", type=Path, help="write run statistics JSON here")
@@ -47,6 +50,8 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--alerts-out", help="write outbound messages as JSONL {topic, payload} ('-' for stdout)")
     run.add_argument("--publish-host", help="publish outbound messages to this MQTT broker")
     run.add_argument("--publish-port", type=int, default=1883)
+    run.add_argument("--publish-user", help="username for the publish broker")
+    run.add_argument("--publish-password-env", help="environment variable holding the publish broker password")
     run.add_argument("--topic-prefix", default=TOPIC_PREFIX)
     run.add_argument(
         "--outbox",
@@ -199,7 +204,10 @@ class _MessageSink:
             outbox = Outbox(args.outbox)
             if len(outbox):
                 print(f"rfanalytics: replaying {len(outbox)} message(s) from {args.outbox}", file=sys.stderr)
-            self.publisher = MqttPublisher(outbox, args.publish_host, args.publish_port)
+            password_env = getattr(args, "publish_password_env", None)
+            password = os.environ.get(password_env) if password_env else None
+            self.publisher = MqttPublisher(outbox, args.publish_host, args.publish_port,
+                                           username=getattr(args, "publish_user", None), password=password)
         self.counts: dict[str, int] = {"alerts": 0, "camera_cues": 0, "node_status": 0}
 
     def send(self, messages: list[Message]) -> None:
@@ -264,6 +272,8 @@ def _mqtt_records(args: argparse.Namespace) -> Iterator[tuple[int, dict]]:
             client.subscribe(args.mqtt_topic, qos=1)
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="rfanalytics")
+    if getattr(args, "mqtt_user", None):
+        client.username_pw_set(args.mqtt_user, os.environ.get(args.mqtt_password_env) if args.mqtt_password_env else None)
     client.on_connect = on_connect
     client.on_message = on_message
     client.connect(args.mqtt_host, args.mqtt_port)

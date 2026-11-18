@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from collections import Counter
@@ -30,6 +31,8 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--mqtt-host", help="also publish each observation to this MQTT broker")
     run.add_argument("--mqtt-port", type=int, default=1883)
     run.add_argument("--mqtt-topic", default="detection/rf/sim/observations")
+    run.add_argument("--mqtt-user", help="username for the MQTT broker")
+    run.add_argument("--mqtt-password-env", help="environment variable holding the MQTT password")
 
     summary = sub.add_parser("summary", help="print scenario statistics without writing observations")
     summary.add_argument("scenario", type=Path)
@@ -51,7 +54,8 @@ def main(argv: list[str] | None = None) -> int:
         args.truth.parent.mkdir(parents=True, exist_ok=True)
         args.truth.write_text(json.dumps(result.truth, indent=2) + "\n")
 
-    publisher = _mqtt_publisher(args.mqtt_host, args.mqtt_port) if args.mqtt_host else None
+    password = os.environ.get(args.mqtt_password_env) if args.mqtt_password_env else None
+    publisher = _mqtt_publisher(args.mqtt_host, args.mqtt_port, args.mqtt_user, password) if args.mqtt_host else None
     out = sys.stdout if args.out == "-" else open(args.out, "w")
     try:
         _emit(result.observations, out, publisher, args.mqtt_topic, args.realtime, args.speed)
@@ -83,12 +87,14 @@ def _emit(observations: list[Observation], out, publisher, topic: str, realtime:
             publisher.publish(topic, line, qos=1)
 
 
-def _mqtt_publisher(host: str, port: int):
+def _mqtt_publisher(host: str, port: int, username: str | None = None, password: str | None = None):
     try:
         import paho.mqtt.client as mqtt
     except ImportError:
         raise SystemExit("MQTT output needs paho-mqtt: uv sync --extra mqtt") from None
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="rfsim")
+    if username:
+        client.username_pw_set(username, password)
     client.connect(host, port)
     client.loop_start()
     return client
