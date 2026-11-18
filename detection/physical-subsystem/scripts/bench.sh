@@ -204,9 +204,11 @@ site:
   name: bench
 fusion:
   enabled: true
-  host: 127.0.0.1
-  port: $TEAM_PORT
+  host: ${BENCH_FUSION_HOST:-127.0.0.1}
+  port: ${BENCH_FUSION_PORT:-$TEAM_PORT}
   tls: null
+  username: ${BENCH_FUSION_USER:-null}
+  password_file: ${BENCH_FUSION_PASSWORD_FILE:-null}
   client_id: physical-subsystem-bench
   metrics_port: 0
 storage:
