@@ -79,6 +79,7 @@ topic write detection/physical/#
 
 user @RF_USER@
 topic write detection/rf/#
+topic read detection/rf/sim/#      # simulator observations for rf-analytics
 ```
 
 Mosquitto's ACL denies by default: a client with the physical credential cannot publish under

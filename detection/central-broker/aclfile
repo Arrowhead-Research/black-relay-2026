@@ -8,6 +8,8 @@ topic write detection/physical/#
 
 user @RF_USER@
 topic write detection/rf/#
+# rf-analytics consumes simulator observations on this topic; nothing else under detection/rf is readable.
+topic read detection/rf/sim/#
 
 # Camera nodes, when they move here from the camera relay's broker: one block per node, as the
 # relay's aclfile has today. Nodes also read detection/rf/cues/camera.

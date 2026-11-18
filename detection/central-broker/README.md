@@ -91,6 +91,7 @@ topic write detection/physical/#
 
 user rf-console
 topic write detection/rf/#
+topic read detection/rf/sim/#      # simulator observations for rf-analytics
 
 user camera-<node_id>          # one per node, as today
 topic readwrite detection/#    # nodes also read detection/rf/cues/camera
