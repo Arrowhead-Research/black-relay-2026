@@ -5,7 +5,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from fusion_service.domain.errors import CursorExpired, InvalidCursor, StorageUnavailable
+from fusion_service.domain.errors import (
+    CursorExpired,
+    InvalidCursor,
+    NodeTimeout,
+    NodeUnreachable,
+    StorageUnavailable,
+)
 
 
 class ErrorBody(BaseModel):
@@ -26,6 +32,7 @@ HTTP_ERROR_CODES = {
     404: "not_found",
     409: "conflict",
     422: "invalid_request",
+    501: "not_configured",
     503: "storage_unavailable",
 }
 
@@ -81,9 +88,15 @@ async def _invalid_cursor(request: Request, error: InvalidCursor) -> JSONRespons
     return error_response(400, "cursor_ahead")
 
 
+async def _node_unreachable(request: Request, error: NodeUnreachable) -> JSONResponse:
+    status = 504 if isinstance(error, NodeTimeout) else 502
+    return error_response(status, error.reason)
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(RequestValidationError, _validation_error)
     app.add_exception_handler(HTTPException, _http_error)
     app.add_exception_handler(StorageUnavailable, _storage_unavailable)
     app.add_exception_handler(CursorExpired, _cursor_expired)
     app.add_exception_handler(InvalidCursor, _invalid_cursor)
+    app.add_exception_handler(NodeUnreachable, _node_unreachable)

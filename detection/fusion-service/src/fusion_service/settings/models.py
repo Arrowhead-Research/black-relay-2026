@@ -84,6 +84,11 @@ class Settings(StrictModel):
     camera_stale_s: int = Field(default=90, ge=1)
     rf_stale_s: int = Field(default=180, ge=1)
     physical_stale_s: int = Field(default=120, ge=1)
+    # Camera snapshots are fetched from the kit itself with a secret derived from the kits' broker
+    # password. Unset means GET .../snapshot answers 501.
+    camera_snapshot_password_env: str | None = None
+    snapshot_timeout_s: float = Field(default=10, gt=0, le=120)
+    max_snapshot_bytes: int = Field(default=4 * 1024 * 1024, ge=65536)
 
     @model_validator(mode="after")
     def consistency(self):
@@ -117,6 +122,17 @@ class Settings(StrictModel):
             "rf": self.rf_stale_s,
             "physical": self.physical_stale_s,
         }[subsystem]
+
+    def camera_snapshot_password(self) -> SecretStr | None:
+        """The kits' broker password, or None when snapshots are not configured."""
+        if not self.camera_snapshot_password_env:
+            return None
+        value = os.environ.get(self.camera_snapshot_password_env, "")
+        if not value.strip():
+            raise ValueError(
+                f"required environment variable is empty: {self.camera_snapshot_password_env}",
+            )
+        return SecretStr(value)
 
     def token(self) -> SecretStr:
         """The API bearer token, read from the environment variable named by api_token_env."""

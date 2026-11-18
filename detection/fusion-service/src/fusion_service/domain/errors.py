@@ -31,3 +31,15 @@ class StorageUnavailable(RuntimeError):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+class NodeUnreachable(RuntimeError):
+    """A sensor node did not answer a request as expected; `reason` is a code, never a URL."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+class NodeTimeout(NodeUnreachable):
+    """A sensor node accepted the connection but did not answer in time."""

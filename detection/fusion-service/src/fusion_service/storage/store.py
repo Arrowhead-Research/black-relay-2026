@@ -170,6 +170,28 @@ class Store:
             has_more=len(rows) > limit,
         )
 
+    def event(self, event_id: str) -> Event | None:
+        """One stored event by its fusion id, or None."""
+        with self.lock, self._storage_boundary(record=False):
+            row = self.db.execute(
+                "SELECT cursor,body FROM events WHERE json_extract(body, '$.id')=?",
+                (event_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        item = Event.model_validate_json(row["body"])
+        item.cursor = row["cursor"]
+        return item
+
+    def node_status(self, site_id: str, subsystem: str, node_id: str) -> Event | None:
+        """The latest status event kept for one node, or None if it has never reported."""
+        with self.lock, self._storage_boundary(record=False):
+            row = self.db.execute(
+                "SELECT body FROM nodes WHERE site_id=? AND subsystem=? AND node_id=?",
+                (site_id, subsystem, node_id),
+            ).fetchone()
+        return None if row is None else Event.model_validate_json(row["body"])
+
     def nodes(
         self,
         now: datetime,
