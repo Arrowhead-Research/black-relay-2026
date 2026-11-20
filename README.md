@@ -6,19 +6,23 @@ Black Relay 2026 is a four-month, open-source build to create a portable, surviv
 
 ## Central server
 
-`compose.yaml` at the repo root runs everything on the central server in one project: the image registry and
-device secrets store (`detection/central-store`), the team's central MQTT broker (`detection/central-broker`,
-ports 1883 and 8883 with TLS) and the fusion service (API on 8090). On the central server, from the repo root:
+One command sets up (or updates) the central server: the image registry and device secrets store
+(`detection/central-store`), the team's central MQTT broker (`detection/central-broker`, 1883 and 8883 with TLS)
+and the fusion service (API on 8090), all from `compose.yaml` at the repo root. On the central server:
 
 ```sh
-detection/central-store/server.sh init <address> reg.bulexa.com      # registry TLS and logins (once)
-detection/central-store/server.sh letsencrypt reg.bulexa.com <email>  # trusted certificate for registry and broker
-detection/central/make-env.sh                                       # ./.env: broker logins, fusion API token
-docker compose up -d --wait
+./setup-central.sh <address> --domain reg.bulexa.com --email <you>
 ```
 
-Bridges get their broker login without copying passwords: `detection/central/share-broker-login.sh <device>` here,
-then `detection/physical-subsystem/deploy/scripts/fetch-broker-login.sh` on the bridge.
+It asks once for a Cloudflare API token (Zone:Read + DNS:Edit) and to accept Let's Encrypt's terms, gets a
+publicly trusted certificate (so no host has to install a CA), creates every login, adds a daily renewal to
+cron and starts everything. Without `--domain` it uses its own CA instead. Running it again keeps all logins and
+data. It prints where the logins are at the end.
 
-Already running the store from `detection/central-store`? Stop it there first (`docker compose down`, no `-v`); its
-data volumes keep their names, so nothing is lost.
+After that:
+
+```sh
+detection/central-store/server.sh add-client <name> [--secrets]   # a host that pulls images (+ its secrets)
+detection/central/share-broker-login.sh <name>                    # a bridge's broker login, fetched on the
+                                                                  # bridge with deploy/scripts/fetch-broker-login.sh
+```
