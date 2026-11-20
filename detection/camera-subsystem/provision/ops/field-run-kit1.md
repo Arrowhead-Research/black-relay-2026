@@ -92,14 +92,14 @@ Load these in every shell. `central_check` says whether the laptop still has the
 
 ```bash
 . ./field-run.local.env
-# Each helper reads relay/.env in a subshell, and passes secrets by file or stdin, so none is in any argv.
-api() { ( . relay/.env; printf 'header = "Authorization: Bearer %s"\n' "$RELAY_API_TOKEN" | curl -s -K - "$@" ); }
+# Each helper reads ../camera-relay-service/.env in a subshell, and passes secrets by file or stdin, so none is in any argv.
+api() { ( . ../camera-relay-service/.env; printf 'header = "Authorization: Bearer %s"\n' "$RELAY_API_TOKEN" | curl -s -K - "$@" ); }
 nodes() { api "http://$CENTRAL:8081/nodes" | python3 -m json.tool; }
-central_sub() { ( . relay/.env; umask 077; dir=$(mktemp -d); trap 'rm -rf "$dir"' EXIT
+central_sub() { ( . ../camera-relay-service/.env; umask 077; dir=$(mktemp -d); trap 'rm -rf "$dir"' EXIT
   printf -- '-u %s\n-P %s\n' "$RELAY_BROKER_USER" "$RELAY_BROKER_PASSWORD" >"$dir/mosquitto_sub"
   XDG_CONFIG_HOME=$dir mosquitto_sub -h "$CENTRAL" "$@" ); }
 # relay_read ffprobe <options>, or relay_read ffplay. The tool reads the URL from a file. This needs ffmpeg 5 or later.
-relay_read() { ( . relay/.env; umask 077; list=$(mktemp); trap 'rm -f "$list"' EXIT
+relay_read() { ( . ../camera-relay-service/.env; umask 077; list=$(mktemp); trap 'rm -f "$list"' EXIT
   printf "ffconcat version 1.0\nfile 'rtsp://%s:%s@%s:8554/%s'\noption rtsp_transport tcp\n" \
     "$RELAY_READ_USER" "$RELAY_READ_PASSWORD" "$CENTRAL" "$NODE_ID" >"$list"
   "$@" -f concat -safe 0 -protocol_whitelist file,rtsp,rtp,tcp,udp,crypto -i "$list" ); }
@@ -108,8 +108,8 @@ central_check() {
   if [ "$now" != "$CENTRAL" ]; then
     echo "CENTRAL CHANGED: the laptop now sends from ${now:-nothing}, and the node admits only $CENTRAL"; return 1
   fi
-  if [ -e relay/.env ] && ! ( . relay/.env; [ "$RELAY_CENTRAL_IP" = "$CENTRAL" ] ); then
-    echo "CENTRAL CHANGED: RELAY_CENTRAL_IP in relay/.env is not $CENTRAL"; return 1
+  if [ -e ../camera-relay-service/.env ] && ! ( . ../camera-relay-service/.env; [ "$RELAY_CENTRAL_IP" = "$CENTRAL" ] ); then
+    echo "CENTRAL CHANGED: RELAY_CENTRAL_IP in ../camera-relay-service/.env is not $CENTRAL"; return 1
   fi
   echo "central ok: $CENTRAL"
 }
@@ -118,7 +118,7 @@ command -v curl mosquitto_sub ffprobe ffplay
 
 **Run `central_check` at the start of each part, and first whenever SSH or video times out.** C52's pass also checks
 what the node holds. If it reports a change, get the old address back, by its reservation, or if that cannot be done:
-at a console or with C56's procedure, save the new address in the portal, set it in `CENTRAL` and `relay/.env`, and run
+at a console or with C56's procedure, save the new address in the portal, set it in `CENTRAL` and `../camera-relay-service/.env`, and run
 `docker compose up -d`. Do not read a refused connection as a node fault until `central_check` passes.
 
 ---
@@ -195,11 +195,11 @@ C49  date 2026-11-13  rc, first run 0  rc, second run 0  Files changed 0 (17 on 
 
 *Agent.* A wildcard bind fails on any port a host service already holds, on any address. Check what this laptop runs.
 The commands below assume it holds some of these, so they use API port 8081 and bind the broker and NTP to the LAN
-address, as `relay/README.md` describes. Touch no other container.
+address, as `../camera-relay-service/README.md` describes. Touch no other container.
 
 ```bash
 sudo ss -lntup | grep -E ':(123|1883|8080|8081|8554|8889|8189)\b'
-cd relay
+cd ../camera-relay-service
 ./setup-credentials.sh
 sed -i -e "s|^RELAY_SITE_SUBNET=.*|RELAY_SITE_SUBNET='$SITE_SUBNET'|" \
   -e "s|^RELAY_CENTRAL_IP=.*|RELAY_CENTRAL_IP='$CENTRAL'|" \
@@ -209,12 +209,12 @@ sed -i -e "s|^RELAY_SITE_SUBNET=.*|RELAY_SITE_SUBNET='$SITE_SUBNET'|" \
   -e "s|^RELAY_API_PORT=.*|RELAY_API_PORT=8081|" .env
 docker compose up -d --build
 docker compose ps --format '{{.Service}} {{.Status}}'
-cd ..
+cd ../camera-subsystem
 central_check
 nodes
 ```
 
-`setup-credentials.sh` refuses an existing `.env`. If there is one, read it, rather than using `--force`. `relay/.env`
+`setup-credentials.sh` refuses an existing `.env`. If there is one, read it, rather than using `--force`. `../camera-relay-service/.env`
 is ignored by git and is never committed.
 
 Pass: `api`, `netguard`, `mediamtx`, `chrony` and `mosquitto` all up, `central_check` passes, and `nodes` prints `broker.connected` true,
@@ -306,11 +306,11 @@ Join it with the passphrase, open `http://10.42.0.1/`, and fill in the form. Che
 | Covered zones | The site's zone name, at least two letters |
 | Frigate address | `https://$NODE_ID.local:8971` |
 | Broker address, port | `$CENTRAL`, `1883`, TLS off, anonymous off. **Read it out with `central_check` first** |
-| Broker username, password | `RELAY_BROKER_USER`, `RELAY_BROKER_PASSWORD` from `relay/.env` |
+| Broker username, password | `RELAY_BROKER_USER`, `RELAY_BROKER_PASSWORD` from `../camera-relay-service/.env` |
 | Time server | Blank |
 | Upside down | As mounted |
 
-*Agent reads out the password, with:* `grep -E '^RELAY_BROKER_(USER|PASSWORD)=' relay/.env`
+*Agent reads out the password, with:* `grep -E '^RELAY_BROKER_(USER|PASSWORD)=' ../camera-relay-service/.env`
 
 If no SSID appears within 3 minutes, at the console:
 
@@ -788,7 +788,7 @@ sudo ss -tn state established 'dst 10.77.0.10 and dport = :554'
 sudo ss -un 'dst 10.77.0.10'
 ```
 
-Idle first. Then one reader, from the laptop, using the login from `relay/.env`, then two at once:
+Idle first. Then one reader, from the laptop, using the login from `../camera-relay-service/.env`, then two at once:
 
 ```bash
 relay_read ffplay
@@ -1082,7 +1082,7 @@ C74  date 2026-11-13  video h264  snapshot 200, image/jpeg, 25639 bytes  proxy 2
 
 Run them now, and record them there. For "hold the button at boot", use C56's procedure. C45 needs a second broker
 address. An address added beside the laptop's first does not do, as [above](#before-you-start-laptop). With the owner's
-OK that a second address is free, make it the laptop's only address, update `CENTRAL` and `relay/.env`, and run `docker
+OK that a second address is free, make it the laptop's only address, update `CENTRAL` and `../camera-relay-service/.env`, and run `docker
 compose up -d`, or use a second machine as the broker. To see the old address time out, change the laptop back, then
 re-provision to the original and confirm `central_check` passes before going on. Its step 3 is proved by C53 and C59.
 C46's step 3 overlaps C76, so one run serves both, and record in both.

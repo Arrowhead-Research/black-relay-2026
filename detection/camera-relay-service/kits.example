@@ -1,4 +1,0 @@
-# One kit per line: node id (from the kit's setup page, cam-xxxxxx) and its site LAN address.
-# Give each kit a DHCP reservation: a kit that moves address needs this file re-rendered.
-cam-000001 172.22.100.21
-cam-000002 172.22.100.22

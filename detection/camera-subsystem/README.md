@@ -22,7 +22,6 @@ camera-subsystem/
   provision/     the setup WiFi and setup page, kit seeding, and how the SD image is built (ops/README.md)
   cameralink/    the camera link: adopts the camera, runs Frigate, and the node installer
   bridge/        turns Frigate's events into the contract's messages, with a queue on disk
-  relay/         the central node: broker, API, video relay and time server (README.md)
 ```
 
 ## Physical Assembly
@@ -63,8 +62,8 @@ nobody has to guess one. It is in this repository, so change it on a real site.
 |---|---|---|
 | A kit's setup WiFi | none | `sudo /opt/black-relay/ops/change-passwords.sh setup-wifi`, on the kit |
 | A kit's console | `kit-1`, `kit-2`, and so on: the number on the kit | `sudo /opt/black-relay/ops/change-passwords.sh console`, on the kit |
-| Broker, typed on the setup page | `relay` | `./change-passwords.sh broker` in `relay/`, then `... change-passwords.sh broker` on each kit |
-| Viewer, for live video | `viewer` | `./change-passwords.sh viewer` in `relay/` |
+| Broker, typed on the setup page | `relay` | `./change-passwords.sh broker` in `../camera-relay-service/`, then `... change-passwords.sh broker` on each kit |
+| Viewer, for live video | `viewer` | `./change-passwords.sh viewer` in `../camera-relay-service/` |
 
 ## Startup
 
@@ -72,7 +71,7 @@ Physical assembly instructions are above, so assume that is complete when lookin
 
 **Once per site: the central node.** A kit has nowhere to report to without it. Any Linux host with Docker on the
 site LAN will do: a Pi, a laptop or a server. Give it a fixed address on the LAN, such as a DHCP reservation, because
-each kit accepts connections from that one address only. Then follow "Install" in [`relay/README.md`](relay/README.md):
+each kit accepts connections from that one address only. Then follow "Install" in [`../camera-relay-service/README.md`](../camera-relay-service/README.md):
 four steps, ending in `docker compose up -d --build`.
 
 **For each kit:**
@@ -103,10 +102,10 @@ four steps, ending in `docker compose up -d --build`.
 
 Focus checks on business rules, event definitions, and contracts with connected subsystems. Include manual checks when automation is not practical.
 
-- **Automated checks:** each part has its own suite. In `bridge/`, `cameralink/`, `provision/` and `relay/api/`, run
+- **Automated checks:** each part has its own suite. In `bridge/`, `cameralink/`, `provision/` and `../camera-relay-service/api/`, run
   `uv run pytest -q`. `cameralink/tests/container_install_node.sh` runs the installer and the kit seeding on a real
-  Debian in a container, and `relay/tests/test_relay.sh` runs the central node's bundle. Both need Docker.
-- **Manual verification, after setting a kit up,** on the central node, in `relay/`:
+  Debian in a container, and `../camera-relay-service/tests/test_relay.sh` runs the central node's bundle. Both need Docker.
+- **Manual verification, after setting a kit up,** on the central node, in `../camera-relay-service/`:
 
   ```bash
   . ./.env

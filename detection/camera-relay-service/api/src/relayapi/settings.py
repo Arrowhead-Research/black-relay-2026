@@ -125,7 +125,7 @@ class Settings:
 def _required(env: Mapping[str, str], name: str) -> str:
     value = env.get(name, "")
     if not value.strip():
-        raise SettingsError(f"{name} is required: see relay/README.md")
+        raise SettingsError(f"{name} is required: see camera-relay-service/README.md")
     return value
 
 
