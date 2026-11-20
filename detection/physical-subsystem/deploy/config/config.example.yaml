@@ -89,12 +89,9 @@ site:                             # identifies this installation in every team m
 # profile (own container, own outbound network; see docker-compose.yml).
 fusion:
   enabled: false
-  host: reg.bulexa.com            # the central broker (repo-root compose.yaml on the central server)
-  port: 8883                      # TLS. 1883 is the same broker without TLS (avoid: the login would cross in clear)
-  tls:
-    ca_file: /etc/ssl/certs/ca-certificates.crt   # public CAs: the broker has a Let's Encrypt certificate
-    certfile: null                # optional client certificate
-    keyfile: null
+  host: 192.0.2.10                # REPLACE: the central server's address (repo-root compose.yaml runs the broker there)
+  port: 1883                      # the central broker's one listener: a login, no TLS (the login crosses the LAN in clear)
+  tls: null                       # for a broker with TLS: {ca_file: /etc/ssl/certs/ca-certificates.crt, certfile: null, keyfile: null}
   username: physical-subsystem    # BROKER_PHYSICAL_USER on the central server
   password_file: /run/secrets/fusion_password   # deploy/secrets/fusion/fusion_password (uid 10003, 0600)
   topic_prefix: detection/physical
