@@ -69,6 +69,6 @@ if FLEET_SEED_ANY_DIR='' "$here/fleet.sh" seed wbt-1 "$work/notboot" 2>/dev/null
 
 if command -v ansible-playbook >/dev/null; then
   (cd "$here/ansible" && ansible-playbook --syntax-check site.yml >/dev/null && ansible-playbook --syntax-check wifi.yml >/dev/null) || fail "playbook syntax"
-  (cd "$here/ansible" && ansible-inventory --graph | grep -q wbt-8) || fail "inventory"
+  (cd "$here/ansible" && ansible-inventory --graph | grep -q wbt-4) || fail "inventory"
 fi
 echo "fleet tests passed"

@@ -12,7 +12,7 @@
 #
 # Settings come from fleet.env next to this script (copy fleet.env.example; it is gitignored). The SSH
 # key pair named by SSH_KEY is created on first use; only its public half goes on the cards.
-# Node names are wbt-1 ... wbt-8 (the Kismet source prefix and the hostname; see ansible/inventory.yml).
+# Node names are wbt-1 ... wbt-4 (the Kismet source prefix and the hostname; see ansible/inventory.yml).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

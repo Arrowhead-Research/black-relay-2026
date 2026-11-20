@@ -1,4 +1,4 @@
-# The RF fleet. The node name is the hostname, the Kismet source prefix (wbt-5:wifi ...) and the
+# The RF fleet. The node name is the hostname, the Kismet source prefix (wbt-4:wifi ...) and the
 # analytics node_id. Per-node settings (address, adapters) go in host_vars/<node>.yml; see
 # host_vars/wbt-1.yml.example.
 all:
@@ -9,10 +9,6 @@ all:
         wbt-2:
         wbt-3:
         wbt-4:
-        wbt-5:
-        wbt-6:
-        wbt-7:
-        wbt-8:
     # The central server: the playbook reads (or creates) the console's node heartbeat token there.
     central:
       hosts:

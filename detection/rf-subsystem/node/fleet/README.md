@@ -5,9 +5,9 @@ Two commands take a blank SD card to a WBT node that is logged in to the central
 ```sh
 cd detection/rf-subsystem/node/fleet
 cp fleet.env.example fleet.env            # once: user, SSH key path, timezone, optional Wi-Fi
-./fleet.sh flash wbt-5 /dev/disk4         # macOS (diskutil list external) or /dev/sdX on Linux
+./fleet.sh flash wbt-4 /dev/disk4         # macOS (diskutil list external) or /dev/sdX on Linux
 # put the card in the Pi, power it on, wait ~2 minutes
-./fleet.sh provision wbt-5
+./fleet.sh provision wbt-4
 ```
 
 | Command | What it does |
@@ -18,7 +18,7 @@ cp fleet.env.example fleet.env            # once: user, SSH key path, timezone, 
 | `fleet.sh ping [node\|all]` | Checks Ansible can log in. |
 | `fleet.sh wifi <node\|all> "<SSID>"` | Ansible (`ansible/wifi.yml`): moves running nodes onto a Wi-Fi network (asks for the passphrase, or `WIFI_PASSWORD`). With a setup hub it hands over in order, hub last; see below. |
 
-Nodes are `wbt-1` … `wbt-8` (`ansible/inventory.yml`). The name is the hostname, the Kismet source prefix (`wbt-5:wifi`, `:bt`, `:tpms`) and the analytics `node_id`.
+Nodes are `wbt-1` … `wbt-4` (`ansible/inventory.yml`). The name is the hostname, the Kismet source prefix (`wbt-4:wifi`, `:bt`, `:tpms`) and the analytics `node_id`.
 
 ## What goes on the card
 
