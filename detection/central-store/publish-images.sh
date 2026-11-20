@@ -4,7 +4,7 @@
 #
 #   docker login <server>:5001 -u publisher        once (password from ./server.sh init)
 #   ./publish-images.sh <server> [image ...]       default: the sf-dev bundle's images + the store toolbox
-#   ./publish-images.sh <server> --bridge          the physical bridge, built for amd64 (see below)
+#   ./publish-images.sh <server> --bridge          the physical bridge, amd64 + arm64 under one :latest
 #
 # An image can be given as LOCAL=REMOTE to push a local tag under another name, e.g.
 #   blackrelay-f2/outbound:amd64=blackrelay-f2/outbound:latest
@@ -18,12 +18,21 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 server="${1:?usage: $0 <server> [image ...]}"; shift
 images=("$@")
 if [ "${images[0]:-}" = "--bridge" ]; then
-  # Build the four bridge services for amd64 under :amd64 tags (your local :latest stays as it is).
-  phys="$here/../physical-subsystem"; images=()
+  # The four bridge services for amd64 (servers) AND arm64 (Macs, Pis), under one multi-arch :latest.
+  # Built under local :amd64/:arm64 tags, so your local :latest stays as it is.
+  phys="$here/../physical-subsystem"
   for s in normalizer iq-remote control4 outbound; do
-    docker buildx build --platform linux/amd64 --load -q -t "blackrelay-f2/$s:amd64" -f "$phys/docker/Dockerfile.$s" "$phys" >/dev/null
-    images+=("blackrelay-f2/$s:amd64=blackrelay-f2/$s:latest")
+    for a in amd64 arm64; do
+      docker buildx build --platform "linux/$a" --load -q -t "blackrelay-f2/$s:$a" -f "$phys/docker/Dockerfile.$s" "$phys" >/dev/null
+      docker tag "blackrelay-f2/$s:$a" "$server:5001/blackrelay-f2/$s:$a"
+      docker push -q "$server:5001/blackrelay-f2/$s:$a" >/dev/null
+      docker rmi "$server:5001/blackrelay-f2/$s:$a" >/dev/null
+    done
+    docker buildx imagetools create -t "$server:5001/blackrelay-f2/$s:latest" \
+      "$server:5001/blackrelay-f2/$s:amd64" "$server:5001/blackrelay-f2/$s:arm64" >/dev/null 2>&1
+    echo "pull as: $server:5000/blackrelay-f2/$s:latest (amd64 + arm64)"
   done
+  exit 0
 elif [ ${#images[@]} -eq 0 ]; then
   # Keep in step with detection/deploy/build.sh (its `docker save` list).
   images=(black-relay/fusion-service:sfdev black-relay/physical-sim:sfdev black-relay/rf-analytics:sfdev
