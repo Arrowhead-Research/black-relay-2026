@@ -2,12 +2,18 @@
 # Per-device secrets on the central store: sealed (age-encrypted) where they are made, opened only on
 # the device they belong to. Runs on any machine with Docker (macOS or Linux).
 #
-#   ./secrets.sh setup <server> <name> <ca.crt|->   once per machine: login, CA and this machine's own key
+#   ./secrets.sh setup <server> <name> <ca.crt|-> [user]
+#                                                   once per machine: login, CA and this machine's own key.
+#                                                   <server> is the central store (reg.bulexa.com) or a
+#                                                   registry path, e.g. ghcr.io/arrowhead-research/blackrelay-secrets
+#                                                   (then [user] is the GitHub user, password a read:packages token)
 #   ./secrets.sh recipient                          print this machine's public key (age1...)
 #   ./secrets.sh admin-keygen <file>                make the admin recovery key (keep <file> OFF the server)
-#   ./secrets.sh seal <device> <dir> <path>... [--to age1...]
+#   ./secrets.sh seal <device> <dir> <path>... [--to age1...] [--out FILE]
 #                                                   encrypt <path>s (relative to <dir>) for <device> and
-#                                                   upload them; asks for the keeper password
+#                                                   upload them (asks for the keeper password), or with
+#                                                   --out write a text bundle for a GitHub secret instead
+#                                                   (see .github/workflows/publish-secrets.yml)
 #   ./secrets.sh fetch <dir> [device] [--chown uid:gid]
 #                                                   download and decrypt a bundle into <dir>, replacing
 #                                                   exactly the sealed paths (default device: this machine)
@@ -33,7 +39,12 @@ valid_name() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || die "device names are 
 ensure_tools() {
   docker image inspect "$TOOLS_IMAGE" >/dev/null 2>&1 && return
   if [ -f "$here/tools/Dockerfile" ]; then docker build -q -t "$TOOLS_IMAGE" "$here/tools" >/dev/null
-  else docker pull "$(conf server):5000/$TOOLS_IMAGE" && docker tag "$(conf server):5000/$TOOLS_IMAGE" "$TOOLS_IMAGE"; fi
+  else
+    local server src; server="$(conf server)"
+    if [[ "$server" == */* ]]; then src="${server%%/*}/$(cut -d/ -f2 <<<"$server")/black-relay/central-tools:latest"
+    else src="$server:5000/$TOOLS_IMAGE"; fi
+    docker pull "$src" && docker tag "$src" "$TOOLS_IMAGE"
+  fi
 }
 # The CA flag for oras, if this store uses its own CA.
 ca_flag() {
@@ -42,6 +53,12 @@ ca_flag() {
   return 0
 }
 repo() { if [ -n "$2" ]; then valid_name "$2"; echo "secrets/$1/$2"; else echo "secrets/$1"; fi; }
+# Where a device's bundle is pulled from: the central store's read-only port, or a registry path (ghcr.io).
+pull_ref() {
+  local server; server="$(conf server)"
+  if [[ "$server" == */* ]]; then echo "$server/$1${2:+/$2}"; else echo "$server:5002/$(repo "$1" "$2")"; fi
+}
+pull_user() { if [ -f "$BR_HOME/user" ]; then conf user; else conf name; fi; }
 read_secret() { # read_secret <prompt> -> stdout
   local v
   if [ -t 0 ]; then read -r -s -p "$1" v </dev/tty; echo >&2; else read -r v; fi
@@ -49,12 +66,13 @@ read_secret() { # read_secret <prompt> -> stdout
 }
 
 cmd_setup() {
-  local server="${1:?usage: setup <server> <name> <ca.crt|->}" name="${2:?name}" ca="${3:?ca.crt or -}" pw
+  local server="${1:?usage: setup <server> <name> <ca.crt|-> [user]}" name="${2:?name}" ca="${3:?ca.crt or -}" user="${4:-}" pw
   valid_name "$name"
   mkdir -p "$BR_HOME"; chmod 700 "$BR_HOME"
   printf '%s\n' "$server" >"$BR_HOME/server"; printf '%s\n' "$name" >"$BR_HOME/name"
   if [ "$ca" = "-" ]; then rm -f "$BR_HOME/ca.crt"; else cp "$ca" "$BR_HOME/ca.crt"; fi
-  pw="$(read_secret "Password for $name (from ./server.sh add-client): ")"
+  if [ -n "$user" ]; then printf '%s\n' "$user" >"$BR_HOME/user"; else rm -f "$BR_HOME/user"; fi
+  pw="$(read_secret "Password or read-only token for ${user:-$name}: ")"
   [ -n "$pw" ] || die "empty password"
   printf '%s\n' "$pw" >"$BR_HOME/password"; chmod 600 "$BR_HOME/password"
   ensure_tools
@@ -84,10 +102,11 @@ cmd_admin_keygen() {
 }
 
 cmd_seal() {
-  local device="" src="" to="" bundle="" paths=() p
+  local device="" src="" to="" bundle="" out="" paths=() p
   while [ $# -gt 0 ]; do
     case "$1" in
       --to) to="${2:?--to needs an age1... key}"; shift 2 ;;
+      --out) out="${2:?--out needs a file}"; shift 2 ;;
       --bundle) bundle="${2:?--bundle needs a name}"; shift 2 ;;
       *) if [ -z "$device" ]; then device="$1"; elif [ -z "$src" ]; then src="$1"; else paths+=("$1"); fi; shift ;;
     esac
@@ -101,9 +120,28 @@ cmd_seal() {
     [ -e "$src/$p" ] || die "not found: $src/$p"
   done
   local server pw admin=""
-  server="$(conf server)"
   [ -f "$BR_HOME/admin-recipients" ] && admin="$(cat "$BR_HOME/admin-recipients")"
   [ -n "$admin" ] || [ -n "${BR_NO_ADMIN_WARNING:-}" ] || echo "warning: no admin recovery key in $BR_HOME/admin-recipients; only $device will be able to open this bundle" >&2
+  if [ -n "$out" ]; then
+    # Offline seal to a text file (for a GitHub secret). Sealing for this machine needs no --to.
+    if [ -z "$to" ] && [ -f "$BR_HOME/name" ] && [ "$(conf name)" = "$device" ]; then to="$(cmd_recipient)"; fi
+    [ -n "$to" ] || die "--out needs --to <the device's ./secrets.sh recipient> (or run it on the device itself)"
+    ensure_tools
+    docker run --rm --network none --tmpfs /work:mode=0700 -v "$src:/src:ro" \
+      -e DEVICE="$device" -e BUNDLE="$bundle" -e TO="$to" -e ADMIN="$admin" "$TOOLS_IMAGE" sh -euc '
+        cd /work
+        { printf "%s\n" "$TO"; [ -z "$ADMIN" ] || printf "%s\n" "$ADMIN"; } >all-recipients
+        printf "blackrelay-bundle: v1\ndevice: %s\nbundle: %s\nrecipient: %s\n" "$DEVICE" "$BUNDLE" "$TO"
+        for p in "$@"; do printf "path: %s\n" "$p"; done
+        tar -C /src --numeric-owner -b 1 -cpf - "$@" | age -a -R all-recipients
+      ' seal "${paths[@]}" >"$out"
+    chmod 600 "$out"
+    echo "sealed ${#paths[@]} path(s) for $device into $out ($(wc -c <"$out" | tr -d ' ') bytes, limit 49152)."
+    echo "Next: gh secret set BUNDLE_$(tr 'a-z-' 'A-Z_' <<<"$device${bundle:+_$bundle}") --env secrets < $out"
+    return
+  fi
+  server="$(conf server)"
+  [[ "$server" != */* ]] || die "$server is a registry path: seal with --out and publish through GitHub (publish-secrets workflow)"
   pw="${BR_KEEPER_PASSWORD:-}"
   [ -n "$pw" ] || pw="$(read_secret "Keeper password for $server:5003: ")"
   ensure_tools
@@ -151,10 +189,10 @@ cmd_fetch() {
   # Runs as root in the container so file owners recorded at seal time (e.g. uid 10001 for the
   # iq-remote key) are kept; --chown sets one owner instead.
   docker run --rm --network host --tmpfs /work:mode=0700 -v "$BR_HOME:/br:ro" -v "$dest:/dest" \
-    -e SERVER="$(conf server)" -e NAME="$(conf name)" -e DEVICE="$device" -e REPO="$(repo "$device" "$bundle")" -e CA="$(ca_flag)" -e OWNER="$owner" \
+    -e REF="$(pull_ref "$device" "$bundle")" -e NAME="$(pull_user)" -e CA="$(ca_flag)" -e OWNER="$owner" \
     "$TOOLS_IMAGE" sh -euc '
       cd /work
-      oras pull $CA -u "$NAME" --password-stdin -o . "$SERVER:5002/$REPO:latest" </br/password >/dev/null
+      oras pull $CA -u "$NAME" --password-stdin -o . "$REF:latest" </br/password >/dev/null
       stage="/dest/.br-fetch.$$"; mkdir -m 700 "$stage"; trap "rm -rf \"$stage\"" EXIT
       age -d -i /br/identity.key bundle.age | tar -C "$stage" --numeric-owner -xpf -
       [ -z "$OWNER" ] || chown -R "$OWNER" "$stage"
@@ -164,7 +202,7 @@ cmd_fetch() {
         [ -e "$stage/$p" ] || { echo "error: bundle lists $p but does not contain it" >&2; exit 1; }
         mkdir -p "$(dirname "/dest/$p")"; rm -rf "/dest/$p"; mv "$stage/$p" "/dest/$p"; n=$((n+1)); echo "  $p"
       done <paths.txt
-      echo "fetched $REPO: $n path(s) replaced, nothing else touched"
+      echo "fetched $REF: $n path(s) replaced, nothing else touched"
     '
 }
 
@@ -177,7 +215,7 @@ cmd_list() {
   valid_name "$device"; [ -z "$bundle" ] || valid_name "$bundle"
   ensure_tools
   docker run --rm -i --network host -v "$BR_HOME:/br:ro" "$TOOLS_IMAGE" \
-    sh -c "oras repo tags $(ca_flag) -u '$(conf name)' --password-stdin '$(conf server):5002/$(repo "$device" "$bundle")' </br/password"
+    sh -c "oras repo tags $(ca_flag) -u '$(pull_user)' --password-stdin '$(pull_ref "$device" "$bundle")' </br/password"
 }
 
 case "${1:-}" in
@@ -187,5 +225,5 @@ case "${1:-}" in
   seal) shift; cmd_seal "$@" ;;
   fetch) shift; cmd_fetch "$@" ;;
   list) shift; cmd_list "$@" ;;
-  *) sed -n '2,20p' "$0"; exit 1 ;;
+  *) sed -n '2,28p' "$0"; exit 1 ;;
 esac

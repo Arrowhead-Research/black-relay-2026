@@ -68,7 +68,7 @@ services:
     build:
       context: ./detection
       dockerfile: fusion-service/Dockerfile
-    image: ${IMAGE_PREFIX-reg.bulexa.com:5000/}black-relay/fusion-service:latest
+    image: ${IMAGE_PREFIX-ghcr.io/arrowhead-research/}black-relay/fusion-service:latest
     depends_on:
       broker: {condition: service_healthy}
     init: true
