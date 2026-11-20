@@ -5,7 +5,8 @@ name: publish-images
 
 on:
   push:
-    branches: [main]
+    # claude/project-thread-o7nn33: lets the branch publish before it is merged (dispatch needs main). Remove after merge.
+    branches: [main, claude/project-thread-o7nn33]
     paths: ["detection/**", ".github/workflows/publish-images.yml"]
   workflow_dispatch:
 
