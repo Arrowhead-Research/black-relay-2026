@@ -9,7 +9,7 @@
 #
 # Everything it writes lives in state/ (0700, never committed). Passwords are printed once and also
 # kept in state/credentials/ (0600) so you can hand them over; delete those files once you have.
-# To use a certificate you already have (for example from `tailscale cert`), set TLS_CERT and TLS_KEY
+# To use a certificate you already have (for example from your own CA), set TLS_CERT and TLS_KEY
 # for `init` and it is copied in instead of the store's own CA issuing one.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

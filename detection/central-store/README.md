@@ -7,6 +7,10 @@ Two stores on the central server, side by side but separate:
 | **Images** (ports 5000/5001) | Container images: fusion, physical bridge, RF, camera, tools | `publisher` login on 5001 | Each host's own login on 5000 (read-only) |
 | **Secrets** (ports 5002/5003) | One encrypted bundle per device: IQ5 pairing keys and certs, broker passwords | `keeper` login on 5003 | Each device's own login on 5002 (read-only) |
 
+Every port is bound only to the address given to `server.sh init` (no VPN or Tailscale needed).
+Put the server on the sensor network or a management VLAN and firewall 5000-5003 to the hosts
+that need them; the traffic is TLS and every request needs a login.
+
 Both are the stock Docker registry (`registry:3.1.2`, pinned by digest), TLS only, non-root,
 read-only filesystem, no capabilities. Each store runs as two containers over one volume: a
 read-write one that only the publisher/keeper can log into, and a read-only one (storage mounted
@@ -37,7 +41,7 @@ unsealed after every reboot, and the server could read every secret. Encrypted b
 running beyond the registry and a stolen server disk gives up no keys. What you give up: any device
 login can download any device's bundle (still ciphertext only it can't open), there is no per-read
 audit log beyond the registry's access log, and rotating means re-pairing and sealing again. For a
-handful of devices on a tailnet that is the better trade; if the fleet grows or you need audited
+handful of devices on a private network that is the better trade; if the fleet grows or you need audited
 access, the bundles can move into OpenBao without changing the devices' layout.
 
 ## Server setup (once)
@@ -45,13 +49,13 @@ access, the bundles can move into OpenBao without changing the devices' layout.
 On the central server (Linux, Docker with Compose v2), with this folder copied there:
 
 ```sh
-./server.sh init 100.x.y.z central.tailnet.ts.net    # the address hosts use, plus any other names
+./server.sh init 192.168.10.5 central.lan    # the server's LAN address hosts use, plus any other names
 docker compose up -d --wait
 ```
 
 `init` makes a small CA and a TLS certificate for those names, the `publisher` and `keeper` logins
 (printed once and kept in `state/credentials/`), and `.env`. Everything goes in `state/` (0700,
-gitignored). Already have a certificate, e.g. from `tailscale cert`? Run
+gitignored). Already have a certificate from your own CA? Run
 `TLS_CERT=central.crt TLS_KEY=central.key ./server.sh init ...` and hosts need no extra CA.
 
 Then one login per host:
@@ -79,7 +83,7 @@ docker login SERVER:5000 -u NAME
 
 macOS (Docker Desktop or OrbStack): add `ca-public.crt` to the login keychain as trusted
 (`security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db ca-public.crt`),
-then restart Docker. Not needed with a `tailscale cert` certificate.
+then restart Docker. Not needed if the certificate is already trusted by the host.
 
 ## Publishing images (build machine)
 
