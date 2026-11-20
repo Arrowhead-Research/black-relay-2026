@@ -1,11 +1,10 @@
-# Single-host stack for sf-dev: central broker, fusion, the physical simulator bench, and the RF
-# simulator feeding rf-analytics through the same broker. See README.md.
+# The simulators, with their own broker and fusion, on one machine. Nothing here is the real central
+# server: it is a stand-in whose fusion API serves simulated RF, panel and camera events.
+# Everything is built from this checkout. No registry, no bundle. See README.md.
 #
-#   ./make-env.sh <bind address>  # writes .env
-#   docker load -i images.tar
-#   docker compose up -d --wait
+#   ./deploy-simulator-api.sh        # writes .env, builds, starts, prints the API address and token
 
-name: black-relay-sfdev
+name: black-relay-sim
 
 x-hardening: &hardening
   restart: unless-stopped
@@ -17,29 +16,28 @@ x-hardening: &hardening
     options: {max-size: 10m, max-file: "3"}
 
 services:
+  # The same broker setup as the central server, reachable only by the containers below.
   broker:
     <<: *hardening
-    image: ${IMAGE_PREFIX-}eclipse-mosquitto:2.1.2-alpine
+    image: eclipse-mosquitto:2.1.2-alpine
     cap_add: [CHOWN, SETUID, SETGID]
     entrypoint: ["/bin/sh", "/broker/entrypoint.sh"]
     environment:
-      BROKER_FUSION_USER: ${BROKER_FUSION_USER:?run ./make-env.sh}
-      BROKER_FUSION_PASSWORD: ${BROKER_FUSION_PASSWORD:?run ./make-env.sh}
-      BROKER_PHYSICAL_USER: ${BROKER_PHYSICAL_USER:?run ./make-env.sh}
-      BROKER_PHYSICAL_PASSWORD: ${BROKER_PHYSICAL_PASSWORD:?run ./make-env.sh}
-      BROKER_RF_USER: ${BROKER_RF_USER:?run ./make-env.sh}
-      BROKER_RF_PASSWORD: ${BROKER_RF_PASSWORD:?run ./make-env.sh}
-      BROKER_CAMERA_USER: ${BROKER_CAMERA_USER:?run ./make-env.sh}
-      BROKER_CAMERA_PASSWORD: ${BROKER_CAMERA_PASSWORD:?run ./make-env.sh}
+      BROKER_FUSION_USER: ${BROKER_FUSION_USER:?run ./deploy-simulator-api.sh}
+      BROKER_FUSION_PASSWORD: ${BROKER_FUSION_PASSWORD:?run ./deploy-simulator-api.sh}
+      BROKER_PHYSICAL_USER: ${BROKER_PHYSICAL_USER:?run ./deploy-simulator-api.sh}
+      BROKER_PHYSICAL_PASSWORD: ${BROKER_PHYSICAL_PASSWORD:?run ./deploy-simulator-api.sh}
+      BROKER_RF_USER: ${BROKER_RF_USER:?run ./deploy-simulator-api.sh}
+      BROKER_RF_PASSWORD: ${BROKER_RF_PASSWORD:?run ./deploy-simulator-api.sh}
+      BROKER_CAMERA_USER: ${BROKER_CAMERA_USER:?run ./deploy-simulator-api.sh}
+      BROKER_CAMERA_PASSWORD: ${BROKER_CAMERA_PASSWORD:?run ./deploy-simulator-api.sh}
     mem_limit: 256m
     tmpfs: [/tmp, "/run/mosquitto-auth:mode=0700", /mosquitto/log]
     volumes:
-      - ./broker/mosquitto.conf:/broker/mosquitto.conf:ro
-      - ./broker/aclfile:/broker/aclfile:ro
-      - ./broker/entrypoint.sh:/broker/entrypoint.sh:ro
+      - ../central-broker/mosquitto.conf:/broker/mosquitto.conf:ro
+      - ../central-broker/aclfile:/broker/aclfile:ro
+      - ../central-broker/entrypoint.sh:/broker/entrypoint.sh:ro
       - broker-data:/mosquitto/data
-    ports:
-      - "${BIND_ADDRESS:?run ./make-env.sh}:1883:1883"
     healthcheck:
       test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -u \"$$BROKER_FUSION_USER\" -P \"$$BROKER_FUSION_PASSWORD\" -t 'detection/#' -E -W 3"]
       interval: 30s
@@ -47,9 +45,13 @@ services:
       retries: 3
       start_period: 10s
 
+  # The one thing this stack exposes: the fusion API.
   fusion:
     <<: *hardening
-    image: ${IMAGE_PREFIX-}black-relay/fusion-service:sfdev
+    build:
+      context: ..
+      dockerfile: fusion-service/Dockerfile
+    image: black-relay/fusion-service:sim
     depends_on:
       broker: {condition: service_healthy}
     init: true
@@ -58,14 +60,13 @@ services:
       FUSION_CAMERA_SCHEMAS: /contracts/camera
       FUSION_RF_SCHEMAS: /contracts/rf
       FUSION_PHYSICAL_SCHEMAS: /contracts/physical
-      FUSION_API_TOKEN: ${FUSION_API_TOKEN:?run ./make-env.sh}
+      FUSION_API_TOKEN: ${FUSION_API_TOKEN:?run ./deploy-simulator-api.sh}
       FUSION_CENTRAL_MQTT_USER: ${BROKER_FUSION_USER}
       FUSION_CENTRAL_MQTT_PASSWORD: ${BROKER_FUSION_PASSWORD}
-      # The kits' broker password: fusion derives the kits' Frigate proxy secret from it to
-      # fetch detection snapshots (GET /api/v1/events/{id}/snapshot).
+      # Lets the snapshot route answer. A mock camera has no image behind it, so it answers 404.
       FUSION_CAMERA_PASSWORD: ${BROKER_CAMERA_PASSWORD}
     ports:
-      - "${BIND_ADDRESS}:8090:8090"
+      - "${API_PORT:-8090}:8090"
     volumes:
       - fusion-data:/data
       - ./fusion.config.yaml:/config/config.yaml:ro
@@ -81,7 +82,10 @@ services:
   # Panel simulator + the physical bridge (bench.sh --simulator), publishing to `broker`.
   # Drive it:  docker compose exec physical-sim sh -c 'echo "zone 12 Open" > /app/fusion-service/bench/sim.in'
   physical-sim:
-    image: ${IMAGE_PREFIX-}black-relay/physical-sim:sfdev
+    build:
+      context: ..
+      dockerfile: simulator-deploy/physical-sim/Dockerfile
+    image: black-relay/physical-sim:sim
     restart: unless-stopped
     init: true
     depends_on:
@@ -95,9 +99,12 @@ services:
       driver: json-file
       options: {max-size: 10m, max-file: "3"}
 
+  # Turns the RF simulator's raw observations into the alerts fusion stores: three per scenario
+  # hour, the first about 21 minutes in.
   rf-analytics:
     <<: *hardening
-    image: ${IMAGE_PREFIX-}black-relay/rf-analytics:sfdev
+    build: ../rf-subsystem/analytics
+    image: black-relay/rf-analytics:sim
     depends_on:
       broker: {condition: service_healthy}
     environment:
@@ -117,17 +124,20 @@ services:
       - -o
       - none
     volumes:
-      - ./rf/dev-site.yaml:/rf/dev-site.yaml:ro
+      - ../rf-subsystem/simulator/sites/dev-site.yaml:/rf/dev-site.yaml:ro
       - rf-analytics-data:/data
     tmpfs: [/tmp]
 
   # Replays the one-hour scenario in real time (faster runs stamp observations in the future and
   # fusion rejects anything more than 60 s ahead); the restart policy starts it again when it ends.
-  # Observations go to detection/rf/sim/observations on the central broker, which only the RF
-  # credential can read; fusion does not subscribe to it.
+  # Observations go to detection/rf/sim/observations, which only the RF credential can read;
+  # fusion does not subscribe to it.
   rfsim:
     <<: *hardening
-    image: ${IMAGE_PREFIX-}black-relay/rfsim:sfdev
+    build:
+      context: ../rf-subsystem/simulator
+      dockerfile: ../../simulator-deploy/rfsim/Dockerfile
+    image: black-relay/rfsim:sim
     depends_on:
       broker: {condition: service_healthy}
     environment:

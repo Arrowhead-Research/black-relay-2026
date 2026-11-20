@@ -1,7 +1,7 @@
 **
 !physical-subsystem/**
 !fusion-service/scripts/physical-sim-bench.sh
-!deploy/physical-sim/run.sh
+!simulator-deploy/physical-sim/run.sh
 **/.venv
 **/bench
 **/__pycache__
