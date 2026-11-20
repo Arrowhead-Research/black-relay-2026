@@ -17,5 +17,8 @@ detection/central/make-env.sh                                       # ./.env: br
 docker compose up -d --wait
 ```
 
+Bridges get their broker login without copying passwords: `detection/central/share-broker-login.sh <device>` here,
+then `detection/physical-subsystem/deploy/scripts/fetch-broker-login.sh` on the bridge.
+
 Already running the store from `detection/central-store`? Stop it there first (`docker compose down`, no `-v`); its
 data volumes keep their names, so nothing is lost.

@@ -367,8 +367,10 @@ added/removed, partition arming/alarm) for the requested time. With `pin_mode: r
 material.
 
 Team output (optional): the central broker runs on the central server (repo-root `compose.yaml`). Put its physical
-password (`BROKER_PHYSICAL_PASSWORD` in the central server's `.env`) in `deploy/secrets/fusion_password`, owned by
-uid 10003, mode 0600 (`sudo FUSION_PASSWORD=... ./scripts/gen-certs.sh <host>` writes it), set `fusion.enabled: true`
+password in `deploy/secrets/fusion_password` (uid 10003, 0600). Automated: on the central server run
+`detection/central/share-broker-login.sh <device>` (seals it for this bridge in the secrets store), then here
+`deploy/scripts/fetch-broker-login.sh` (needs `central-store/secrets.sh setup` once). By hand:
+`sudo FUSION_PASSWORD=... ./scripts/gen-certs.sh <host>`. Then set `fusion.enabled: true`
 in `config.yaml` (the example already points at `reg.bulexa.com:8883` with TLS and the `physical-subsystem` login), then:
 
 ```sh

@@ -13,6 +13,10 @@
 #                                                   exactly the sealed paths (default device: this machine)
 #   ./secrets.sh list [device]                      bundles stored for a device (latest + dated versions)
 #
+# seal, fetch and list take --bundle NAME for a second, independent bundle per device (e.g. `broker`,
+# the central broker login that detection/central/share-broker-login.sh seals). Without it: the main
+# bundle (pairing keys). BR_RESOLVE=host:port:address pins a name to an address (like curl --resolve).
+#
 # Settings live in $BR_HOME (default ~/.black-relay, 0700): server, name, password, ca.crt, identity.key
 # and, optionally, admin-recipients (one age1... per line; every bundle sealed here is also readable by them).
 # The keeper password comes from $BR_KEEPER_PASSWORD or a prompt; it is never written to disk.
@@ -32,7 +36,12 @@ ensure_tools() {
   else docker pull "$(conf server):5000/$TOOLS_IMAGE" && docker tag "$(conf server):5000/$TOOLS_IMAGE" "$TOOLS_IMAGE"; fi
 }
 # The CA flag for oras, if this store uses its own CA.
-ca_flag() { [ -s "$BR_HOME/ca.crt" ] && echo "--ca-file /br/ca.crt" || true; }
+ca_flag() {
+  [ -s "$BR_HOME/ca.crt" ] && printf '%s ' "--ca-file /br/ca.crt"
+  [ -z "${BR_RESOLVE:-}" ] || printf '%s ' "--resolve $BR_RESOLVE"
+  return 0
+}
+repo() { if [ -n "$2" ]; then valid_name "$2"; echo "secrets/$1/$2"; else echo "secrets/$1"; fi; }
 read_secret() { # read_secret <prompt> -> stdout
   local v
   if [ -t 0 ]; then read -r -s -p "$1" v </dev/tty; echo >&2; else read -r v; fi
@@ -75,15 +84,16 @@ cmd_admin_keygen() {
 }
 
 cmd_seal() {
-  local device="" src="" to="" paths=() p
+  local device="" src="" to="" bundle="" paths=() p
   while [ $# -gt 0 ]; do
     case "$1" in
       --to) to="${2:?--to needs an age1... key}"; shift 2 ;;
+      --bundle) bundle="${2:?--bundle needs a name}"; shift 2 ;;
       *) if [ -z "$device" ]; then device="$1"; elif [ -z "$src" ]; then src="$1"; else paths+=("$1"); fi; shift ;;
     esac
   done
   [ -n "$device" ] && [ -n "$src" ] && [ ${#paths[@]} -gt 0 ] || die "usage: seal <device> <dir> <path>... [--to age1...]"
-  valid_name "$device"
+  valid_name "$device"; [ -z "$bundle" ] || valid_name "$bundle"
   [ -z "$to" ] || [[ "$to" =~ ^age1[0-9a-z]{58}$ ]] || die "--to is not an age public key: $to"
   src="$(cd "$src" && pwd)"
   for p in "${paths[@]}"; do
@@ -93,18 +103,20 @@ cmd_seal() {
   local server pw admin=""
   server="$(conf server)"
   [ -f "$BR_HOME/admin-recipients" ] && admin="$(cat "$BR_HOME/admin-recipients")"
-  [ -n "$admin" ] || echo "warning: no admin recovery key in $BR_HOME/admin-recipients; only $device will be able to open this bundle" >&2
+  [ -n "$admin" ] || [ -n "${BR_NO_ADMIN_WARNING:-}" ] || echo "warning: no admin recovery key in $BR_HOME/admin-recipients; only $device will be able to open this bundle" >&2
   pw="${BR_KEEPER_PASSWORD:-}"
   [ -n "$pw" ] || pw="$(read_secret "Keeper password for $server:5003: ")"
   ensure_tools
   # The plaintext only ever exists as a pipe inside this container: tar | age. /work is memory-backed.
   printf '%s\n' "$pw" | docker run --rm -i --network host --tmpfs /work:mode=0700 -v "$BR_HOME:/br:ro" -v "$src:/src:ro" \
-    -e SERVER="$server" -e DEVICE="$device" -e TO="$to" -e ADMIN="$admin" -e CA="$(ca_flag)" -e TYPE="$ARTIFACT_TYPE" \
+    -e SERVER="$server" -e DEVICE="$device" -e REPO="$(repo "$device" "$bundle")" -e TO="$to" -e ADMIN="$admin" -e CA="$(ca_flag)" -e TYPE="$ARTIFACT_TYPE" \
     "$TOOLS_IMAGE" sh -euc '
       read -r pw; cd /work
-      ref="$SERVER:5003/secrets/$DEVICE"
+      ref="$SERVER:5003/$REPO"
       if [ -z "$TO" ]; then
-        printf "%s" "$pw" | oras pull $CA -u keeper --password-stdin -o prev "$ref:latest" >/dev/null 2>&1 \
+        # The device key is recorded with its bundles: this bundle first, then its main bundle.
+        { printf "%s" "$pw" | oras pull $CA -u keeper --password-stdin -o prev "$ref:latest" >/dev/null 2>&1 ||
+          printf "%s" "$pw" | oras pull $CA -u keeper --password-stdin -o prev "$SERVER:5003/secrets/$DEVICE:latest" >/dev/null 2>&1; } \
           || { echo "error: no earlier bundle for $DEVICE, so its key is unknown: pass --to <its ./secrets.sh recipient>" >&2; exit 1; }
         TO="$(head -n1 prev/recipients.txt)"
       fi
@@ -121,16 +133,17 @@ cmd_seal() {
 }
 
 cmd_fetch() {
-  local dest="" device="" owner=""
+  local dest="" device="" owner="" bundle=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --chown) owner="${2:?--chown needs uid:gid}"; shift 2 ;;
+      --bundle) bundle="${2:?--bundle needs a name}"; shift 2 ;;
       *) if [ -z "$dest" ]; then dest="$1"; else device="$1"; fi; shift ;;
     esac
   done
   [ -n "$dest" ] || die "usage: fetch <dir> [device] [--chown uid:gid]"
   [ -n "$device" ] || device="$(conf name)"
-  valid_name "$device"
+  valid_name "$device"; [ -z "$bundle" ] || valid_name "$bundle"
   [ -z "$owner" ] || [[ "$owner" =~ ^[0-9]+:[0-9]+$ ]] || die "--chown takes numeric uid:gid"
   mkdir -p "$dest"; dest="$(cd "$dest" && pwd)"
   conf identity.key >/dev/null
@@ -138,10 +151,10 @@ cmd_fetch() {
   # Runs as root in the container so file owners recorded at seal time (e.g. uid 10001 for the
   # iq-remote key) are kept; --chown sets one owner instead.
   docker run --rm --network host --tmpfs /work:mode=0700 -v "$BR_HOME:/br:ro" -v "$dest:/dest" \
-    -e SERVER="$(conf server)" -e NAME="$(conf name)" -e DEVICE="$device" -e CA="$(ca_flag)" -e OWNER="$owner" \
+    -e SERVER="$(conf server)" -e NAME="$(conf name)" -e DEVICE="$device" -e REPO="$(repo "$device" "$bundle")" -e CA="$(ca_flag)" -e OWNER="$owner" \
     "$TOOLS_IMAGE" sh -euc '
       cd /work
-      oras pull $CA -u "$NAME" --password-stdin -o . "$SERVER:5002/secrets/$DEVICE:latest" </br/password >/dev/null
+      oras pull $CA -u "$NAME" --password-stdin -o . "$SERVER:5002/$REPO:latest" </br/password >/dev/null
       stage="/dest/.br-fetch.$$"; mkdir -m 700 "$stage"; trap "rm -rf \"$stage\"" EXIT
       age -d -i /br/identity.key bundle.age | tar -C "$stage" --numeric-owner -xpf -
       [ -z "$OWNER" ] || chown -R "$OWNER" "$stage"
@@ -151,16 +164,20 @@ cmd_fetch() {
         [ -e "$stage/$p" ] || { echo "error: bundle lists $p but does not contain it" >&2; exit 1; }
         mkdir -p "$(dirname "/dest/$p")"; rm -rf "/dest/$p"; mv "$stage/$p" "/dest/$p"; n=$((n+1)); echo "  $p"
       done <paths.txt
-      echo "fetched secrets/$DEVICE: $n path(s) replaced, nothing else touched"
+      echo "fetched $REPO: $n path(s) replaced, nothing else touched"
     '
 }
 
 cmd_list() {
-  local device="${1:-$(conf name)}"
-  valid_name "$device"
+  local device="" bundle=""
+  while [ $# -gt 0 ]; do
+    case "$1" in --bundle) bundle="${2:?--bundle needs a name}"; shift 2 ;; *) device="$1"; shift ;; esac
+  done
+  [ -n "$device" ] || device="$(conf name)"
+  valid_name "$device"; [ -z "$bundle" ] || valid_name "$bundle"
   ensure_tools
   docker run --rm -i --network host -v "$BR_HOME:/br:ro" "$TOOLS_IMAGE" \
-    sh -c "oras repo tags $(ca_flag) -u '$(conf name)' --password-stdin '$(conf server):5002/secrets/$device' </br/password"
+    sh -c "oras repo tags $(ca_flag) -u '$(conf name)' --password-stdin '$(conf server):5002/$(repo "$device" "$bundle")' </br/password"
 }
 
 case "${1:-}" in
