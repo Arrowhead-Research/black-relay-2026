@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fetches this bridge's central broker login (sealed on the central server by
-# detection/central/share-broker-login.sh) into deploy/secrets/fusion_password, owned by the fusion
+# detection/central/share-broker-login.sh) into deploy/secrets/fusion/fusion_password, owned by the fusion
 # publisher's uid (10003), mode 0600. Needs `secrets.sh setup` done once on this machine.
 #   deploy/scripts/fetch-broker-login.sh [device]      (default: this machine's name from secrets.sh setup)
 set -euo pipefail

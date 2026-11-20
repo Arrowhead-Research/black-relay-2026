@@ -52,7 +52,8 @@ def test_every_service_is_hardened_and_non_root():
         assert s.get("cap_drop") == ["ALL"], name
         assert "no-new-privileges:true" in s.get("security_opt", []), name
         assert s.get("read_only") is True, name
-        if name != "init-perms":                          # the one-shot root helper that sets volume ownership
+        # the one-shot root helpers: init-perms sets volume ownership, bootstrap hands generated files to their uids
+        if name not in ("init-perms", "bootstrap"):
             u = str(s.get("user", "0"))
             assert u.split(":")[0] not in ("0", "root"), f"{name} runs as root"
     assert COMPOSE["services"]["mosquitto"]["user"] == "1883:1883"

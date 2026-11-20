@@ -22,11 +22,11 @@ def broker(tmp_path_factory):
     out = subprocess.run([str(dep / "scripts/gen-certs.sh"), "127.0.0.1"], cwd=dep, capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     pw = dict(re.findall(r"(homeassistant|nodered) MQTT password: (\S+)", out.stdout))
-    pw["blackrelay"] = (dep / "secrets/mqtt_password").read_text().strip()
+    pw["blackrelay"] = (dep / "secrets/outbound/mqtt_password").read_text().strip()
     port = free_port()
     conf = (dep / "mosquitto/mosquitto.conf").read_text()
     conf = (conf.replace("/mosquitto/config/passwd", str(dep / "mosquitto/passwd"))
-            .replace("/mosquitto/config/acl", str(dep / "mosquitto/acl")).replace("/certs/", str(dep / "certs") + "/")
+            .replace("/mosquitto/config/acl", str(dep / "mosquitto/acl")).replace("/certs/", str(dep / "certs/mosquitto") + "/")
             .replace("persistence true", "persistence false").replace("log_dest stdout", "log_dest none")
             .replace("persistence_location /mosquitto/data/\n", "").replace("listener 8883", f"listener {port} 127.0.0.1"))
     conf = "user root\n" + conf
@@ -104,7 +104,7 @@ async def test_real_publisher_through_shipped_broker_never_subscribes(broker, tm
     from br2.normalizer.store import Store, Reader
     dep = broker["dep"]
     cfg = C.parse({"mqtt": {"host": "127.0.0.1", "port": broker["port"], "ca_file": broker["ca"],
-                            "password_file": str(dep / "secrets/mqtt_password")},
+                            "password_file": str(dep / "secrets/outbound/mqtt_password")},
                    "storage": {"data_dir": str(tmp_path)}})
     s = Store(cfg.db_path)
     st = OutState()

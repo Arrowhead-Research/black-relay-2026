@@ -96,7 +96,7 @@ fusion:
     certfile: null                # optional client certificate
     keyfile: null
   username: physical-subsystem    # BROKER_PHYSICAL_USER on the central server
-  password_file: /run/secrets/fusion_password   # deploy/secrets/fusion_password (uid 10003, 0600)
+  password_file: /run/secrets/fusion_password   # deploy/secrets/fusion/fusion_password (uid 10003, 0600)
   topic_prefix: detection/physical
   client_id: physical-subsystem   # must be unique on the team broker
   status_interval_s: 60           # panel status and every zone status are re-sent at least this often

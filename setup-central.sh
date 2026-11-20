@@ -104,11 +104,11 @@ if [ "$bridge" = 1 ]; then
   envset BRIDGE_MQTT_PORT 8884
   envset IMAGE_PREFIX ""                     # bridge images are built here from this checkout
   if [ -n "$domain" ]; then envset CENTRAL_BROKER_NAME "$domain"; envset CENTRAL_BROKER_IP "$address"; fi
-  if [ ! -f "$dep/certs/broker/broker.crt" ]; then
+  if [ ! -f "$dep/certs/mosquitto/broker/broker.crt" ]; then
     echo "   generating the bridge's certificates and logins (sudo: files belong to the container users)"
     (cd "$dep" && as_root env FUSION_PASSWORD="$phys_pw" ./scripts/gen-certs.sh "$address" ${domain:+"$domain"}) | sed 's/^/   /'
   else
-    printf '%s\n' "$phys_pw" | as_root sh -c "umask 077; cat >'$dep/secrets/fusion_password' && chown 10003 '$dep/secrets/fusion_password'"
+    printf '%s\n' "$phys_pw" | as_root sh -c "umask 077; mkdir -p '$dep/secrets/fusion' && cat >'$dep/secrets/fusion/fusion_password' && chown 10003 '$dep/secrets/fusion' '$dep/secrets/fusion/fusion_password'"
   fi
   if [ ! -f "$dep/config/config.yaml" ]; then
     [ -n "$panel_ip" ] || { echo "--with-bridge needs --panel-ip the first time" >&2; exit 2; }

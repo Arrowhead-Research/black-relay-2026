@@ -21,7 +21,7 @@ umask 077
 base=/dev/shm; [ -d "$base" ] && [ -w "$base" ] || base="${TMPDIR:-/tmp}"
 work="$(mktemp -d "$base/br-share.XXXXXX")"; trap 'rm -rf "$work"' EXIT
 # A throwaway secrets.sh home that talks to this server's own store.
-mkdir -p "$work/home" "$work/src/secrets"
+mkdir -p "$work/home" "$work/src/secrets/fusion"
 if [ -s "$store/state/acme/name" ]; then
   name="$(cat "$store/state/acme/name")"
   echo "$name" >"$work/home/server"
@@ -31,7 +31,7 @@ else
 fi
 echo central >"$work/home/name"
 [ ! -f "$HOME/.black-relay/admin-recipients" ] || cp "$HOME/.black-relay/admin-recipients" "$work/home/"
-printf '%s\n' "$pw" >"$work/src/secrets/fusion_password"
+printf '%s\n' "$pw" >"$work/src/secrets/fusion/fusion_password"
 # No admin recovery copy needed: the password also lives in the central .env.
-BR_NO_ADMIN_WARNING=1 BR_HOME="$work/home" BR_KEEPER_PASSWORD="$keeper" "$store/secrets.sh" seal "$device" "$work/src" secrets/fusion_password --bundle broker "$@"
+BR_NO_ADMIN_WARNING=1 BR_HOME="$work/home" BR_KEEPER_PASSWORD="$keeper" "$store/secrets.sh" seal "$device" "$work/src" secrets/fusion/fusion_password --bundle broker "$@"
 echo "On $device: detection/physical-subsystem/deploy/scripts/fetch-broker-login.sh"

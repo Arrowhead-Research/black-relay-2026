@@ -271,9 +271,9 @@ configuration on `BRIDGE_HOST`, in `physical-subsystem/deploy/`.
 ```sh
 cd detection/physical-subsystem/deploy
 umask 077
-printf '%s\n' '<BROKER_PHYSICAL_PASSWORD from the central node .env>' > secrets/fusion_password
-sudo chown 10003:10000 secrets/fusion_password      # uid of the outbound/fusion image, as gen-certs.sh does for the others
-chmod 0400 secrets/fusion_password
+printf '%s\n' '<BROKER_PHYSICAL_PASSWORD from the central node .env>' > secrets/fusion/fusion_password
+sudo chown 10003:10000 secrets/fusion secrets/fusion/fusion_password      # uid of the outbound/fusion image, as gen-certs.sh does for the others
+chmod 0400 secrets/fusion/fusion_password
 ```
 
 `secrets/` is already gitignored and already holds `mqtt_password` and `control4_token`
@@ -301,13 +301,8 @@ exposure the camera relay's broker has today.
 
 ### 2.3 `docker-compose.yml`, the `fusion` service
 
-Three edits:
-
-1. Remove `networks: [fusion]` from the `fusion` service. With no `networks` key it joins the
-   project's default bridge network, which reaches `CENTRAL_ADDR` through the host.
-2. Uncomment `secrets: [fusion_password]` on the service and add
-   `fusion_password: {file: ./secrets/fusion_password}` under the top-level `secrets:`.
-3. Remove the top-level `networks: fusion:` block entirely. Nothing else used it.
+Nothing to edit any more: the `fusion` service already has its own outbound network (`fusion-out`) instead
+of the external `fusion` network, and mounts `./secrets/fusion` at `/run/secrets`.
 
 The egress firewall needs no change: `nftables/blackrelay-egress.nft` fences uids 10001, 10002
 and 10004 only; uid 10003 (outbound and fusion) is unrestricted, which is what carries the

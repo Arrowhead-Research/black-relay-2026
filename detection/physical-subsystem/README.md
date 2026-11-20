@@ -367,7 +367,7 @@ added/removed, partition arming/alarm) for the requested time. With `pin_mode: r
 material.
 
 Team output (optional): the central broker runs on the central server (repo-root `compose.yaml`). Put its physical
-password in `deploy/secrets/fusion_password` (uid 10003, 0600). Automated: on the central server run
+password in `deploy/secrets/fusion/fusion_password` (uid 10003, 0600). Automated: on the central server run
 `detection/central/share-broker-login.sh <device>` (seals it for this bridge in the secrets store), then here
 `deploy/scripts/fetch-broker-login.sh` (needs `central-store/secrets.sh setup` once). By hand:
 `sudo FUSION_PASSWORD=... ./scripts/gen-certs.sh <host>`. Then set `fusion.enabled: true`
@@ -524,7 +524,7 @@ relying on the stack; no result of such a run is recorded in this document.
 | `blackrelay_adapter_bad_zone_ids_total` rising | The panel sent a zone row whose id is not a plain integer; the row is dropped and one resync is requested. Look at `docker compose logs iq-remote` |
 | Log banner "WEAKENED PANEL CERTIFICATE PINNING" | `pin_mode` is `tofu` or `pin_accept_rotation` is on. Development only; switch back to the defaults |
 | `br2 pair`: "no panel completed the pairing" | Pair tapped on the panel? Same subnet? Inbound TCP to the printed port and UDP 5353 allowed on this host? `--plugin-ip` right on a multi-homed host? |
-| `fusion` container cannot connect | `reg.bulexa.com` resolves to the central server from this host? Port 8883 reachable? Password in `secrets/fusion_password` matches `BROKER_PHYSICAL_PASSWORD`? |
+| `fusion` container cannot connect | `reg.bulexa.com` resolves to the central server from this host? Port 8883 reachable? Password in `secrets/fusion/fusion_password` matches `BROKER_PHYSICAL_PASSWORD`? |
 | Log line "fusion: TLS is OFF" | `fusion.tls` is null: use port 8883 with the `tls` block from the example |
 | No messages on `detection/physical/#` | `fusion.enabled: true`? Correct host? `physical_fusion_connected` metric (in-process mode) or the container log. Client id clash with another client on the broker makes both disconnect repeatedly |
 | Messages arrive late or twice | Normal after an outage: at-least-once; dedupe on `id` |
