@@ -26,7 +26,11 @@ RECIPIENT="$(age-keygen -y "$BR/identity.key")"
 if [ ! -f certs/mosquitto/broker/broker.crt ]; then
   say "generating local certificates and logins"
   # shellcheck disable=SC2086
-  ./scripts/gen-certs.sh ${BRIDGE_HOSTS:-127.0.0.1} | grep -v -e 'password:' -e '^Next:' -e '^Control4' || true
+  out="$(./scripts/gen-certs.sh ${BRIDGE_HOSTS:-127.0.0.1})"
+  # The Home Assistant / Node-RED broker logins go to a private file, never to the container log.
+  grep 'MQTT password:' <<<"$out" >secrets/consumer-logins.txt || true
+  chmod 600 secrets/consumer-logins.txt
+  say "Home Assistant / Node-RED broker logins: deploy/secrets/consumer-logins.txt"
 fi
 
 # 3. config
