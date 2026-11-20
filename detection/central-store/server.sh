@@ -163,6 +163,10 @@ cmd_letsencrypt() {
     --dns.resolvers 1.1.1.1:53 --domains "$name" "${action[@]}"
   local crt="state/acme/certificates/$name.crt" key="state/acme/certificates/$name.key"
   [ -f "$crt" ] || die "no certificate was issued; see the output above"
+  if [[ "${LEGO_SERVER:-}" == *staging* ]]; then
+    echo "staging test passed: a (untrusted) test certificate was issued; not installing it"
+    rm -rf state/acme/certificates; return 0
+  fi
   if ! cmp -s "$crt" state/tls/server.crt; then
     cp "$crt" state/tls/server.crt; cp "$key" state/tls/server.key; chmod 600 state/tls/server.key
     echo "installed a Let's Encrypt certificate for $name"
