@@ -11,6 +11,9 @@
 #   --cloudflare-token F  file holding a Cloudflare API token (Zone:Read + DNS:Edit on that zone);
 #                         asked for once if missing, then kept in detection/central-store/state/
 #   --no-cron             do not add the daily certificate renewal to this user's crontab
+#   --with-bridge         also run the physical (IQ5) bridge on this server: its certs, config, broker
+#                         login and containers (detection/physical-subsystem/deploy). Asks for sudo once.
+#   --panel-ip IP         the IQ5 panel's address, with --with-bridge (needed the first time)
 #
 # Safe to run again: existing logins, passwords, certificates and data are kept. Needs Docker with
 # Compose v2 and bash. Prints where every login is at the end.
@@ -19,19 +22,21 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 store="$root/detection/central-store"
 cd "$root"
 
-address="" domain="" email="" token_file="" cron=1
+address="" domain="" email="" token_file="" cron=1 bridge=0 panel_ip=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --domain) domain="${2:?--domain needs a name}"; shift 2 ;;
     --email) email="${2:?--email needs an address}"; shift 2 ;;
     --cloudflare-token) token_file="${2:?--cloudflare-token needs a file}"; shift 2 ;;
     --no-cron) cron=0; shift ;;
-    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+    --with-bridge) bridge=1; shift ;;
+    --panel-ip) panel_ip="${2:?--panel-ip needs an address}"; shift 2 ;;
+    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
     -*) echo "unknown option $1" >&2; exit 2 ;;
     *) address="$1"; shift ;;
   esac
 done
-[ -n "$address" ] || { sed -n '2,18p' "$0"; exit 2; }
+[ -n "$address" ] || { sed -n '2,21p' "$0"; exit 2; }
 [ -z "$domain" ] || [ -n "$email" ] || { echo "--domain needs --email (Let's Encrypt account)" >&2; exit 2; }
 step() { printf '\n== %s\n' "$*"; }
 
@@ -77,6 +82,57 @@ step "Starting registry, secrets store, broker and fusion"
 docker compose up -d --wait --build
 docker compose ps --format '   {{.Service}}: {{.Status}}'
 
+if [ "$bridge" = 1 ]; then
+  dep="$root/detection/physical-subsystem/deploy"
+  as_root() { if [ "$(id -u)" = 0 ] || [ -n "${NO_SUDO:-}" ]; then "$@"; else sudo "$@"; fi; }
+  # Sets KEY inside a top-level YAML block (keeps any trailing comment). The example config is flat enough.
+  set_yaml() { # set_yaml <block> <key> <value>
+    # A key that held a nested block (e.g. fusion.tls) loses its nested lines when set to a scalar.
+    awk -v b="$1" -v k="$2" -v v="$3" '
+      skip && /^    / { next }
+      { skip = 0 }
+      /^[a-z_]+:/ { blk = substr($1, 1, length($1) - 1) }
+      blk == b && !done && $0 ~ "^  " k ":" { c = ""; i = index($0, " #"); if (i) c = "  " substr($0, i + 1)
+                                              print "  " k ": " v c; done = 1; skip = 1; next }
+      { print }' "$dep/config/config.yaml" >"$dep/config/config.yaml.new" && mv "$dep/config/config.yaml.new" "$dep/config/config.yaml"
+  }
+  envset() { touch "$dep/.env"; grep -q "^$1=" "$dep/.env" || printf '%s=%s\n' "$1" "$2" >>"$dep/.env"; }
+
+  step "Physical bridge on this server"
+  phys_pw="$(grep '^BROKER_PHYSICAL_PASSWORD=' "$root/.env" | cut -d= -f2-)"
+  # The bridge's own broker (for Home Assistant / Node-RED) moves to 8884: the central broker has 8883.
+  envset BRIDGE_MQTT_PORT 8884
+  envset IMAGE_PREFIX ""                     # bridge images are built here from this checkout
+  if [ -n "$domain" ]; then envset CENTRAL_BROKER_NAME "$domain"; envset CENTRAL_BROKER_IP "$address"; fi
+  if [ ! -f "$dep/certs/broker/broker.crt" ]; then
+    echo "   generating the bridge's certificates and logins (sudo: files belong to the container users)"
+    (cd "$dep" && as_root env FUSION_PASSWORD="$phys_pw" ./scripts/gen-certs.sh "$address" ${domain:+"$domain"}) | sed 's/^/   /'
+  else
+    printf '%s\n' "$phys_pw" | as_root sh -c "umask 077; cat >'$dep/secrets/fusion_password' && chown 10003 '$dep/secrets/fusion_password'"
+  fi
+  if [ ! -f "$dep/config/config.yaml" ]; then
+    [ -n "$panel_ip" ] || { echo "--with-bridge needs --panel-ip the first time" >&2; exit 2; }
+    cp "$dep/config/config.example.yaml" "$dep/config/config.yaml"
+  fi
+  [ -z "$panel_ip" ] || set_yaml iq_remote panel_ip "$panel_ip"
+  set_yaml mqtt port 8884
+  set_yaml fusion enabled true
+  if [ -n "$domain" ]; then
+    set_yaml fusion host "$domain"; set_yaml fusion port 8883
+  else  # no public certificate: same host, so plain 1883 to the central broker never leaves this machine
+    set_yaml fusion host "$address"; set_yaml fusion port 1883; set_yaml fusion tls null
+  fi
+  if ! as_root sh -c "ls '$dep'/data/pki/panel_pin.json '$dep'/data/pki/*/panel_pin.json" >/dev/null 2>&1; then
+    echo "   NOTE: no panel pairing in $dep/data/pki yet. Pair once (detection/physical-subsystem/README.md,"
+    echo "   'Pairing'), or restore a sealed bundle: detection/central-store/secrets.sh fetch $dep"
+  fi
+  (cd "$dep" && docker compose --profile fusion up -d --build --wait normalizer outbound mosquitto fusion iq-remote)
+  (cd "$dep" && docker compose --profile fusion ps --format '   {{.Service}}: {{.Status}}')
+  echo "   Firewall: set PANEL_IP in $dep/nftables/blackrelay-egress.nft and load it (sudo nft -f ...)."
+  [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo 0)" = 0 ] || \
+    echo "   Note: IP forwarding is on (Docker needs it); keep the panel network out of the forward path with nftables."
+fi
+
 name="${domain:-$address}"
 step "Done"
 cat <<EOF
@@ -88,4 +144,5 @@ $( [ -z "$domain" ] && echo "   Hosts must trust detection/central-store/state/c
 
    Add a host:        detection/central-store/server.sh add-client <name> [--secrets]
    Give a bridge its broker login:  detection/central/share-broker-login.sh <name>
+$( [ "$bridge" = 1 ] && echo "   Bridge      API https://$address:8443   local broker $address:8884   publishing to the central broker" )
 EOF

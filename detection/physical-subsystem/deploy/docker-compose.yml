@@ -172,6 +172,9 @@ services:
       - fusion-state:/state        # its OWN small volume: the outbox journal + producer cursor (/state/fusion)
       - ./config/config.yaml:/config/config.yaml:ro
     secrets: [fusion_password]     # fusion.password_file: /run/secrets/fusion_password
+    # Lets the publisher reach the central broker by its certificate name even where LAN DNS will not resolve it
+    # (setup-central.sh --with-bridge sets these; the default is an unused placeholder).
+    extra_hosts: ["${CENTRAL_BROKER_NAME:-central-broker.invalid}:${CENTRAL_BROKER_IP:-127.0.0.1}"]
     # Health/metrics: the service serves /metrics and /healthz on fusion.metrics_host:fusion.metrics_port (default
     # 127.0.0.1:9101, i.e. inside this container only). Unhealthy = the producer loop stalled, or the oldest queued
     # message is older than fusion.health_max_backlog_age_s (broker unreachable / not acking). Outbox depth, drops and
@@ -190,7 +193,9 @@ services:
     <<: *hardening
     user: "1883:1883"             # non-root (the image's mosquitto user); keys are 0600 owned by 1883 (gen-certs.sh)
     depends_on: {init-perms: {condition: service_completed_successfully}}
-    ports: ["8883:8883"]          # TLS only. No 1883.
+    # TLS only, no 1883. BRIDGE_MQTT_PORT=8884 (deploy/.env) when this host also runs the central broker on 8883;
+    # then set mqtt.port: 8884 in config.yaml too (setup-central.sh --with-bridge does both).
+    ports: ["${BRIDGE_MQTT_PORT:-8883}:8883"]
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - ./mosquitto/acl:/mosquitto/config/acl:ro

@@ -19,6 +19,12 @@ publicly trusted certificate (so no host has to install a CA), creates every log
 cron and starts everything. Without `--domain` it uses its own CA instead. Running it again keeps all logins and
 data. It prints where the logins are at the end.
 
+To run the physical (IQ5) bridge on the same server, add `--with-bridge --panel-ip <panel address>`. It
+builds the bridge, generates its certificates (asks for sudo once), gives it the central broker login, points it
+at the central broker and starts it; the bridge's own broker (Home Assistant / Node-RED) moves to port 8884. The
+server needs a network interface that reaches the panel, and the panel pairing (pair once, or
+`detection/central-store/secrets.sh fetch detection/physical-subsystem/deploy` to restore it).
+
 After that:
 
 ```sh
