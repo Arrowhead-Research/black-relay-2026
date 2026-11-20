@@ -148,7 +148,7 @@ cmd_letsencrypt() {
   [ -n "$name" ] || name="$(cat state/acme/name 2>/dev/null)" || true
   [ -n "$email" ] || email="$(cat state/acme/email 2>/dev/null)" || true
   [ -n "$name" ] && [ -n "$email" ] || die "usage: $0 letsencrypt <name> <email> (first time)"
-  [ -s state/cloudflare.token ] || die "put a Cloudflare API token (Zone > DNS > Edit, this zone only) in state/cloudflare.token (chmod 600)"
+  [ -s state/cloudflare.token ] || die "put a Cloudflare API token (Zone > DNS > Edit AND Zone > Zone > Read, this zone only) in state/cloudflare.token (chmod 600)"
   chmod 600 state/cloudflare.token
   if [ ! -f state/acme/accepted ]; then
     [ "${LE_ACCEPT_TOS:-}" = yes ] || { read -r -p "Accept the Let's Encrypt Subscriber Agreement (https://letsencrypt.org/repository/)? [yes/no] " a </dev/tty; [ "$a" = yes ] || die "not accepted"; }

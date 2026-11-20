@@ -65,8 +65,9 @@ just `docker login`. Let's Encrypt checks the name through DNS (DNS-01), so the 
 LAN and never has to be reachable from the internet.
 
 1. In Cloudflare, add `A docker.bulexa.com -> 172.20.100.150`, **DNS only** (grey cloud).
-2. Create a Cloudflare API token: *My Profile > API Tokens > Create Token > Edit zone DNS*,
-   zone `bulexa.com` only. On the server, save it (`state/` is private):
+2. Create a Cloudflare API token: *My Profile > API Tokens > Create Token > Edit zone DNS*, then
+   **add a second permission, Zone > Zone > Read** (without it: "failed to find zone"), and set
+   Zone Resources to Include > Specific zone > `bulexa.com`. On the server, save it (`state/` is private):
    `printf '%s' 'TOKEN' > state/cloudflare.token && chmod 600 state/cloudflare.token`
 3. Get the certificate (asks once to accept the Let's Encrypt Subscriber Agreement; the email is
    only for expiry notices):
