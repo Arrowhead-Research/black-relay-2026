@@ -23,7 +23,14 @@ chown "${HOST_UID:-0}:${HOST_GID:-0}" "$BR/identity.key" 2>/dev/null || true
 RECIPIENT="$(age-keygen -y "$BR/identity.key")"
 
 # 2. local certificates, logins, secrets
-if [ ! -f certs/mosquitto/broker/broker.crt ]; then
+# Regenerate when the certs are missing, or no longer cover 127.0.0.1 or an address in BRIDGE_HOSTS.
+certs_ok() {
+  local c=certs/mosquitto/broker/broker.crt san h
+  [ -f "$c" ] || return 1
+  san="$(openssl x509 -in "$c" -noout -ext subjectAltName 2>/dev/null | tail -n +2)"
+  for h in 127.0.0.1 ${BRIDGE_HOSTS:-}; do grep -qE "(IPAddress|DNS):$h(,|$)" <<<"${san// /}" || return 1; done
+}
+if ! certs_ok; then
   say "generating local certificates and logins"
   # shellcheck disable=SC2086
   out="$(./scripts/gen-certs.sh ${BRIDGE_HOSTS:-127.0.0.1})"

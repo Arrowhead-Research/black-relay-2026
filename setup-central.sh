@@ -102,6 +102,7 @@ if [ "$bridge" = 1 ]; then
   phys_pw="$(grep '^BROKER_PHYSICAL_PASSWORD=' "$root/.env" | cut -d= -f2-)"
   # The bridge's own broker (for Home Assistant / Node-RED) moves to 8884: the central broker has 8883.
   envset BRIDGE_MQTT_PORT 8884
+  envset BRIDGE_HOSTS "$address${domain:+ $domain}"   # the bridge's cert names (+ 127.0.0.1, localhost always)
   envset IMAGE_PREFIX ""                     # bridge images are built here from this checkout
   if [ -n "$domain" ]; then envset CENTRAL_BROKER_NAME "$domain"; envset CENTRAL_BROKER_IP "$address"; fi
   if [ ! -f "$dep/certs/mosquitto/broker/broker.crt" ]; then
