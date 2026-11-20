@@ -61,7 +61,7 @@ services:
   normalizer:
     <<: *hardening
     build: {context: .., dockerfile: docker/Dockerfile.normalizer}
-    image: blackrelay-f2/normalizer:latest
+    image: ${IMAGE_PREFIX-}blackrelay-f2/normalizer:latest
     user: "10004:10000"
     network_mode: none
     depends_on: {init-perms: {condition: service_completed_successfully}}
@@ -80,7 +80,7 @@ services:
   iq-remote:
     <<: *hardening
     build: {context: .., dockerfile: docker/Dockerfile.iq-remote}
-    image: blackrelay-f2/iq-remote:latest
+    image: ${IMAGE_PREFIX-}blackrelay-f2/iq-remote:latest
     user: "10001:10000"
     network_mode: host            # must reach the panel on the LAN (panel_ip); publishes no ports; see nftables/
     depends_on: {normalizer: {condition: service_healthy}}
@@ -98,7 +98,7 @@ services:
   iq-tools:
     <<: *hardening
     restart: "no"
-    image: blackrelay-f2/iq-remote:latest
+    image: ${IMAGE_PREFIX-}blackrelay-f2/iq-remote:latest
     profiles: ["tools"]
     user: "10001:10000"
     network_mode: host
@@ -111,7 +111,7 @@ services:
   control4:
     <<: *hardening
     build: {context: .., dockerfile: docker/Dockerfile.control4}
-    image: blackrelay-f2/control4:latest
+    image: ${IMAGE_PREFIX-}blackrelay-f2/control4:latest
     user: "10002:10000"
     network_mode: host
     depends_on: {normalizer: {condition: service_healthy}}
@@ -126,7 +126,7 @@ services:
   outbound:
     <<: *hardening
     build: {context: .., dockerfile: docker/Dockerfile.outbound}
-    image: blackrelay-f2/outbound:latest
+    image: ${IMAGE_PREFIX-}blackrelay-f2/outbound:latest
     user: "10003:10000"
     network_mode: host            # serves 8443 (+ 9100 on metrics_host, default 127.0.0.1); reaches mosquitto at 127.0.0.1:8883
     depends_on:
@@ -155,7 +155,7 @@ services:
   # normally creates it). Publish-only: it reads the one-way IPC stream + the event log and sends to the team broker.
   fusion:
     <<: *hardening
-    image: blackrelay-f2/outbound:latest
+    image: ${IMAGE_PREFIX-}blackrelay-f2/outbound:latest
     profiles: ["fusion"]
     user: "10003:10000"
     command: ["service", "fusion", "--config", "/config/config.yaml"]
@@ -201,7 +201,7 @@ services:
   bridge:
     <<: *hardening
     restart: "no"
-    image: blackrelay-f2/outbound:latest
+    image: ${IMAGE_PREFIX-}blackrelay-f2/outbound:latest
     profiles: ["tools"]
     user: "10003:10000"
     network_mode: none
