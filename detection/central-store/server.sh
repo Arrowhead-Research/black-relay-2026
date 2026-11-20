@@ -6,6 +6,8 @@
 #   ./server.sh remove-client <name>            revoke a host's logins
 #   ./server.sh users                           who can log in where
 #   ./server.sh gc images|secrets               delete unreferenced blobs (stops that store briefly)
+#   ./server.sh letsencrypt <name> <email>      publicly trusted cert via Let's Encrypt (Cloudflare DNS);
+#   ./server.sh letsencrypt                     later runs renew it (put that in cron), see README
 #
 # Everything it writes lives in state/ (0700, never committed). Passwords are printed once and also
 # kept in state/credentials/ (0600) so you can hand them over; delete those files once you have.
@@ -15,6 +17,7 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here"
 TOOLS_IMAGE="${TOOLS_IMAGE:-black-relay/central-tools:0.1.0}"
+LEGO_IMAGE=goacme/lego:v4.28.1@sha256:bc674054d11643fa8c248915574e59fb8856e4d1fd3d5026933521df1782cc47
 umask 077
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -136,11 +139,45 @@ cmd_gc() {
   docker compose up -d --wait "$store" "$store-pull"
 }
 
+# Let's Encrypt over DNS-01 (Cloudflare): the server never has to be reachable from the internet.
+# The name only needs a DNS record (A <server LAN IP>, DNS only / grey cloud) in Cloudflare.
+cmd_letsencrypt() {
+  local name="${1:-}" email="${2:-}"
+  [ -f .env ] || die "run ./server.sh init first"
+  mkdir -p state/acme
+  [ -n "$name" ] || name="$(cat state/acme/name 2>/dev/null)" || true
+  [ -n "$email" ] || email="$(cat state/acme/email 2>/dev/null)" || true
+  [ -n "$name" ] && [ -n "$email" ] || die "usage: $0 letsencrypt <name> <email> (first time)"
+  [ -s state/cloudflare.token ] || die "put a Cloudflare API token (Zone > DNS > Edit, this zone only) in state/cloudflare.token (chmod 600)"
+  chmod 600 state/cloudflare.token
+  if [ ! -f state/acme/accepted ]; then
+    [ "${LE_ACCEPT_TOS:-}" = yes ] || { read -r -p "Accept the Let's Encrypt Subscriber Agreement (https://letsencrypt.org/repository/)? [yes/no] " a </dev/tty; [ "$a" = yes ] || die "not accepted"; }
+    touch state/acme/accepted
+  fi
+  printf '%s\n' "$name" >state/acme/name; printf '%s\n' "$email" >state/acme/email
+  local action=(run)
+  [ -f "state/acme/certificates/$name.crt" ] && action=(renew --dynamic)
+  docker run --rm --user "$(id -u):$(id -g)" -v "$here/state:/state" \
+    -e CLOUDFLARE_DNS_API_TOKEN_FILE=/state/cloudflare.token ${LEGO_SERVER:+-e LEGO_SERVER="$LEGO_SERVER"} \
+    "$LEGO_IMAGE" --path /state/acme --email "$email" --accept-tos --dns cloudflare \
+    --dns.resolvers 1.1.1.1:53 --domains "$name" "${action[@]}"
+  local crt="state/acme/certificates/$name.crt" key="state/acme/certificates/$name.key"
+  [ -f "$crt" ] || die "no certificate was issued; see the output above"
+  if ! cmp -s "$crt" state/tls/server.crt; then
+    cp "$crt" state/tls/server.crt; cp "$key" state/tls/server.key; chmod 600 state/tls/server.key
+    echo "installed a Let's Encrypt certificate for $name"
+    restart_if_running images images-pull secrets secrets-pull
+  else
+    echo "certificate for $name is current"
+  fi
+}
+
 case "${1:-}" in
   init) shift; cmd_init "$@" ;;
   add-client) shift; cmd_add_client "$@" ;;
   remove-client) shift; cmd_remove_client "$@" ;;
   users) cmd_users ;;
   gc) shift; cmd_gc "$@" ;;
-  *) sed -n '2,15p' "$0"; exit 1 ;;
+  letsencrypt) shift; cmd_letsencrypt "$@" ;;
+  *) sed -n '2,17p' "$0"; exit 1 ;;
 esac

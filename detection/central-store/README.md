@@ -58,6 +58,28 @@ docker compose up -d --wait
 gitignored). Already have a certificate from your own CA? Run
 `TLS_CERT=central.crt TLS_KEY=central.key ./server.sh init ...` and hosts need no extra CA.
 
+### Publicly trusted certificate (recommended): Let's Encrypt
+
+With a real certificate hosts trust the store out of the box: nothing to copy, nothing to trust,
+just `docker login`. Let's Encrypt checks the name through DNS (DNS-01), so the server stays on the
+LAN and never has to be reachable from the internet.
+
+1. In Cloudflare, add `A docker.bulexa.com -> 172.20.100.150`, **DNS only** (grey cloud).
+2. Create a Cloudflare API token: *My Profile > API Tokens > Create Token > Edit zone DNS*,
+   zone `bulexa.com` only. On the server, save it (`state/` is private):
+   `printf '%s' 'TOKEN' > state/cloudflare.token && chmod 600 state/cloudflare.token`
+3. Get the certificate (asks once to accept the Let's Encrypt Subscriber Agreement; the email is
+   only for expiry notices):
+   `./server.sh letsencrypt docker.bulexa.com you@yourmail`
+4. Renew automatically: `crontab -e` and add
+   `0 4 * * * cd /PATH/central-store && ./server.sh letsencrypt >> state/renew.log 2>&1`
+   (renews when a third of its life is left and restarts the registries only when it changed).
+
+Hosts then use `docker.bulexa.com:5000` (pull) and `docker.bulexa.com:5001` (push), and devices
+run `./secrets.sh setup docker.bulexa.com NAME -` (the `-` means "no extra CA"). If a router on
+the way blocks public DNS answers that point at private IPs (DNS rebinding protection), allow
+`docker.bulexa.com` there or add it to your local DNS.
+
 Then one login per host:
 
 ```sh
@@ -72,6 +94,8 @@ credentials file. Back up the two volumes (`black-relay-central-store_images-dat
 `..._secrets-data`) and `state/`.
 
 ## Each host: trust the store and log in
+
+With the Let's Encrypt certificate above, skip to `docker login`. Otherwise:
 
 Linux:
 
