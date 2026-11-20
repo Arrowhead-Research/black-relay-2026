@@ -11,8 +11,8 @@ topic write detection/rf/#
 # rf-analytics consumes simulator observations on this topic; nothing else under detection/rf is readable.
 topic read detection/rf/sim/#
 
-# Camera nodes, when they move here from the camera relay's broker: one block per node, as the
-# relay's aclfile has today. Nodes also read detection/rf/cues/camera.
-#   user camera-<node_id>
-#   topic write detection/camera/#
-#   topic read detection/rf/cues/camera
+# Camera nodes share one login (the relay's design: the Frigate proxy secret and MediaMTX's video
+# pull derive from its password). They publish under detection/camera and read RF cues.
+user @CAMERA_USER@
+topic write detection/camera/#
+topic read detection/rf/cues/camera

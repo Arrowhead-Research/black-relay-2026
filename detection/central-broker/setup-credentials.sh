@@ -34,6 +34,8 @@ random() {
 fusion_password="$(random 40)"
 physical_password="$(random 40)"
 rf_password="$(random 40)"
+# Typed into each kit's setup page on a phone, so shorter. Override: BROKER_CAMERA_PASSWORD=... ./setup-credentials.sh
+camera_password="${BROKER_CAMERA_PASSWORD:-$(random 16)}"
 
 umask 077
 cat >"$output" <<ENV
@@ -50,5 +52,7 @@ BROKER_PHYSICAL_USER=physical-subsystem
 BROKER_PHYSICAL_PASSWORD=$physical_password
 BROKER_RF_USER=rf-console
 BROKER_RF_PASSWORD=$rf_password
+BROKER_CAMERA_USER=relay
+BROKER_CAMERA_PASSWORD=$camera_password
 ENV
 echo "wrote $output (0600). Set BROKER_BIND_ADDRESS, then: docker compose up -d"

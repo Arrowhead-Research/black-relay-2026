@@ -95,6 +95,8 @@ automatically. If running outside Docker, load `.env` using uv's `--env-file` op
 | `max_message_bytes`, `max_message_depth` | Input limits: 65,536 bytes, 32 levels |
 | `future_tolerance_s` | Reject messages more than 60 s ahead of central time |
 | `camera_stale_s`, `rf_stale_s`, `physical_stale_s` | Freshness: 90 s / 180 s / 120 s |
+| `camera_snapshot_password_env` | Name of the variable holding the camera kits' broker password; turns on `GET /events/{id}/snapshot`. Unset: that route answers 501 |
+| `snapshot_timeout_s`, `max_snapshot_bytes` | Per-kit fetch limits: 10 s, 4 MiB |
 
 Paths resolve relative to the YAML file. Compose overrides the database/schema paths using
 `FUSION_DATABASE`, `FUSION_CAMERA_SCHEMAS`, `FUSION_RF_SCHEMAS`, `FUSION_PHYSICAL_SCHEMAS`; one config works in both

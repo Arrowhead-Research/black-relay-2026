@@ -80,6 +80,10 @@ topic write detection/physical/#
 user @RF_USER@
 topic write detection/rf/#
 topic read detection/rf/sim/#      # simulator observations for rf-analytics
+
+user @CAMERA_USER@                 # all camera kits, one login
+topic write detection/camera/#
+topic read detection/rf/cues/camera
 ```
 
 Mosquitto's ACL denies by default: a client with the physical credential cannot publish under
@@ -98,7 +102,8 @@ set -eu
 umask 077
 auth=/run/mosquitto-auth
 
-for user in "$BROKER_FUSION_USER" "$BROKER_PHYSICAL_USER" "$BROKER_RF_USER"; do
+for user in "$BROKER_FUSION_USER" "$BROKER_PHYSICAL_USER" "$BROKER_RF_USER" \
+    "$BROKER_CAMERA_USER"; do
     case "$user" in
     *:* | *\&* | *\|* | *\\* | *[[:space:]]*)
         echo "a broker user cannot hold a colon, &, |, backslash or space" >&2

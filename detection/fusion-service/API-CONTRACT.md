@@ -134,6 +134,20 @@ Retrying with `after=2500` explicitly accepts the missing history. This boundary
 filtered requests. A cursor above the database high watermark returns HTTP 400 `cursor_ahead`.
 Cursors cannot detect every database replacement/restore; operators must coordinate recovery.
 
+## GET /api/v1/events/{event_id}/snapshot
+
+The still image Frigate saved for a `camera.detection` event, as `image/jpeg`. Fusion fetches it
+from the kit on each request: the path comes from the event's `data.attributes.snapshot_url`, and
+the kit's address from its latest `camera.node_status` heartbeat (`data.attributes.node_address`).
+Nothing is cached centrally; the kit keeps snapshots for 7 days.
+
+| Status | `error.code` | Meaning |
+|---|---|---|
+| 404 | `not_found` | No such event, not a camera detection, no heartbeat from that kit yet, or the kit no longer has the image |
+| 501 | `not_configured` | `camera_snapshot_password_env` is not set on this deployment |
+| 502 | `node_unreachable`, `node_refused_secret`, `node_sent_no_image`, `snapshot_too_large`, `node_status_<n>` | The kit could not be reached or answered wrongly |
+| 504 | `node_timeout` | The kit did not answer within `snapshot_timeout_s` |
+
 ## GET /api/v1/nodes
 
 Optional filters: `site_id`, `subsystem`. Returns `{"nodes": [...]}`, sorted by site/subsystem/node.

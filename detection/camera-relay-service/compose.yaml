@@ -1,0 +1,82 @@
+# Live video for the camera kits, on the central node: MediaMTX behind netguard, plus chrony for
+# the kits' time. No broker and no API here; events go kit -> central broker -> fusion.
+#
+#   cp .env.example .env && cp kits.example kits     # fill both in
+#   ./render.sh                                       # writes mediamtx.generated.yml from kits
+#   docker compose up -d --build
+
+name: camera-relay
+
+x-hardening: &hardening
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: "3"}
+
+services:
+  # Owns MediaMTX's network namespace and limits what it can reach: TCP 8554 on the kits' subnet
+  # only. gortsplib follows RTSP redirects with the camera login attached, so this is what keeps
+  # that login on the site LAN.
+  netguard:
+    <<: *hardening
+    build: ./netguard
+    image: camera-relay-netguard:0.1.0
+    init: true
+    cap_add: [NET_ADMIN]
+    environment:
+      RELAY_SITE_SUBNET: ${RELAY_SITE_SUBNET:?the kits' subnet, for example 172.22.100.0/24}
+      RELAY_CENTRAL_IP: ${RELAY_CENTRAL_IP:-}
+      RELAY_WEBRTC_UDP_PORT: ${RELAY_WEBRTC_UDP_PORT:-8189}
+    healthcheck:
+      test: ["CMD", "/netguard/verify.sh"]
+      interval: 5s
+      timeout: 3s
+      retries: 1
+      start_period: 15s
+      start_interval: 1s
+    volumes:
+      - guard-state:/guard
+    ports:
+      - ${RELAY_BIND_ADDRESS:-0.0.0.0}:${RELAY_RTSP_PORT:-8554}:8554
+      - ${RELAY_BIND_ADDRESS:-0.0.0.0}:${RELAY_WEBRTC_HTTP_PORT:-8889}:8889
+      - ${RELAY_BIND_ADDRESS:-0.0.0.0}:${RELAY_WEBRTC_UDP_PORT:-8189}:${RELAY_WEBRTC_UDP_PORT:-8189}/udp
+
+  mediamtx:
+    <<: *hardening
+    image: bluenviron/mediamtx:1.21.3
+    network_mode: service:netguard
+    depends_on:
+      netguard:
+        condition: service_healthy
+        restart: true
+    environment:
+      MTX_AUTHINTERNALUSERS_0_USER: ${RELAY_READ_USER:?see .env.example}
+      MTX_AUTHINTERNALUSERS_0_PASS: ${RELAY_READ_PASSWORD:?see .env.example}
+      MTX_WEBRTCLOCALUDPADDRESS: :${RELAY_WEBRTC_UDP_PORT:-8189}
+      MTX_WEBRTCADDITIONALHOSTS: ${RELAY_WEBRTC_HOSTS:-127.0.0.1}
+    volumes:
+      # Rendered by ./render.sh: the base file plus one path per kit, holding the camera login.
+      - ./mediamtx.generated.yml:/mediamtx.yml:ro
+    user: "${RELAY_UID:-1000}:${RELAY_GID:-1000}"
+
+  # NTP for the kits. A kit syncs from its broker address by default and sends nothing until it
+  # has, so this must answer on the same address as the broker.
+  chrony:
+    <<: *hardening
+    build: ./chrony
+    image: camera-relay-chrony:4.8
+    cap_add: [NET_BIND_SERVICE, SETUID, SETGID, CHOWN]
+    tmpfs: [/run/chrony, /var/lib/chrony]
+    ports:
+      - ${RELAY_BIND_ADDRESS:-0.0.0.0}:${RELAY_NTP_PORT:-123}:123/udp
+
+volumes:
+  # tmpfs, so "ready" can only mean this boot's rules.
+  guard-state:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=1m,mode=0755

@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_site_cursor ON events(site_id, cursor);
 CREATE INDEX IF NOT EXISTS events_type_cursor ON events(type, cursor);
 CREATE INDEX IF NOT EXISTS events_node_cursor ON events(node_id, cursor);
+CREATE INDEX IF NOT EXISTS events_id ON events(json_extract(body, '$.id'));
 CREATE TABLE IF NOT EXISTS seen (
     namespace TEXT NOT NULL,
     schema TEXT NOT NULL,

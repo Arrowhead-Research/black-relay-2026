@@ -29,6 +29,8 @@ services:
       BROKER_PHYSICAL_PASSWORD: ${BROKER_PHYSICAL_PASSWORD:?run ./make-env.sh}
       BROKER_RF_USER: ${BROKER_RF_USER:?run ./make-env.sh}
       BROKER_RF_PASSWORD: ${BROKER_RF_PASSWORD:?run ./make-env.sh}
+      BROKER_CAMERA_USER: ${BROKER_CAMERA_USER:?run ./make-env.sh}
+      BROKER_CAMERA_PASSWORD: ${BROKER_CAMERA_PASSWORD:?run ./make-env.sh}
     mem_limit: 256m
     tmpfs: [/tmp, "/run/mosquitto-auth:mode=0700", /mosquitto/log]
     volumes:
@@ -59,6 +61,9 @@ services:
       FUSION_API_TOKEN: ${FUSION_API_TOKEN:?run ./make-env.sh}
       FUSION_CENTRAL_MQTT_USER: ${BROKER_FUSION_USER}
       FUSION_CENTRAL_MQTT_PASSWORD: ${BROKER_FUSION_PASSWORD}
+      # The kits' broker password: fusion derives the kits' Frigate proxy secret from it to
+      # fetch detection snapshots (GET /api/v1/events/{id}/snapshot).
+      FUSION_CAMERA_PASSWORD: ${BROKER_CAMERA_PASSWORD}
     ports:
       - "${BIND_ADDRESS}:8090:8090"
     volumes:

@@ -1,0 +1,38 @@
+# Base MediaMTX 1.21.3 configuration. No secrets and no paths here: ./render.sh appends one
+# on-demand path per kit from the kits file and writes mediamtx.generated.yml, which compose
+# mounts. The reader login comes from the environment (compose.yaml).
+
+logLevel: info
+logDestinations: [stdout]
+
+authMethod: internal
+authInternalUsers:
+  - user: viewer # RELAY_READ_USER
+    pass: "" # RELAY_READ_PASSWORD
+    ips: []
+    permissions:
+      - action: read
+
+api: no
+metrics: no
+pprof: no
+playback: no
+
+rtsp: yes
+rtspTransports: [tcp]
+rtspAddress: :8554
+
+webrtc: yes
+webrtcAddress: :8889
+webrtcLocalUDPAddress: :8189 # RELAY_WEBRTC_UDP_PORT
+webrtcLocalTCPAddress: ""
+webrtcIPsFromInterfaces: no
+webrtcAdditionalHosts: [] # RELAY_WEBRTC_HOSTS
+
+rtmp: no
+hls: no
+srt: no
+moq: no
+
+# One entry per kit is appended below by render.sh.
+paths:

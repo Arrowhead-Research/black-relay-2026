@@ -59,4 +59,5 @@ def load_settings(path: Path) -> Settings:
             if name:
                 required_env(name)
     settings.token()
+    settings.camera_snapshot_password()
     return settings
