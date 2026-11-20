@@ -12,7 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from publish import NODE_HEARTBEAT_S, POS_MAX_S, Publisher, node_states  # noqa: E402
+from publish import NODE_HEARTBEAT_S, POS_MAX_S, LiveClient, Publisher, node_states  # noqa: E402
 
 SCHEMAS = Path(__file__).resolve().parents[2] / "schemas"
 
@@ -42,6 +42,24 @@ class FakeDurable:
 
     def send(self, msg_id, topic, payload):
         self.sent.append((topic, payload))
+
+
+class FakeMqtt:
+    """paho's Client, reduced to what LiveClient calls; records username_pw_set."""
+    def __init__(self, *args, **kwargs):
+        self.pw_calls = []
+
+    def username_pw_set(self, username, password):
+        self.pw_calls.append((username, password))
+
+    def reconnect_delay_set(self, *args):
+        pass
+
+    def connect_async(self, host, port):
+        pass
+
+    def loop_start(self):
+        pass
 
 
 def pos(x, y, t, updated=True, **extra):
@@ -131,3 +149,10 @@ def test_console_publishes_on_poll(tmp_path):
     assert live.sent[0][1]["heard_by"] == ["wbt-1", "wbt-2", "wbt-3"]
     assert [p["node_id"] for _, p in durable.sent] == ["wbt-1"]
     assert app.state()["publish"]["positions_sent"] == 1
+
+
+def test_live_client_logs_in_only_when_given_a_username(monkeypatch):
+    import paho.mqtt.client as mqtt
+    monkeypatch.setattr(mqtt, "Client", FakeMqtt)
+    assert LiveClient("broker").client.pw_calls == []
+    assert LiveClient("broker", username="rf", password="s3cret").client.pw_calls == [("rf", "s3cret")]

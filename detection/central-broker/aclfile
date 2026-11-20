@@ -11,6 +11,11 @@ topic write detection/rf/#
 # rf-analytics consumes simulator observations on this topic; nothing else under detection/rf is readable.
 topic read detection/rf/sim/#
 
+# rf-analytics on the central server (repo-root compose.yaml, profile "rf"): alerts, camera cues and
+# node status. Optional: entrypoint.sh drops this block when BROKER_RF_ANALYTICS_USER is unset.
+user @RF_ANALYTICS_USER@
+topic write detection/rf/#
+
 # Camera nodes share one login (the relay's design: the Frigate proxy secret and MediaMTX's video
 # pull derive from its password). They publish under detection/camera and read RF cues.
 user @CAMERA_USER@

@@ -99,6 +99,7 @@ Environment (CONSOLE_*; the older DFVIZ_* names still work):
     CONSOLE_MQTT_HOST  publish positions and node status to this broker (unset: off;
                      ``publish.py``); CONSOLE_MQTT_PORT (1883), CONSOLE_TOPIC_PREFIX
                      (detection/rf)
+    CONSOLE_MQTT_USER / CONSOLE_MQTT_PASSWORD  broker sign-in (unset: anonymous)
     CONSOLE_NODE_TOKEN  token rf-node-agent heartbeats must send (unset: accepted without)
     CONSOLE_DEMO     "1": add synthetic emitters with known positions (BLE
                      walker, passing car with TPMS, ...); "only": demo alone
@@ -1633,7 +1634,8 @@ def main() -> int:
         from rfanalytics.formats import TOPIC_PREFIX
 
         publisher = Publisher.mqtt(env("MQTT_HOST"), int(env("MQTT_PORT", 1883)), data_dir / "rf-outbox.jsonl",
-                                   env("TOPIC_PREFIX", TOPIC_PREFIX))
+                                   env("TOPIC_PREFIX", TOPIC_PREFIX),
+                                   username=env("MQTT_USER"), password=env("MQTT_PASSWORD"))
         print(f"console: publishing positions and node status to {env('MQTT_HOST')}", file=sys.stderr)
     app = App(poller, None, window, float(env("POLL_S", 3)), extra, None, klog, sites=sites, auth=auth,
               publisher=publisher, data_dir=data_dir, node_token=os.environ.get("CONSOLE_NODE_TOKEN"))

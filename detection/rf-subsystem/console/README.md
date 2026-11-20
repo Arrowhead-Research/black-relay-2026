@@ -184,7 +184,7 @@ The fit maths was checked on synthetic spots generated from known parameters (n 
 
 ## Publishing
 
-With `CONSOLE_MQTT_HOST` set (compose default: the stack's own broker, which other teams reach as `rf-mqtt:1883` on the `fusion` network), the console publishes:
+With `CONSOLE_MQTT_HOST` set (empty turns publishing off; `setup-central.sh --with-rf` sets it to the central broker on port 1883, with the `rf-console` login in `CONSOLE_MQTT_USER` and `CONSOLE_MQTT_PASSWORD`), the console publishes:
 
 | Topic | Schema | When | Delivery |
 |---|---|---|---|
@@ -192,7 +192,7 @@ With `CONSOLE_MQTT_HOST` set (compose default: the stack's own broker, which oth
 | `detection/rf/alerts` | [`rf.alert.v0`](../schemas/alert.v0.schema.json) | every alert (see *Marks, areas and alerts*) | QoS 1 through the durable outbox |
 | `detection/rf/status/nodes` | [`rf.node-status.v0`](../schemas/node-status.v0.schema.json) | a node's state (`online`, `degraded`, `offline`) or a source's status changes, and every 60 s | QoS 1 through the durable outbox (`/data/rf-outbox.jsonl`) |
 
-A position carries site feet, `lat`/`lon` once the site is geo-referenced, the measured error (`null` until calibrated) and the nodes that heard the device (two nodes fix a curve, not a point). The nodes' own radios are not published. `analytics/src/rfanalytics/formats.py` is the only code that knows topics and envelopes: when the fusion standard arrives, it and the schemas change. `/api/state` → `publish` shows counters and the connection. Watch the feed: `docker run --rm --network fusion eclipse-mosquitto:2.0.22 mosquitto_sub -h rf-mqtt -t 'detection/rf/#' -v`.
+A position carries site feet, `lat`/`lon` once the site is geo-referenced, the measured error (`null` until calibrated) and the nodes that heard the device (two nodes fix a curve, not a point). The nodes' own radios are not published. `analytics/src/rfanalytics/formats.py` is the only code that knows topics and envelopes: when the fusion standard arrives, it and the schemas change. `/api/state` → `publish` shows counters and the connection. Watch the feed on the central server, from the repo root, with the fusion login: `docker compose exec broker sh -c 'mosquitto_sub -u "$BROKER_FUSION_USER" -P "$BROKER_FUSION_PASSWORD" -t "detection/rf/#" -v'`. The `rf-console` login cannot subscribe to it: its ACL allows writes to `detection/rf/#` and reads only of `detection/rf/sim/#`.
 
 ## Site files
 
@@ -215,7 +215,8 @@ The code and the defaults are general; the example layout is a placeholder. Node
 | `CONSOLE_SITE` | `central/.env` | `default`: the site used before one is chosen in the Site menu |
 | `CONSOLE_DATA` | container environment | `/data` (the `rf-console-data` volume) |
 | Kismet packet logs (read-only, for recording spots) | `kismet-logs` volume at `/kismet-data/logs` (`CONSOLE_KISMET_LOGS`) | — |
-| `CONSOLE_MQTT_HOST` / `CONSOLE_MQTT_PORT` / `CONSOLE_TOPIC_PREFIX` | `central/.env` (`RF_TOPIC_PREFIX` for the prefix) | `mqtt` / 1883 / `detection/rf`; set the host empty to stop publishing |
+| `CONSOLE_MQTT_HOST` / `CONSOLE_MQTT_PORT` / `CONSOLE_TOPIC_PREFIX` | `central/.env` (`RF_TOPIC_PREFIX` for the prefix; `setup-central.sh --with-rf` sets the host) | empty (publishing off) / 1883 / `detection/rf`; set the host empty to stop publishing |
+| `CONSOLE_MQTT_USER` / `CONSOLE_MQTT_PASSWORD` | `central/.env` (`setup-central.sh --with-rf` copies them from the root `.env`) | empty (no login); the central broker's `rf-console` login |
 | `CONSOLE_NODE_TOKEN` | `central/.env` (set by `node/set-node-token.sh`) | empty: node heartbeats accepted without a token |
 | `CONSOLE_DEMO` | `central/.env` | empty (`1` adds demo emitters, `only` uses them without Kismet) |
 | `CONSOLE_PORT` | `central/.env` | 8080 (bound to `BIND_ADDR`) |

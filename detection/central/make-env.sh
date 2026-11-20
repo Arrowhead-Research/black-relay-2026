@@ -24,6 +24,8 @@ add BROKER_PHYSICAL_USER physical-subsystem
 add BROKER_PHYSICAL_PASSWORD "$(random 40)"
 add BROKER_RF_USER rf-console
 add BROKER_RF_PASSWORD "$(random 40)"
+add BROKER_RF_ANALYTICS_USER rf-analytics
+add BROKER_RF_ANALYTICS_PASSWORD "$(random 40)"
 # Camera kits share this login and its password is typed on a phone, so it is shorter.
 add BROKER_CAMERA_USER relay
 add BROKER_CAMERA_PASSWORD "${BROKER_CAMERA_PASSWORD:-$(random 16)}"

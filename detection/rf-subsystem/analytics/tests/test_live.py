@@ -202,3 +202,30 @@ def test_shipped_wbt_site_and_friendly_load():
         assert set(spec.get("zones") or []) <= zones, f"{spec['id']} names zones not in the WBT site"
     friendly = load_friendly(CONFIG / "friendly.wbt-nodes.example.yaml")
     assert len(friendly) == 4
+
+
+def test_live_command_logs_in_to_the_publish_broker(fake_kismet, tmp_path, monkeypatch):
+    import rfanalytics.outbox
+
+    seen = {}
+
+    class FakePublisher:
+        def __init__(self, outbox, host, port, username=None, password=None, **_kw):
+            seen.update(host=host, port=port, username=username, password=password)
+
+        def send(self, *_args):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(rfanalytics.outbox, "MqttPublisher", FakePublisher)
+    monkeypatch.setenv("RF_BROKER_PASSWORD", "s3cret")
+    rc = main([
+        "live", "--kismet-url", fake_kismet,
+        "--site", str(CONFIG / "site.wbt-nodes.example.yaml"), "--rules", str(CONFIG / "rules.wbt-live.example.yaml"),
+        "--poll", "1", "--duration", "0.5", "--outbox", str(tmp_path / "outbox.jsonl"),
+        "--publish-host", "broker", "--publish-user", "rf-analytics", "--publish-password-env", "RF_BROKER_PASSWORD",
+    ])
+    assert rc == 0
+    assert seen == {"host": "broker", "port": 1883, "username": "rf-analytics", "password": "s3cret"}

@@ -24,10 +24,9 @@ rf-subsystem/
 │   ├── config/                  # Example friendly list, alert rules, and WBT node site mapping
 │   └── tests/                   # Contract, business-rule, and scenario tests
 ├── central/                     # Docker Compose stack for the central server
-│   ├── docker-compose.yml       # kismet-server + development MQTT broker
+│   ├── docker-compose.yml       # kismet-server (MQTT is the central broker, repo-root compose)
 │   ├── .env.example             # Bind address, Kismet version, admin credentials
-│   ├── kismet/                  # Kismet image: Dockerfile, site config, entrypoint
-│   └── mosquitto/               # Development broker config
+│   └── kismet/                  # Kismet image: Dockerfile, site config, entrypoint
 ├── console/                     # rf-console: WBT Console web page (live map, sites, calibration)
 │   └── site/                    # per-deployment layout and notes (local, gitignored)
 ├── node/                        # WBT node artifacts
@@ -126,7 +125,7 @@ Node configuration (`/etc/rf-node/node.yaml`) is specified in DESIGN.md section 
 1. Start the central stack: `cd central && cp .env.example .env && docker compose up -d --build --wait`. See [`central/README.md`](central/README.md).
 2. Without node hardware, feed the stack simulated data: `cd simulator && uv sync --extra mqtt && uv run rfsim run scenarios/loiterer.yaml --start-now --realtime --speed 60 --mqtt-host 127.0.0.1 -o /dev/null`. See [`simulator/README.md`](simulator/README.md).
    To process the feed and publish alerts, run `cd analytics && uv sync --extra mqtt && uv run rfanalytics run --site ../simulator/sites/dev-site.yaml --mqtt-host 127.0.0.1 -o events.jsonl --rules config/rules.example.yaml --publish-host 127.0.0.1`. See [`analytics/README.md`](analytics/README.md).
-   With live nodes instead, start the analytics service next to Kismet: `cd central && docker compose --profile analytics up -d --build`, and watch its output with `docker compose exec mqtt mosquitto_sub -t 'detection/rf/#' -v`. Set `RF_SITE`, `RF_RULES` and `RF_FRIENDLY` in `central/.env` to the real site files first; the example site geometry is a placeholder. See [`central/README.md`](central/README.md#live-analytics-kismet--alerts--mqtt).
+   With live nodes instead, enable the analytics service next to Kismet on the central server with `./setup-central.sh <address> --with-rf` (repo root), and watch its output with `docker compose logs -f rf-analytics`. Set `RF_SITE`, `RF_RULES` and `RF_FRIENDLY` in `central/.env` to the real site files before running it; the example site geometry is a placeholder. See [`central/README.md`](central/README.md#live-analytics-kismet--alerts--mqtt).
 3. **Bring up WBT nodes.** This is a draft until it is validated on hardware. The node agent is not built yet. Steps 3.4–3.5 can be run manually, or capture can be made persistent with the example systemd units in [`node/README.md`](node/README.md).
    1. Make sure the central stack is running and the central server is on the tailnet as `rf-central`, or reachable through the site's subnet router (see [`node/README.md`](node/README.md#tailscale-headscale-tailnet)).
    2. **Power order:** power the USB hub **first**, wait about 5 seconds, then power the Pi. This way all radios are present when the Pi enumerates USB devices.
@@ -174,7 +173,7 @@ Focus checks on business rules, event definitions, and contracts with connected 
   | TPMS reception | `rtl_433 -f 315M` near a moving car | TPMS decodes appear. |
   | Tailnet reachable | `tailscale ping rf-central` | Replies arrive. |
 
-- **Live end-to-end check (manual):** with nodes streaming, start `rf-analytics` (above) and subscribe to `detection/rf/#`. Within a minute the stats line in `docker compose --profile analytics logs rf-analytics` shows `observations` growing and `stale` small; alerts appear on the subscriber when rules fire. To force one, put a nearby access point's MAC on the `watchlist` rule. `wc -l /data/rf-outbox.jsonl` inside the container should return to 0.
+- **Live end-to-end check (manual):** with nodes streaming, start `rf-analytics` (above) and subscribe to `detection/rf/#`. Within a minute the stats line in `docker compose logs rf-analytics` (repo root) shows `observations` growing and `stale` small; alerts appear on the subscriber when rules fire. To force one, put a nearby access point's MAC on the `watchlist` rule. `wc -l /data/rf-outbox.jsonl` inside the container should return to 0.
 - **Events or interfaces verified:** the observation contract (`rf.observation.v0`); Kismet → `rf-analytics` with per-node RSSI; alerts on `detection/rf/alerts` received from the development broker (2026-11-07). The fusion message format is not yet defined.
 
 ## Troubleshooting
@@ -211,7 +210,7 @@ Focus checks on business rules, event definitions, and contracts with connected 
 | `rf-analytics` ingest | Internal | `rf.observation.v0` ([`schemas/observation.v0.schema.json`](schemas/observation.v0.schema.json)) over JSONL or MQTT | Implemented. Validated against the schema. |
 | `rf-analytics` events | Internal | `rf.analytics-event.v0` (see [`analytics/README.md`](analytics/README.md)) | Implemented. Feeds the alert engine (next). |
 | Alerts, node status → fusion service | Outbound | MQTT QoS 1, `detection/rf/alerts` and `detection/rf/status/nodes`, with a durable outbox | Implemented with the draft format and validated live against the development broker. Waiting on the fusion message standard (none published on any branch as of 2026-11-07). |
-| Device positions, alerts, node status → fusion service | Outbound | MQTT `detection/rf/positions` (QoS 0), `detection/rf/alerts` and `detection/rf/status/nodes` (QoS 1, outbox); contract: [`MQTT-CONTRACT.md`](MQTT-CONTRACT.md), schemas in `schemas/` | Implemented in the WBT Console with draft formats; reachable on the shared host as `rf-mqtt:1883`. Waiting on the fusion message standard. |
+| Device positions, alerts, node status → fusion service | Outbound | MQTT `detection/rf/positions` (QoS 0), `detection/rf/alerts` and `detection/rf/status/nodes` (QoS 1, outbox); contract: [`MQTT-CONTRACT.md`](MQTT-CONTRACT.md), schemas in `schemas/` | Implemented in the WBT Console with draft formats; published to the central broker (port 1883 of the central address, login `rf-console`). Waiting on the fusion message standard. |
 | TPMS camera cue → camera subsystem | Outbound | MQTT `detection/rf/cues/camera` | Implemented. Routing (directly or through fusion) and expected cue volume still to be agreed (DESIGN.md open question 3). |
 | Alert configuration from TAK | Inbound | To be decided | Waiting on the TAK team. |
 | `rf-console` web page and API | Operators | HTTP on `CONSOLE_PORT` (8080): `/api/state`, `/api/sites/*`, `/api/site/nodes`, `/api/calibration/*`, `/api/walls/*`, `/api/login`; reads Kismet REST and the packet log (read-only) | Implemented, with sign-in (operator/admin). Plain HTTP, so keep it on the LAN or tailnet only. |
@@ -220,7 +219,7 @@ Focus checks on business rules, event definitions, and contracts with connected 
 - **Tailscale tailnet:** connects nodes and the central server, directly or through the deployment's subnet router when the central server is not on the tailnet.
 - **Docker** on the central server.
 - **Kismet `2026-10-R1`** on both nodes and server.
-- **Fusion service MQTT broker:** the development broker in `central/` stands in for it until it is available.
+- **Fusion service MQTT broker:** the central broker (repo-root `compose.yaml`) stands in for it until it is available.
 - **Camera subsystem:** receives TPMS cues.
 - **TAK server:** pushed configuration, planned for later.
 

@@ -95,6 +95,8 @@ def main(argv: list[str] | None = None) -> int:
     lv.add_argument("--alerts-out", help="write outbound messages as JSONL {topic, payload} ('-' for stdout)")
     lv.add_argument("--publish-host", help="publish outbound messages to this MQTT broker")
     lv.add_argument("--publish-port", type=int, default=1883)
+    lv.add_argument("--publish-user", help="username for the publish broker")
+    lv.add_argument("--publish-password-env", help="environment variable holding the publish broker password")
     lv.add_argument("--topic-prefix", default=TOPIC_PREFIX)
     lv.add_argument("--outbox", type=Path, default=Path("rf-outbox.jsonl"), help="durable outbox path")
     lv.add_argument("--stats-every", type=int, default=12, help="print stats every N polls (default: 12)")

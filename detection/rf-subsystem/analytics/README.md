@@ -21,7 +21,7 @@
 
 ## Live pipeline: Kismet → alerts → MQTT
 
-`rfanalytics live` is the end-to-end live path in one process: it polls Kismet's REST API, turns devices into `rf.observation.v0` records, runs them through friendly exclusion, the analyzer and the alert rules, and publishes alerts, camera cues and node status over MQTT through the durable outbox. On the central server it runs as the `rf-analytics` compose service (see [`../central/README.md`](../central/README.md#live-analytics-kismet--alerts--mqtt)).
+`rfanalytics live` is the end-to-end live path in one process: it polls Kismet's REST API, turns devices into `rf.observation.v0` records, runs them through friendly exclusion, the analyzer and the alert rules, and publishes alerts, camera cues and node status over MQTT through the durable outbox. On the central server it runs as the `rf-analytics` service of the repo-root `compose.yaml` (see [`../central/README.md`](../central/README.md#live-analytics-kismet--alerts--mqtt)).
 
 ```sh
 uv sync --extra mqtt
@@ -126,10 +126,11 @@ uv run rfanalytics score --site ../simulator/sites/dev-site.yaml \
 uv run rfanalytics run --site ../simulator/sites/dev-site.yaml --input ../out/loiterer.jsonl -o none \
     --rules config/rules.example.yaml --alerts-out ../out/loiterer.alerts.jsonl
 
-# Live: subscribe to observations and publish alerts on the central stack's broker
+# Live: subscribe to observations and publish alerts to a broker on this machine
+# (the central broker needs a login: add --publish-user and --publish-password-env)
 uv run rfanalytics run --site ../simulator/sites/dev-site.yaml --mqtt-host 127.0.0.1 -o events.jsonl \
     --rules config/rules.example.yaml --publish-host 127.0.0.1
-# Watch the output: docker compose -f ../central/docker-compose.yml exec mqtt mosquitto_sub -t 'detection/rf/#' -v
+# Watch the central broker's output (repo root, central server): docker compose exec broker sh -c 'mosquitto_sub -u "$BROKER_FUSION_USER" -P "$BROKER_FUSION_PASSWORD" -t "detection/rf/#" -v'
 ```
 
 `friendly-from-truth` is a testing aid. By default it includes only stable identifiers, which is what operators could realistically register. `--include-randomized` also adds rotating addresses, which operators cannot know in practice.

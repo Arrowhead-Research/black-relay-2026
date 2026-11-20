@@ -348,6 +348,8 @@ transport row loses "anonymous". Section 10's "broker auth plan not decided" ite
 
 ## 3. RF: write to the central broker
 
+> **Status (2026-11-20):** 3.1–3.3 are now done in code: the console and rf-analytics log in to the central broker, the RF stack's own Mosquitto is removed, and `setup-central.sh --with-rf` does 3.2. Still to run on the hosts: 3.3 steps 1–4 (fusion's entry, restarting the console and analytics, the checks).
+
 This is the one step with a code change: neither RF publisher can authenticate today. Both
 create their paho client with only a client id (`console/publish.py` `LiveClient`,
 `analytics/src/rfanalytics/outbox.py` `MqttPublisher`). The change is small and the console's
@@ -445,7 +447,7 @@ The console container reaches `CENTRAL_ADDR` through the host like any other out
 
 1. Add `rf` to fusion's `central` broker entry `subsystems` and remove `rf` from the old `rf`
    entry; restart fusion.
-2. `docker compose up -d rf-console` (and `--profile analytics` if used). Console logs:
+2. `docker compose up -d rf-console` in `rf-subsystem/central` (and `docker compose up -d rf-analytics` from the repo root if enabled). Console logs:
    `console: publishing positions and node status to CENTRAL_ADDR`.
 3. The subscriber from 1.6 shows `detection/rf/status/nodes` within 60 seconds and
    `detection/rf/positions` as soon as a device has readings.

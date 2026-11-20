@@ -5,9 +5,9 @@ The Docker Compose stack for the WBT central service (see [`../DESIGN.md`](../DE
 | Service | Purpose | Ports |
 |---|---|---|
 | `kismet-server` | Kismet `2026-10-R1` (server and log tools only). Receives remote captures from WBT nodes and provides the REST API. | 2501 (web UI, REST, WebSocket remote capture), 3501 (legacy TCP remote capture) |
-| `mqtt` | Mosquitto 2.0.22. A development stand-in for the fusion broker. | 1883 |
-| `rf-console` | **Opt-in (profile `console`).** WBT Console: live RF map, sites, node placement, walls and calibration, with sign-in: `http://<BIND_ADDR>:8080`. Site data is kept in the `rf-console-data` volume. See [`../console/README.md`](../console/README.md). | 8080 |
-| `rf-analytics` | **Opt-in (profile `analytics`).** Runs `rfanalytics live`: polls `kismet-server`, runs alert rules, publishes alerts, camera cues and node status to `mqtt`. Image built from [`../analytics`](../analytics). | none |
+| `rf-console` | **Opt-in (profile `console`).** WBT Console: live RF map, sites, node placement, walls and calibration, with sign-in: `http://<BIND_ADDR>:8080`. Site data is kept in the `rf-console-data` volume. It publishes to the central broker. See [`../console/README.md`](../console/README.md). | 8080 |
+
+Live analytics (`rf-analytics`) is not part of this stack. It runs as a service of the repo-root [`compose.yaml`](../../../compose.yaml), next to the central broker that the console and analytics publish to; see [Live analytics](#live-analytics-kismet--alerts--mqtt).
 
 The analytics database is not part of the stack yet.
 
@@ -24,7 +24,7 @@ Open `http://<BIND_ADDR>:2501` and log in with the credentials from `.env`. The 
 
 ## Shared fusion host
 
-On the team's shared Docker host, the stack lives under the host's per-team directory (copy the whole `rf-subsystem` tree: the builds use `../analytics` and `../console`). Add to `.env`:
+On the team's shared Docker host, the stack lives under the host's per-team directory (copy the whole `rf-subsystem` tree: the console builds from `../console`). Add to `.env`:
 
 ```sh
 BIND_ADDR=0.0.0.0
@@ -32,7 +32,7 @@ COMPOSE_FILE=docker-compose.yml:docker-compose.fusion.yml
 COMPOSE_PROFILES=console
 ```
 
-`docker-compose.fusion.yml` publishes only 3501 (node capture) and the console port, keeps Kismet's 2501 on the host's loopback (use an SSH tunnel), and puts `mqtt` on the external `fusion` network as `rf-mqtt`. Claim published ports in the host's `PORTS.md` first. Nodes point `CENTRAL_HOST` in `/etc/rf-node/rf-node.env` at the host's tailnet address.
+`docker-compose.fusion.yml` publishes only 3501 (node capture) and the console port, keeps Kismet's 2501 on the host's loopback (use an SSH tunnel), and puts `kismet-server` on the external `fusion` network as `rf-kismet`, where the repo-root `rf-analytics` polls it. Claim published ports in the host's `PORTS.md` first. Nodes point `CENTRAL_HOST` in `/etc/rf-node/rf-node.env` at the host's tailnet address.
 
 **Host behind a site's subnet router** (not on the tailnet itself): use the same `.env`, with `BIND_ADDR=0.0.0.0`, and create the external network once with `docker network create fusion` if no other team has yet. Nodes reach the host through the router: they need `tailscale set --accept-routes` and a Headscale rule for ports 3501 and 8080 on the host's network, and `CENTRAL_HOST` is the host's LAN address (see [`../node/README.md`](../node/README.md#tailscale-headscale-tailnet)). When copying the tree, carry `central/.env` over separately (it holds the Kismet and console credentials). For a new building, leave out the git-ignored `console/site/` and start the site fresh. To move the same deployment to another host, also carry over `console/site/layout.yaml` and the console's data (sites, calibration, areas, marks, history, sign-in sessions). Stop `rf-console` on both hosts, then:
 
@@ -47,16 +47,21 @@ Bring the old host's stack down with `docker compose down` (no `-v`: its volumes
 
 ## Live analytics (Kismet → alerts → MQTT)
 
+`rf-analytics` runs in the repo-root [`compose.yaml`](../../../compose.yaml) (service `rf-analytics`, profile `rf`). It polls `kismet-server` at `http://rf-kismet:2501` over the shared `fusion` network and publishes alerts, camera cues and node status to the central broker (`broker:1883`) with its own login, `rf-analytics`. To turn it on, run this on the central server ([`setup-central.sh`](../../../setup-central.sh); add `--kismet-url URL` if Kismet is elsewhere):
+
 ```sh
-docker compose --profile analytics up -d --build      # starts rf-analytics as well
-docker compose --profile analytics logs -f rf-analytics
-docker compose exec mqtt mosquitto_sub -t 'detection/rf/#' -v   # watch what fusion would receive
-docker compose --profile analytics stop rf-analytics  # stop only the analytics service
+./setup-central.sh <address> --with-rf
 ```
 
-`rf-analytics` reads its site, rules and friendly files from `../analytics/config` (mounted read-only). Choose them with `RF_SITE`, `RF_RULES` and `RF_FRIENDLY` in `.env`; the defaults are the `*.example.yaml` files for `wbt-1`–`wbt-4`, and the example site geometry is a placeholder. Analytics events (`/data/events.jsonl`) and the durable outbox (`/data/rf-outbox.jsonl`) live in the `rf-analytics-data` volume. It logs a stats line every minute: `observations`, `stale` (old per-node entries dropped), `alerts`, `node_status` and so on.
+That sets `COMPOSE_PROFILES=rf` and `RF_ENABLED=1` in the root `.env`, copies the Kismet admin login and `RF_SITE`, `RF_RULES` and `RF_FRIENDLY` from `central/.env` (only where the root `.env` does not have them yet), points the console at the central broker, and creates the `fusion` network if it is missing. Then, from the repo root:
 
-> `docker compose up` for this stack recreates `mqtt` when the compose file changes, which disconnects subscribers. Messages already accepted by the broker are not lost, but a subscriber that reconnects only sees new messages.
+```sh
+docker compose logs -f rf-analytics
+docker compose exec broker sh -c 'mosquitto_sub -u "$BROKER_FUSION_USER" -P "$BROKER_FUSION_PASSWORD" -t "detection/rf/#" -v'   # watch what fusion would receive
+docker compose stop rf-analytics   # stop only the analytics service
+```
+
+Site, rules and friendly files come from `../analytics/config` (mounted read-only). Choose them with `RF_SITE`, `RF_RULES` and `RF_FRIENDLY` in the root `.env`; the defaults are the `*.example.yaml` files for `wbt-1`–`wbt-4`, and the example site geometry is a placeholder. Analytics events (`/data/events.jsonl`) and the durable outbox (`/data/rf-outbox.jsonl`) live in the root project's `rf-analytics-data` volume. It logs a stats line every minute: `observations`, `stale` (old per-node entries dropped), `alerts`, `node_status` and so on.
 
 ## Verify
 
@@ -107,7 +112,6 @@ WebSocket remote capture on port 2501 (with `--user`/`--password` or `--apikey`)
 ## Security notes
 
 - Leave `BIND_ADDR` set to `127.0.0.1` or the host's Tailscale IP. Use `0.0.0.0` only on a host behind a subnet router with `docker-compose.fusion.yml`, which publishes just 3501 and the console. Never expose it on a public interface.
-- The Mosquitto configuration allows anonymous clients and is for development only.
 - `.env` is git-ignored. Never commit real credentials.
 
 ## Kismet version upgrades

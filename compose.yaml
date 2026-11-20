@@ -3,6 +3,8 @@
 #   registry + secrets store   detection/central-store (ports 5000-5003)   images and sealed device secrets
 #   broker                     the team's central MQTT broker: 1883 (login) and 8883 (TLS + login)
 #   fusion                     the fusion service and its API on 8090
+#   rf-analytics               opt-in (profile "rf", ./setup-central.sh --with-rf): polls the RF stack's
+#                              Kismet, publishes RF alerts, camera cues and node status to the broker
 #
 # First time, on the central server, from the repo root:
 #   detection/central-store/server.sh init <address> [names]   # registry TLS, logins (and letsencrypt, see its README)
@@ -10,8 +12,9 @@
 #   docker compose up -d --wait
 #
 # Publishers connect to <address or reg.bulexa.com>:8883 with TLS and their own login (physical: user
-# physical-subsystem, password BROKER_PHYSICAL_PASSWORD in ./.env). Camera kits and RF use 1883 until
-# they support TLS. Nothing here listens anywhere but BIND_ADDRESS.
+# physical-subsystem, password BROKER_PHYSICAL_PASSWORD in ./.env). Camera kits and the RF console use
+# 1883 until they support TLS; rf-analytics runs here and uses the broker directly. Nothing here
+# listens anywhere but BIND_ADDRESS.
 
 name: black-relay-central
 
@@ -45,6 +48,8 @@ services:
       BROKER_RF_PASSWORD: ${BROKER_RF_PASSWORD:?run detection/central/make-env.sh}
       BROKER_CAMERA_USER: ${BROKER_CAMERA_USER:?run detection/central/make-env.sh}
       BROKER_CAMERA_PASSWORD: ${BROKER_CAMERA_PASSWORD:?run detection/central/make-env.sh}
+      BROKER_RF_ANALYTICS_USER: ${BROKER_RF_ANALYTICS_USER:?run detection/central/make-env.sh}
+      BROKER_RF_ANALYTICS_PASSWORD: ${BROKER_RF_ANALYTICS_PASSWORD:?run detection/central/make-env.sh}
     mem_limit: 256m
     tmpfs: [/tmp, "/run/mosquitto-auth:mode=0700", /mosquitto/log]
     volumes:
@@ -96,6 +101,51 @@ services:
       retries: 3
       start_period: 15s
 
+  # RF live analytics: polls the RF stack's Kismet server, runs the alert rules and publishes alerts,
+  # camera cues and node status under detection/rf/ with its own broker login. Opt in with
+  # ./setup-central.sh --with-rf (sets COMPOSE_PROFILES=rf, the Kismet URL and login in ./.env).
+  # Kismet stays in the RF stack (detection/rf-subsystem/central), which the nodes stream to; on this
+  # host it joins the shared Docker network "fusion" as rf-kismet. Site, rules and friendly files come
+  # from detection/rf-subsystem/analytics/config (RF_SITE, RF_RULES, RF_FRIENDLY in ./.env).
+  rf-analytics:
+    <<: *hardening
+    profiles: [rf]
+    build:
+      context: ./detection/rf-subsystem/analytics
+    image: ${IMAGE_PREFIX-ghcr.io/arrowhead-research/}black-relay/rf-analytics:latest
+    depends_on:
+      broker: {condition: service_healthy}
+    init: true
+    environment:
+      KISMET_USER: ${RF_KISMET_USER:-}
+      KISMET_PASSWORD: ${RF_KISMET_PASSWORD:-}
+      RF_BROKER_PASSWORD: ${BROKER_RF_ANALYTICS_PASSWORD}
+    command:
+      - live
+      - --kismet-url=${RF_KISMET_URL:-http://rf-kismet:2501}
+      - --site=/config/${RF_SITE:-site.wbt-nodes.example.yaml}
+      - --rules=/config/${RF_RULES:-rules.wbt-live.example.yaml}
+      - --friendly=/config/${RF_FRIENDLY:-friendly.wbt-nodes.example.yaml}
+      - --publish-host=broker
+      - --publish-user=${BROKER_RF_ANALYTICS_USER}
+      - --publish-password-env=RF_BROKER_PASSWORD
+      - --topic-prefix=detection/rf
+      - --outbox=/data/rf-outbox.jsonl
+      - --events-out=/data/events.jsonl
+    tmpfs: ["/tmp:size=16m"]
+    volumes:
+      - ./detection/rf-subsystem/analytics/config:/config:ro
+      - rf-analytics-data:/data
+    networks: [default, fusion]
+    stop_grace_period: 15s
+
+networks:
+  # The shared host network the RF stack's Kismet joins (as rf-kismet). Only rf-analytics uses it, so
+  # it has to exist only with the "rf" profile; setup-central.sh --with-rf creates it.
+  fusion:
+    external: true
+
 volumes:
   broker-data:
   fusion-data:
+  rf-analytics-data:
