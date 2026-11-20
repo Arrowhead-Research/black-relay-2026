@@ -7,6 +7,8 @@
 #                                       Imager, customisation off): <boot dir> is its mounted bootfs
 #   ./fleet.sh provision [node|all]     install the node stack and point it at the central server (Ansible)
 #   ./fleet.sh ping [node|all]          check Ansible can reach the nodes
+#   ./fleet.sh wifi <node|all> <ssid>   set (or change) running nodes' backhaul Wi-Fi with Ansible; each
+#                                       joins now if in range, else whenever the network appears
 #
 # Settings come from fleet.env next to this script (copy fleet.env.example; it is gitignored). The SSH
 # key pair named by SSH_KEY is created on first use; only its public half goes on the cards.
@@ -15,7 +17,7 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 die() { echo "error: $*" >&2; exit 1; }
-usage() { sed -n '2,13p' "$0"; exit 2; }
+usage() { sed -n '2,15p' "$0"; exit 2; }
 
 FLEET_ENV="${FLEET_ENV:-$here/fleet.env}"
 # shellcheck source=/dev/null
@@ -187,7 +189,7 @@ cmd_flash() {
   echo "Done. Put the card in $node and power it on, then: $0 provision $node"
 }
 
-ansible_run() { # ansible_run <playbook|ping> [limit]
+ansible_run() { # ansible_run <site.yml|wifi.yml|ping> [limit] [ansible args...]
   command -v ansible-playbook >/dev/null || die "Ansible is not installed (pipx install ansible-core, or brew install ansible)"
   ensure_key
   local limit="${2:-all}"
@@ -198,14 +200,25 @@ ansible_run() { # ansible_run <playbook|ping> [limit]
     ansible rf_nodes -m ansible.builtin.ping ${limit:+--limit "$limit"}
   else
     # The central host is always in the play: it holds the console's heartbeat token.
-    ansible-playbook site.yml --limit "central,$( [ "$limit" = all ] && echo rf_nodes || echo "$limit")" "${@:3}"
+    ansible-playbook "$1" --limit "central,$( [ "$limit" = all ] && echo rf_nodes || echo "$limit")" "${@:3}"
   fi
+}
+
+# wifi <node|all> <ssid>: ansible/wifi.yml with the derived WPA key in the environment (never argv).
+cmd_wifi() {
+  local limit="${1:-}" ssid="${2:-}"
+  [ -n "$limit" ] && [ -n "$ssid" ] || usage
+  [[ "$ssid" != *$'\n'* ]] && [ "${#ssid}" -le 32 ] || die "bad SSID"
+  WIFI_SSID="$ssid"
+  FLEET_WIFI_PSK="$(wifi_psk)" FLEET_WIFI_SSID="$ssid" FLEET_WIFI_COUNTRY="$WIFI_COUNTRY" \
+    ansible_run wifi.yml "$limit" "${@:3}"
 }
 
 case "${1:-}" in
   flash) shift; cmd_flash "$@" ;;
   seed) shift; cmd_seed "$@" ;;
-  provision) shift; ansible_run site "${1:-all}" "${@:2}" ;;
+  provision) shift; ansible_run site.yml "${1:-all}" "${@:2}" ;;
   ping) shift; ansible_run ping "${1:-all}" ;;
+  wifi) shift; cmd_wifi "$@" ;;
   *) usage ;;
 esac

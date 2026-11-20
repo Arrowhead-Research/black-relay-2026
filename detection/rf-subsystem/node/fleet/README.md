@@ -16,6 +16,7 @@ cp fleet.env.example fleet.env            # once: user, SSH key path, timezone, 
 | `fleet.sh seed <node> <bootfs>` | Seeds a card you already wrote (e.g. with Raspberry Pi Imager, OS customisation off). |
 | `fleet.sh provision [node\|all]` | Runs `ansible/site.yml`: installs and starts the node stack, points it at the central server and delivers the heartbeat token. Safe to re-run. Extra args go to Ansible: `fleet.sh provision all --check --diff`. |
 | `fleet.sh ping [node\|all]` | Checks Ansible can log in. |
+| `fleet.sh wifi <node\|all> "<SSID>"` | Ansible (`ansible/wifi.yml`): saves a Wi-Fi network on running nodes' onboard radio (asks for the passphrase, or `WIFI_PASSWORD`). Each joins now if in range, otherwise when it appears. |
 
 Nodes are `wbt-1` … `wbt-8` (`ansible/inventory.yml`). The name is the hostname, the Kismet source prefix (`wbt-5:wifi`, `:bt`, `:tpms`) and the analytics `node_id`.
 
@@ -46,6 +47,23 @@ The fleet key pair (`SSH_KEY`, default `~/.ssh/blackrelay_fleet`) is created on 
 The nodes' network must be allowed to reach 8883, 3501 and 8080 there. A node that was joined earlier stays joined until you run `fleet.sh provision <node> -e leave_tailnet=true` (logs out, removes the package).
 
 **Secrets.** Nothing secret is in the repo, the inventory or on the card. **Broker logins:** the playbook runs `detection/central/rf-node-logins.sh <nodes>` on the central server, which keeps one random password per node in the root `.env` (`BROKER_RF_NODE_LOGINS`, 0600) and re-creates the broker when it adds one; it then reads them back over SSH (`no_log`) and writes each node only its own. Re-running keeps existing passwords; to rotate one, delete that `node:password` entry from `BROKER_RF_NODE_LOGINS` and provision the node again. The console's heartbeat token is read over SSH from `CONSOLE_NODE_TOKEN` in the central RF stack's `.env` and written to each node (`no_log`). If the console has none yet, the first `fleet.sh provision all` creates one, writes the nodes first and then the console, and restarts `rf-console`, the same order as `../set-node-token.sh` (which still works to rotate it). The central login and this repo's checkout there are `ansible_user` and `central_repo_dir` in `ansible/group_vars/central.yml`.
+
+## Wi-Fi when the site network isn't known yet
+
+Flash every card with one **setup network** you control, e.g. a travel router or phone hotspot called `blackrelay-setup`:
+
+```sh
+WIFI_SSID=blackrelay-setup ./fleet.sh flash wbt-4 /dev/disk4
+```
+
+Power the nodes up near it; they join it on first boot. Provision them over it, then hand them the site network with one command once you know it:
+
+```sh
+./fleet.sh provision all
+./fleet.sh wifi all "Site WiFi"
+```
+
+The site network gets a higher priority than the setup network, so each node moves to it as soon as it's in range and falls back to the setup network otherwise (handy for re-staging). Ethernet keeps working throughout. Wi-Fi is only the node's link back to central (`wlan0`); capture stays on the external adapter.
 
 ## Per-node settings
 

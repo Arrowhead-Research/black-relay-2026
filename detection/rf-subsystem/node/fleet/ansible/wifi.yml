@@ -1,0 +1,69 @@
+# Backhaul Wi-Fi on the onboard radio (wlan0) of running nodes, e.g. once a site's network is known:
+#   ../fleet.sh wifi all "Site WiFi"          (asks for the passphrase; or set WIFI_PASSWORD)
+# fleet.sh passes only the derived WPA key, in the environment. Capture stays on the external adapter.
+# A node joins now if the network is in range, otherwise whenever it appears; Ethernet keeps working.
+- name: Backhaul Wi-Fi
+  hosts: rf_nodes
+  become: true
+  gather_facts: false
+  vars:
+    wifi_ssid: "{{ lookup('ansible.builtin.env', 'FLEET_WIFI_SSID') }}"
+    wifi_psk: "{{ lookup('ansible.builtin.env', 'FLEET_WIFI_PSK') }}"
+    wifi_country: "{{ lookup('ansible.builtin.env', 'FLEET_WIFI_COUNTRY') | default('US', true) }}"
+    wifi_backhaul_iface: wlan0
+  tasks:
+    - name: Run through fleet.sh wifi
+      ansible.builtin.assert:
+        that:
+          - wifi_ssid | length > 0
+          - wifi_psk is match('^[0-9a-f]{64}$')
+        fail_msg: "use ../fleet.sh wifi <node|all> <ssid>"
+        quiet: true
+
+    - name: Wi-Fi country (also unblocks the radio)
+      ansible.builtin.command: raspi-config nonint do_wifi_country {{ wifi_country }}
+      changed_when: false
+
+    - name: NetworkManager profile (0600, only the derived key)
+      ansible.builtin.copy:
+        dest: /etc/NetworkManager/system-connections/fleet-wifi.nmconnection
+        mode: "0600"
+        owner: root
+        content: |
+          [connection]
+          id=fleet-wifi
+          type=wifi
+          interface-name={{ wifi_backhaul_iface }}
+          autoconnect=true
+          autoconnect-priority=10
+
+          [wifi]
+          mode=infrastructure
+          ssid={{ wifi_ssid }}
+
+          [wifi-security]
+          key-mgmt=wpa-psk
+          psk={{ wifi_psk }}
+
+          [ipv4]
+          method=auto
+
+          [ipv6]
+          method=auto
+      no_log: true
+      register: profile
+
+    - name: Load it
+      ansible.builtin.command: nmcli connection reload
+      when: profile is changed
+
+    - name: Join now if in range
+      ansible.builtin.command: nmcli connection up fleet-wifi
+      register: up
+      failed_when: false
+      changed_when: up.rc == 0
+      when: profile is changed
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: "{{ 'on ' ~ wifi_ssid if (up.rc | default(1)) == 0 else wifi_ssid ~ ' saved; joins when in range' }}"
