@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Iterator
 
+from rfanalytics.secrets import env_secret
+
 if TYPE_CHECKING:
     from rfanalytics.alerts import Message
     from rfanalytics.events import Event
@@ -207,7 +209,7 @@ class _MessageSink:
             if len(outbox):
                 print(f"rfanalytics: replaying {len(outbox)} message(s) from {args.outbox}", file=sys.stderr)
             password_env = getattr(args, "publish_password_env", None)
-            password = os.environ.get(password_env) if password_env else None
+            password = env_secret(password_env) if password_env else None
             self.publisher = MqttPublisher(outbox, args.publish_host, args.publish_port,
                                            username=getattr(args, "publish_user", None), password=password)
         self.counts: dict[str, int] = {"alerts": 0, "camera_cues": 0, "node_status": 0}
@@ -275,7 +277,7 @@ def _mqtt_records(args: argparse.Namespace) -> Iterator[tuple[int, dict]]:
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="rfanalytics")
     if getattr(args, "mqtt_user", None):
-        client.username_pw_set(args.mqtt_user, os.environ.get(args.mqtt_password_env) if args.mqtt_password_env else None)
+        client.username_pw_set(args.mqtt_user, env_secret(args.mqtt_password_env) if args.mqtt_password_env else None)
     client.on_connect = on_connect
     client.on_message = on_message
     client.connect(args.mqtt_host, args.mqtt_port)
@@ -337,12 +339,12 @@ def _kismet_poller(args: argparse.Namespace):
 
     password = args.password
     if args.password_env:
-        password = os.environ.get(args.password_env)
+        password = env_secret(args.password_env)
         if password is None:
             raise SystemExit(f"rfanalytics: environment variable {args.password_env} is not set")
     user = args.user or os.environ.get("KISMET_USER")
-    if password is None and os.environ.get("KISMET_PASSWORD"):
-        password = os.environ.get("KISMET_PASSWORD")
+    if password is None:
+        password = env_secret("KISMET_PASSWORD")
     return KismetPoller(args.kismet_url, username=user, password=password)
 
 

@@ -98,19 +98,19 @@ The central service has no physical assembly. It runs as Docker containers on th
 
 Document settings or other configuration required before operation. Do not include secrets or credentials.
 
-Central stack settings are in `central/.env` (copy it from `central/.env.example`):
+Central stack overrides are optional and go in `central/.env` (see `central/.env.example`). Passwords are generated on first start; see [`central/README.md`](central/README.md#passwords).
 
 | Setting | Required | Description / example |
 |---|---|---|
-| `BIND_ADDR` | Yes | Host address to expose ports on. Use `127.0.0.1` for development, the host's Tailscale IP, or `0.0.0.0` on a shared host behind a subnet router (with `docker-compose.fusion.yml`, see [`central/README.md`](central/README.md#shared-fusion-host)). |
-| `KISMET_VERSION` | Yes | Pinned Kismet release, `2026-10-R1`. Nodes must use the same version. |
-| `KISMET_ADMIN_USER` / `KISMET_ADMIN_PASSWORD` | Yes | Kismet web admin account. Seeded on first start only. |
+| `BIND_ADDR` | No | Host address to expose ports on (default: the root `.env`'s `BIND_ADDRESS`, else `127.0.0.1`). Use `127.0.0.1` for development, the host's Tailscale IP, or `0.0.0.0` on a shared host behind a subnet router (see [`central/README.md`](central/README.md#shared-central-host)). |
+| `KISMET_VERSION` | No | Pinned Kismet release, default `2026-10-R1`. Nodes must use the same version. |
+| `KISMET_ADMIN_USER` / `KISMET_ADMIN_PASSWORD` | No | Kismet web admin account (default user `admin`). The password is generated on first start unless set here; Kismet reads it on first start only. |
 
 WBT Console settings (`central/.env` and the local `console/site/layout.yaml`):
 
 | Setting | Required | Description / example |
 |---|---|---|
-| `CONSOLE_OPERATOR_PASSWORD` / `CONSOLE_ADMIN_PASSWORD` | Yes (console) | Console sign-in passwords; with neither set, sign-in is off (lab only). See [`console/README.md`](console/README.md#sign-in). |
+| `CONSOLE_OPERATOR_PASSWORD` / `CONSOLE_ADMIN_PASSWORD` | No | Console sign-in passwords; generated on first start unless set here. Sign-in is always on in the stack. See [`console/README.md`](console/README.md#sign-in). |
 | `CONSOLE_PORT` | No | Host port of the console (default `8080`, bound to `BIND_ADDR`). |
 | `CONSOLE_SITE` | No | Site used before one is chosen in the console's Site menu (default `default`). |
 | `CONSOLE_DEMO` | No | `1` adds synthetic emitters with known positions (testing); empty for real data only. |
@@ -122,10 +122,10 @@ Node configuration (`/etc/rf-node/node.yaml`) is specified in DESIGN.md section 
 
 **Prerequisites:** Docker with Compose v2, plus Tailscale for node connectivity. The simulator also needs Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
-1. Start the central stack: `cd central && cp .env.example .env && docker compose up -d --build --wait`. See [`central/README.md`](central/README.md).
+1. Start the central stack: on the central server, `docker compose up -d` from the repo root; on its own (lab), `cd central && docker compose up -d --build`. See [`central/README.md`](central/README.md).
 2. Without node hardware, feed the stack simulated data: `cd simulator && uv sync --extra mqtt && uv run rfsim run scenarios/loiterer.yaml --start-now --realtime --speed 60 --mqtt-host 127.0.0.1 -o /dev/null`. See [`simulator/README.md`](simulator/README.md).
    To process the feed and publish alerts, run `cd analytics && uv sync --extra mqtt && uv run rfanalytics run --site ../simulator/sites/dev-site.yaml --mqtt-host 127.0.0.1 -o events.jsonl --rules config/rules.example.yaml --publish-host 127.0.0.1`. See [`analytics/README.md`](analytics/README.md).
-   With live nodes instead, enable the analytics service next to Kismet on the central server with `./setup-central.sh <address> --with-rf` (repo root), and watch its output with `docker compose logs -f rf-analytics`. Set `RF_SITE`, `RF_RULES` and `RF_FRIENDLY` in `central/.env` to the real site files before running it; the example site geometry is a placeholder. See [`central/README.md`](central/README.md#live-analytics-kismet--alerts--mqtt).
+   With live nodes instead, rf-analytics runs with the stack on the central server (no flag needed); watch its output with `docker compose logs -f rf-analytics` from the repo root. Set `RF_SITE`, `RF_RULES` and `RF_FRIENDLY` in `central/.env` to the real site files before running it; the example site geometry is a placeholder. See [`central/README.md`](central/README.md#live-analytics-kismet--alerts--mqtt).
 3. **Bring up WBT nodes.** This is a draft until it is validated on hardware. The node agent is not built yet. Steps 3.4–3.5 can be run manually, or capture can be made persistent with the example systemd units in [`node/README.md`](node/README.md).
    1. Make sure the central stack is running and the central server is on the tailnet as `rf-central`, or reachable through the site's subnet router (see [`node/README.md`](node/README.md#tailscale-headscale-tailnet)).
    2. **Power order:** power the USB hub **first**, wait about 5 seconds, then power the Pi. This way all radios are present when the Pi enumerates USB devices.
@@ -140,8 +140,8 @@ Node configuration (`/etc/rf-node/node.yaml`) is specified in DESIGN.md section 
 
 ### WBT Console (rf-console)
 
-1. **Once:** `cp console/layout.example.yaml console/site/layout.yaml` (node radio MACs), and set the sign-in passwords with `central/set-console-passwords.sh` (writes `CONSOLE_OPERATOR_PASSWORD` and `CONSOLE_ADMIN_PASSWORD` into `central/.env`).
-2. Start it with the central stack: `cd central && docker compose --profile console up -d --build`, then open `http://<BIND_ADDR>:8080` and sign in.
+1. **Once:** `cp console/layout.example.yaml console/site/layout.yaml` (node radio MACs). Sign-in passwords are generated on first start; to choose them, set `CONSOLE_OPERATOR_PASSWORD` and `CONSOLE_ADMIN_PASSWORD` in `central/.env`, or use the optional `central/set-console-passwords.sh`. Reading the generated ones: see [`central/README.md`](central/README.md#passwords).
+2. It starts with the central stack (`cd central && docker compose up -d --build`, or `docker compose up -d` from the repo root). Then open `http://<BIND_ADDR>:8080` and sign in.
 3. **New building:** Site menu (site name ▾) → *New site*. Then *Setup → Nodes*: drag each node to where it is (feet, any origin) and place any node Kismet knows that is not on the map yet. **Leaving a building:** an admin uses *Export* if the data is needed, switches to the new site, and *Wipes* the old one.
 4. **Map** (*Live* mode): each located device is a dot (circle Wi-Fi, triangle Bluetooth, square TPMS); faint dots are heard by only two nodes. Click a device to focus on it (others hide; range rings, trail, per-node RSSI). Click empty space or press Esc to return. Positions are smoothed over time so they do not jump.
 5. **Walls:** *Setup → Walls* → *Wall* (click start, end), *Room* (two corners), *Erase*. Choose how accurately you are drawing (±0.5 to ±4 ft); the model treats wall positions as uncertain.

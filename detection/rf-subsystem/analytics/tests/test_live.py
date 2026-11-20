@@ -229,3 +229,17 @@ def test_live_command_logs_in_to_the_publish_broker(fake_kismet, tmp_path, monke
     ])
     assert rc == 0
     assert seen == {"host": "broker", "port": 1883, "username": "rf-analytics", "password": "s3cret"}
+
+
+def test_env_secret_prefers_value_then_file(tmp_path, monkeypatch):
+    from rfanalytics.secrets import env_secret
+
+    secret = tmp_path / "pw"
+    secret.write_text("from-file\n")
+    monkeypatch.delenv("BR_TEST_PW", raising=False)
+    monkeypatch.delenv("BR_TEST_PW_FILE", raising=False)
+    assert env_secret("BR_TEST_PW") is None
+    monkeypatch.setenv("BR_TEST_PW_FILE", str(secret))
+    assert env_secret("BR_TEST_PW") == "from-file"
+    monkeypatch.setenv("BR_TEST_PW", "from-env")
+    assert env_secret("BR_TEST_PW") == "from-env"

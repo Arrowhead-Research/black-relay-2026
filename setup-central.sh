@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One command to set up (or update) the BlackRelay central server: image registry, secrets store,
-# central MQTT broker and fusion. Run on the central server from a checkout of this repo:
+# central MQTT broker, fusion and the RF services (Kismet, WBT Console, rf-analytics). Run on the
+# central server from a checkout of this repo:
 #
 #   ./setup-central.sh <address>                                       own CA (hosts must trust it)
 #   ./setup-central.sh <address> --domain reg.bulexa.com --email you@example.org
@@ -14,11 +15,6 @@
 #   --with-bridge         also run the physical (IQ5) bridge on this server: its certs, config, broker
 #                         login and containers (detection/physical-subsystem/deploy). Asks for sudo once.
 #   --panel-ip IP         the IQ5 panel's address, with --with-bridge (needed the first time)
-#   --with-rf             also run RF live analytics here (service rf-analytics): its own broker login,
-#                         Kismet login from detection/rf-subsystem/central/.env, and the RF console
-#                         pointed at this broker. Remembered in .env (COMPOSE_PROFILES=rf).
-#   --kismet-url URL      the RF stack's Kismet, with --with-rf (default http://rf-kismet:2501: the RF
-#                         stack on this host, on the shared Docker network "fusion")
 #
 # Safe to run again: existing logins, passwords, certificates and data are kept. Needs Docker with
 # Compose v2 and bash. Prints where every login is at the end.
@@ -27,7 +23,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 store="$root/detection/central-store"
 cd "$root"
 
-address="" domain="" email="" token_file="" cron=1 bridge=0 panel_ip="" rf=0 kismet_url=""
+address="" domain="" email="" token_file="" cron=1 bridge=0 panel_ip=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --domain) domain="${2:?--domain needs a name}"; shift 2 ;;
@@ -36,14 +32,12 @@ while [ $# -gt 0 ]; do
     --no-cron) cron=0; shift ;;
     --with-bridge) bridge=1; shift ;;
     --panel-ip) panel_ip="${2:?--panel-ip needs an address}"; shift 2 ;;
-    --with-rf) rf=1; shift ;;
-    --kismet-url) kismet_url="${2:?--kismet-url needs a URL}"; shift 2 ;;
-    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     -*) echo "unknown option $1" >&2; exit 2 ;;
     *) address="$1"; shift ;;
   esac
 done
-[ -n "$address" ] || { sed -n '2,26p' "$0"; exit 2; }
+[ -n "$address" ] || { sed -n '2,20p' "$0"; exit 2; }
 [ -z "$domain" ] || [ -n "$email" ] || { echo "--domain needs --email (Let's Encrypt account)" >&2; exit 2; }
 step() { printf '\n== %s\n' "$*"; }
 
@@ -79,60 +73,20 @@ fi
 step "Broker logins and fusion token"
 "$root/detection/central/make-env.sh" "$address" | sed 's/^/   /'
 
-# Reads KEY from an env file (empty if missing).
-envget() { grep "^$2=" "$1" 2>/dev/null | tail -n1 | cut -d= -f2- || true; }
-# Sets KEY=VALUE in an env file, replacing an existing line (values here hold no newlines).
-envput() {
-  touch "$1"
-  (umask 077; { grep -v "^$2=" "$1" || true; printf '%s=%s\n' "$2" "$3"; } >"$1.new") && cat "$1.new" >"$1" && rm -f "$1.new"
-}
-
-[ "$rf" = 1 ] || [ "$(envget "$root/.env" RF_ENABLED)" != 1 ] || rf=1   # --with-rf is remembered
-if [ "$rf" = 1 ]; then
-  step "RF analytics: Kismet login, broker login, RF console"
-  rf_env="$root/detection/rf-subsystem/central/.env"
-  envput "$root/.env" RF_ENABLED 1
-  profiles="$(envget "$root/.env" COMPOSE_PROFILES)"
-  case ",$profiles," in *,rf,*) ;; *) envput "$root/.env" COMPOSE_PROFILES "${profiles:+$profiles,}rf" ;; esac
-  [ -z "$kismet_url" ] || envput "$root/.env" RF_KISMET_URL "$kismet_url"
-  if [ -f "$rf_env" ]; then
-    # Kismet admin login, as the RF stack seeded it (rf-analytics only reads the REST API).
-    [ -n "$(envget "$root/.env" RF_KISMET_USER)" ] || envput "$root/.env" RF_KISMET_USER "$(envget "$rf_env" KISMET_ADMIN_USER)"
-    [ -n "$(envget "$root/.env" RF_KISMET_PASSWORD)" ] || envput "$root/.env" RF_KISMET_PASSWORD "$(envget "$rf_env" KISMET_ADMIN_PASSWORD)"
-    # Site, rules and friendly files the RF stack's own rf-analytics used (file names in analytics/config).
-    for k in RF_SITE RF_RULES RF_FRIENDLY; do
-      v="$(envget "$rf_env" "$k")"
-      [ -z "$v" ] || [ -n "$(envget "$root/.env" "$k")" ] || envput "$root/.env" "$k" "$v"
-    done
-    # The console (RF stack) publishes positions and node status here with the rf-console login.
-    envput "$rf_env" CONSOLE_MQTT_HOST "$address"
-    envput "$rf_env" CONSOLE_MQTT_USER "$(envget "$root/.env" BROKER_RF_USER)"
-    envput "$rf_env" CONSOLE_MQTT_PASSWORD "$(envget "$root/.env" BROKER_RF_PASSWORD)"
-    # Kismet joins the shared network as rf-kismet (the overlay) unless analytics polls a URL elsewhere.
-    if [ -z "$(envget "$root/.env" RF_KISMET_URL)" ] && [ -z "$(envget "$rf_env" COMPOSE_FILE)" ]; then
-      envput "$rf_env" COMPOSE_FILE docker-compose.yml:docker-compose.fusion.yml
-    fi
-    chmod 600 "$rf_env"
-    echo "   RF console publishes to $address:1883 as $(envget "$root/.env" BROKER_RF_USER)"
-    docker network inspect fusion >/dev/null 2>&1 || { docker network create fusion >/dev/null && echo "   created Docker network fusion"; }
-    if [ -n "$(docker ps -q --filter label=com.docker.compose.project=rf-central)" ]; then
-      echo "   applying it to the running RF stack (old broker removed)"
-      (cd "$root/detection/rf-subsystem/central" && docker compose up -d --remove-orphans) 2>&1 | sed 's/^/   /'
-    fi
-  else
-    echo "   NOTE: no $rf_env (RF stack not on this host): set RF_KISMET_USER and RF_KISMET_PASSWORD in"
-    echo "   .env, and --kismet-url if Kismet is elsewhere."
-  fi
-  docker network inspect fusion >/dev/null 2>&1 || docker network create fusion >/dev/null
-fi
-
 # The store may have been started on its own before; the root project takes it over (same volumes).
 if [ -n "$(docker ps -q --filter label=com.docker.compose.project=black-relay-central-store)" ]; then
   step "Moving the running store into the central project (data kept)"
   (cd "$store" && docker compose down)
 fi
 
-step "Starting registry, secrets store, broker and fusion$( [ "$rf" = 0 ] || echo ', RF analytics')"
+# The RF services used to run as their own project (rf-central); the root project includes them now
+# and uses the same named volumes, so Kismet logs, console sites and calibration are kept.
+if [ -n "$(docker ps -aq --filter label=com.docker.compose.project=rf-central)" ]; then
+  step "Moving the RF services into the central project (data kept)"
+  docker compose -p rf-central down --remove-orphans
+fi
+
+step "Starting registry, secrets store, broker, fusion and the RF services"
 docker compose up -d --wait --build
 docker compose ps --format '   {{.Service}}: {{.Status}}'
 
@@ -199,6 +153,5 @@ $( [ -z "$domain" ] && echo "   Hosts must trust detection/central-store/state/c
 
    Add a host:        detection/central-store/server.sh add-client <name> [--secrets]
    Give a bridge its broker login:  detection/central/share-broker-login.sh <name>
-$( [ "$rf" = 1 ] && echo "   RF          rf-analytics polls $(envget "$root/.env" RF_KISMET_URL | grep . || echo http://rf-kismet:2501), publishes as $(envget "$root/.env" BROKER_RF_ANALYTICS_USER)" )
 $( [ "$bridge" = 1 ] && echo "   Bridge      API https://$address:8443   local broker $address:8884   publishing to the central broker" )
 EOF

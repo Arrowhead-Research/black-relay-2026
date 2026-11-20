@@ -21,7 +21,7 @@
 
 ## Live pipeline: Kismet → alerts → MQTT
 
-`rfanalytics live` is the end-to-end live path in one process: it polls Kismet's REST API, turns devices into `rf.observation.v0` records, runs them through friendly exclusion, the analyzer and the alert rules, and publishes alerts, camera cues and node status over MQTT through the durable outbox. On the central server it runs as the `rf-analytics` service of the repo-root `compose.yaml` (see [`../central/README.md`](../central/README.md#live-analytics-kismet--alerts--mqtt)).
+`rfanalytics live` is the end-to-end live path in one process: it polls Kismet's REST API, turns devices into `rf.observation.v0` records, runs them through friendly exclusion, the analyzer and the alert rules, and publishes alerts, camera cues and node status over MQTT through the durable outbox. In the RF stack it runs as the `rf-analytics` service of [`../central/docker-compose.yml`](../central/docker-compose.yml), which the repo-root `compose.yaml` includes (see [`../central/README.md`](../central/README.md#live-analytics-kismet--alerts--mqtt)).
 
 ```sh
 uv sync --extra mqtt
@@ -39,6 +39,7 @@ uv run rfanalytics live --kismet-url http://<kismet-host>:2501 \
 | `--max-age-s` | 30 | Drop observations older than this. Kismet keeps each node's last-heard time per device, which can be minutes older than the device's own; processing those would replay history out of order (for example "node offline" in the past). Counted as `stale`. |
 | `--events-out`, `--observations-out`, `--alerts-out` | none | Optional JSONL archives (appended). |
 | `--publish-host`, `--topic-prefix`, `--outbox` | none, `detection/rf`, `./rf-outbox.jsonl` | MQTT output, QoS 1, replayed from the outbox after an outage or restart. |
+| `--publish-user`, `--publish-password-env` | none | Login for the publish broker. The password is read from the named variable, or from the file in `NAME_FILE` (how the stack passes its generated passwords). |
 | `--duration` | run forever | Stop after N seconds (tests). |
 
 Time-based rules (loiter, node offline) are also ticked on the wall clock after every poll, so they fire when the site goes quiet. Kismet timestamps are server time: run `live` on (or NTP-synced with) the Kismet host. `SIGTERM` (`docker stop`) flushes open visits and drains the outbox.
@@ -52,7 +53,7 @@ uv run rfanalytics kismet --once --kismet-url http://<kismet-host>:2501 \
   --user "$KISMET_USER" --password-env KISMET_PASSWORD -o observations.jsonl
 ```
 
-Node IDs are derived from Kismet datasource names (e.g. `wbt-1:wifi` -> `wbt-1`), matching the naming used when starting remote capture helpers. **Do not pass credentials on the command line in shared environments;** prefer `--password-env` or `KISMET_PASSWORD`/`KISMET_USER`.
+Node IDs are derived from Kismet datasource names (e.g. `wbt-1:wifi` -> `wbt-1`), matching the naming used when starting remote capture helpers. **Do not pass credentials on the command line in shared environments;** prefer `--password-env` or `KISMET_PASSWORD`/`KISMET_USER`. A secret named `NAME` may also come from the file in `NAME_FILE` (`src/rfanalytics/secrets.py`).
 
 **Per-node RSSI needs `keep_per_datasource_stats=true` in Kismet** (set in `central/kismet/kismet_site.conf`). With Kismet's default, every per-node signal is empty; the adapter then falls back to the device's aggregate RSSI and sets `attributes.rssi_is_aggregate=true`, which gives every node the same RSSI and makes zone estimates meaningless. RTL433/TPMS mapping is still best-effort until verified with live TPMS decodes.
 
