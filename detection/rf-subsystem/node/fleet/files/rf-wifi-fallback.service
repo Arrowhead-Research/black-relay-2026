@@ -1,0 +1,7 @@
+[Unit]
+Description=Setup/rescue hotspot when the node is offline (rf-wifi-fallback)
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /usr/local/sbin/rf-wifi-fallback

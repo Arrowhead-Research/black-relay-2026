@@ -27,6 +27,8 @@ SSH_KEY="${SSH_KEY:-$HOME/.ssh/blackrelay_fleet}"
 TIMEZONE="${TIMEZONE:-America/Chicago}"
 WIFI_COUNTRY="${WIFI_COUNTRY:-US}"
 WIFI_SSID="${WIFI_SSID:-}"
+SETUP_SSID="${SETUP_SSID:-}"     # staging network the hub hosts; empty: no hub, no rescue hotspot
+SETUP_HUB="${SETUP_HUB:-wbt-1}"
 IMAGE_URL="${IMAGE_URL:-https://downloads.raspberrypi.com/raspios_lite_arm64_latest}"
 CACHE_DIR="${CACHE_DIR:-$HOME/.cache/blackrelay-fleet}"
 
@@ -41,15 +43,34 @@ ensure_key() {
   ssh-keygen -q -t ed25519 -C "blackrelay-fleet" -f "$SSH_KEY"
 }
 
-# The WPA PSK (64 hex digits) derived from the passphrase, so the card never holds the passphrase itself.
-wifi_psk() {
-  local pass="${WIFI_PASSWORD:-}"
-  if [ -z "$pass" ]; then
-    [ -t 0 ] || die "set WIFI_PASSWORD or run interactively"
-    read -r -s -p "Wi-Fi passphrase for $WIFI_SSID: " pass </dev/tty; echo >&2
+# ask_pass <label> <var>: a WPA passphrase from $<var> or the terminal (8 to 63 characters).
+ask_pass() {
+  local v="${!2:-}"
+  if [ -z "$v" ]; then
+    [ -t 0 ] || [ -r /dev/tty ] || die "set $2 or run interactively"
+    read -r -s -p "$1: " v </dev/tty; echo >&2
   fi
-  [ "${#pass}" -ge 8 ] && [ "${#pass}" -le 63 ] || die "a WPA passphrase is 8 to 63 characters"
-  printf '%s' "$pass" | python3 -c 'import hashlib,sys; print(hashlib.pbkdf2_hmac("sha1", sys.stdin.buffer.read(), sys.argv[1].encode(), 4096, 32).hex())' "$WIFI_SSID"
+  [ "${#v}" -ge 8 ] && [ "${#v}" -le 63 ] || die "a WPA passphrase is 8 to 63 characters"
+  printf -v "$2" '%s' "$v"; export "${2?}"
+}
+# psk_of <ssid> <passphrase>: the WPA key (64 hex digits), so cards and nodes never hold the passphrase.
+psk_of() {
+  printf '%s' "$2" | python3 -c 'import hashlib,sys; print(hashlib.pbkdf2_hmac("sha1", sys.stdin.buffer.read(), sys.argv[1].encode(), 4096, 32).hex())' "$1"
+}
+wifi_psk() { ask_pass "Wi-Fi passphrase for $WIFI_SSID" WIFI_PASSWORD; psk_of "$WIFI_SSID" "$WIFI_PASSWORD"; }
+
+# nm_profile <id> <ssid> <psk> <ap|client> <autoconnect yes|no> <priority>: a NetworkManager keyfile.
+nm_profile() {
+  printf '[connection]\nid=%s\ntype=wifi\ninterface-name=wlan0\nautoconnect=%s\nautoconnect-priority=%s\n\n' "$1" "$5" "$6"
+  if [ "$4" = ap ]; then
+    printf '[wifi]\nmode=ap\nband=bg\nssid=%s\n\n[wifi-security]\nkey-mgmt=wpa-psk\nproto=rsn\npairwise=ccmp\ngroup=ccmp\npsk=%s\n\n[ipv4]\nmethod=shared\naddress1=10.42.0.1/24\n\n[ipv6]\nmethod=disabled\n' "$2" "$3"
+  else
+    printf '[wifi]\nmode=infrastructure\nssid=%s\n\n[wifi-security]\nkey-mgmt=wpa-psk\npsk=%s\n\n[ipv4]\nmethod=auto\n\n[ipv6]\nmethod=auto\n' "$2" "$3"
+  fi
+}
+# write_file <path> <mode> <content>: one cloud-init write_files entry (base64, so any content is safe).
+write_file() {
+  printf '  - path: %s\n    permissions: "%s"\n    encoding: b64\n    content: %s\n' "$1" "$2" "$(printf '%s' "$3" | base64 | tr -d '\n')"
 }
 
 # seed <node> <dir>: the cloud-init NoCloud files Raspberry Pi OS (trixie and later) reads from bootfs.
@@ -61,8 +82,28 @@ cmd_seed() {
   [ -f "$dir/config.txt" ] || [ -n "${FLEET_SEED_ANY_DIR:-}" ] || die "$dir does not look like a Raspberry Pi boot partition (no config.txt)"
   ensure_key
   pubkey="$(cat "$SSH_KEY.pub")"
-  local psk=""
+  local psk="" setup_files="" setup_cmds=""
   [ -z "$WIFI_SSID" ] || psk="$(wifi_psk)"
+  if [ -n "$SETUP_SSID" ]; then
+    # Hub: hosts SETUP_SSID while staging. Others: join it, and keep <node>-setup as their rescue hotspot.
+    ask_pass "Passphrase for the setup network $SETUP_SSID (also the rescue hotspots')" SETUP_PASSWORD
+    local nm=/etc/NetworkManager/system-connections f name dest mode
+    if [ "$node" = "$SETUP_HUB" ]; then
+      setup_files="$(write_file "$nm/setup-ap.nmconnection" 0600 "$(nm_profile setup-ap "$SETUP_SSID" "$(psk_of "$SETUP_SSID" "$SETUP_PASSWORD")" ap yes -10)")"
+    else
+      setup_files="$(write_file "$nm/setup-wifi.nmconnection" 0600 "$(nm_profile setup-wifi "$SETUP_SSID" "$(psk_of "$SETUP_SSID" "$SETUP_PASSWORD")" client yes -10)")
+$(write_file "$nm/setup-ap.nmconnection" 0600 "$(nm_profile setup-ap "$node-setup" "$(psk_of "$node-setup" "$SETUP_PASSWORD")" ap no -20)")"
+    fi
+    for f in rf-wifi-fallback:/usr/local/sbin:0755 rf-wifi-fallback.service:/etc/systemd/system:0644 rf-wifi-fallback.timer:/etc/systemd/system:0644; do
+      IFS=: read -r name dest mode <<<"$f"
+      setup_files="$setup_files
+$(write_file "$dest/$name" "$mode" "$(cat "$here/files/$name")")"
+    done
+    setup_cmds='  - [nmcli, connection, reload]
+  - [systemctl, enable, --now, rf-wifi-fallback.timer]'
+    [ "$node" != "$SETUP_HUB" ] || setup_cmds="$setup_cmds
+  - [nmcli, connection, up, setup-ap]"
+  fi
 
   printf 'instance-id: %s\nlocal-hostname: %s\n' "$node" "$node" >"$dir/meta-data"
 
@@ -84,7 +125,9 @@ disable_root: true
 runcmd:
   - [raspi-config, nonint, do_wifi_country, $(json "$WIFI_COUNTRY")]
   - [systemctl, enable, --now, ssh]
+${setup_cmds}
 EOF
+  [ -z "$setup_files" ] || printf 'write_files:\n%s\n' "$setup_files" >>"$dir/user-data"
 
   if [ -n "$WIFI_SSID" ]; then
     cat >"$dir/network-config" <<EOF
@@ -107,7 +150,12 @@ EOF
     printf 'network:\n  version: 2\n  ethernets:\n    eth0:\n      dhcp4: true\n      optional: true\n' >"$dir/network-config"
   fi
   : >"$dir/ssh"   # older images: enable sshd on first boot
-  echo "Seeded $dir for $node: user $ADMIN_USER, key $(ssh-keygen -lf "$SSH_KEY.pub" | awk '{print $2}'), ${WIFI_SSID:+Wi-Fi \"$WIFI_SSID\", }Ethernet DHCP."
+  local role=""
+  if [ -n "$SETUP_SSID" ]; then
+    if [ "$node" = "$SETUP_HUB" ]; then role="hosts setup network \"$SETUP_SSID\" (10.42.0.1), "
+    else role="joins setup network \"$SETUP_SSID\", rescue hotspot \"$node-setup\", "; fi
+  fi
+  echo "Seeded $dir for $node: user $ADMIN_USER, key $(ssh-keygen -lf "$SSH_KEY.pub" | awk '{print $2}'), ${role}${WIFI_SSID:+Wi-Fi \"$WIFI_SSID\", }Ethernet DHCP."
 }
 
 # fetch_image -> path of the verified, cached .img.xz
@@ -142,9 +190,9 @@ cmd_flash() {
   [ -n "$node" ] && [ -n "$dev" ] || usage
   valid_node "$node"
   command -v xz >/dev/null || die "xz is not installed"
-  if [ -n "$WIFI_SSID" ] && [ -z "${WIFI_PASSWORD:-}" ]; then   # ask now, not after the long write
-    read -r -s -p "Wi-Fi passphrase for $WIFI_SSID: " WIFI_PASSWORD </dev/tty; echo >&2; export WIFI_PASSWORD
-  fi
+  # ask now, not after the long write
+  [ -z "$WIFI_SSID" ] || ask_pass "Wi-Fi passphrase for $WIFI_SSID" WIFI_PASSWORD
+  [ -z "$SETUP_SSID" ] || ask_pass "Passphrase for the setup network $SETUP_SSID (also the rescue hotspots')" SETUP_PASSWORD
   ensure_key
   case "$(uname -s)" in
     Darwin)
@@ -211,7 +259,7 @@ cmd_wifi() {
   [[ "$ssid" != *$'\n'* ]] && [ "${#ssid}" -le 32 ] || die "bad SSID"
   WIFI_SSID="$ssid"
   FLEET_WIFI_PSK="$(wifi_psk)" FLEET_WIFI_SSID="$ssid" FLEET_WIFI_COUNTRY="$WIFI_COUNTRY" \
-    ansible_run wifi.yml "$limit" "${@:3}"
+    ansible_run wifi.yml "$limit" ${SETUP_SSID:+-e "setup_hub=$SETUP_HUB"} "${@:3}"
 }
 
 case "${1:-}" in
