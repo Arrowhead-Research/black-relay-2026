@@ -380,7 +380,7 @@ INSTRUCTIONS = """
 Pairing this host with the panel at {panel_ip} as a virtual IQ Remote.
 
 On the PANEL (you need the installer/dealer code, never a user code):
-  (swipe down) Settings > Advanced Settings > Devices > Wi-Fi Devices > IQ Remote Devices > Pair
+  (swipe down) Settings > Advanced Settings > Installation > Devices > Wi-Fi Devices > IQ Remote Devices > Pair
 This host must be on the panel's access point or the same Wi-Fi. If this times out, try the other order.
 
 This host is now listening for the panel on {plugin_ip}:{port} (announced over mDNS) and will wait up to
