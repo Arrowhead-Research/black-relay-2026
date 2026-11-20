@@ -1,3 +1,8 @@
+# Holds every secret of the bundle. setup-credentials.sh writes it, 0600.
 .env
-kits
-mediamtx.generated.yml
+.env.*
+!.env.example
+__pycache__/
+.venv/
+.pytest_cache/
+.ruff_cache/
