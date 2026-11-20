@@ -21,7 +21,8 @@ mkdir -p "$CO/api" "$CM/broker" "$SO" "$SC" "$SF" data/pki "$PRIV"
 for f in mqtt_password:"$SO" control4_token:"$SC" fusion_password:"$SF"; do
   n="${f%%:*}"; d="${f#*:}"; [ -f "$SEC/$n" ] && [ ! -f "$d/$n" ] && mv "$SEC/$n" "$d/$n"; done
 rm -rf "$OUT/api" "$OUT/broker"
-SANS=("${@:-127.0.0.1}" localhost)
+# 127.0.0.1 + localhost always: outbound reaches the local broker at 127.0.0.1 (host networking).
+SANS=(); for h in "$@" 127.0.0.1 localhost; do [[ " ${SANS[*]} " == *" $h "* ]] || SANS+=("$h"); done
 san_line() { local s="" i=1; for h in "${SANS[@]}"; do
   if [[ "$h" =~ ^[0-9.]+$ ]]; then s+="IP.$i=$h,"; else s+="DNS.$i=$h,"; fi; i=$((i+1)); done; echo "${s%,}"; }
 ext() { printf "subjectAltName=%s\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n" "$(san_line | sed 's/IP\.[0-9]*=/IP:/g; s/DNS\.[0-9]*=/DNS:/g')"; }
