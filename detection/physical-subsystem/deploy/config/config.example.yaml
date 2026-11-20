@@ -86,18 +86,17 @@ site:                             # identifies this installation in every team m
 
 # Team ("fusion") MQTT output, DRAFT v0: see MQTT-CONTRACT.md. Publish-only, no retained messages, at least once.
 # Off by default; the bridge starts and runs normally with it off. Enable it by also starting the `fusion` compose
-# profile (own container on the external Docker network `fusion`; see docker-compose.yml).
+# profile (own container, own outbound network; see docker-compose.yml).
 fusion:
   enabled: false
-  host: rf-mqtt                   # team broker, resolved on the `fusion` Docker network
-  port: 1883
-  tls: null                       # null = PLAINTEXT (a warning is logged). The team broker is plaintext in v0.
-  #  tls:                         # when the team broker gets TLS, replace `null` above with:
-  #    ca_file: /certs/fusion-ca.crt
-  #    certfile: null             # optional client certificate
-  #    keyfile: null
-  username: null                  # optional; when set, the password is read from password_file (never put it here)
-  password_file: null             # e.g. /run/secrets/fusion_password
+  host: reg.bulexa.com            # the central broker (repo-root compose.yaml on the central server)
+  port: 8883                      # TLS. 1883 is the same broker without TLS (avoid: the login would cross in clear)
+  tls:
+    ca_file: /etc/ssl/certs/ca-certificates.crt   # public CAs: the broker has a Let's Encrypt certificate
+    certfile: null                # optional client certificate
+    keyfile: null
+  username: physical-subsystem    # BROKER_PHYSICAL_USER on the central server
+  password_file: /run/secrets/fusion_password   # deploy/secrets/fusion/fusion_password (uid 10003, 0600)
   topic_prefix: detection/physical
   client_id: physical-subsystem   # must be unique on the team broker
   status_interval_s: 60           # panel status and every zone status are re-sent at least this often

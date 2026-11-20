@@ -238,7 +238,10 @@ def test_compose_isolation_and_uids():
     uids = {n: S[n]["user"].split(":")[0] for n in ("iq-remote", "control4", "outbound", "normalizer")}
     assert uids == {"iq-remote": "10001", "control4": "10002", "outbound": "10003", "normalizer": "10004"}
     out_mounts = " ".join(mounts("outbound"))
-    assert "./certs/api:" in out_mounts and "./certs:/certs" not in out_mounts and "broker" not in out_mounts
+    # outbound mounts only its own cert dir (CA + API key pair) and its own secrets dir; never the broker key
+    assert "./certs/outbound:/certs:ro" in out_mounts and "./certs:/certs" not in out_mounts and "broker" not in out_mounts
+    assert "./secrets/outbound:/run/secrets:ro" in out_mounts and "control4" not in out_mounts
+    assert "./secrets/control4:/run/secrets:ro" in " ".join(mounts("control4"))
     assert not any("pki" in v for v in mounts("outbound") + mounts("control4") + mounts("normalizer"))
     assert not any("ca-private" in v for n in S for v in S[n].get("volumes", []))     # CA key never mounted
     for n, u in uids.items():
@@ -265,14 +268,17 @@ def test_gen_certs_modes_ownership_and_ca_key_location(tmp_path):
     r = subprocess.run([str(dep / "scripts/gen-certs.sh"), "127.0.0.1"], cwd=dep, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     mode = lambda p: oct((dep / p).stat().st_mode & 0o777); uid = lambda p: (dep / p).stat().st_uid
-    for k in ("certs/broker/broker.key", "certs/api/api.key", "secrets/mqtt_password", "secrets/control4_token",
-              "ca-private/ca.key", "mosquitto/passwd"):
+    for k in ("certs/mosquitto/broker/broker.key", "certs/outbound/api/api.key", "secrets/outbound/mqtt_password",
+              "secrets/control4/control4_token", "secrets/fusion/fusion_password", "ca-private/ca.key", "mosquitto/passwd"):
         assert mode(k) == "0o600", k
     assert mode("ca-private") == "0o700" and mode("data/pki") == "0o700" and mode("secrets") == "0o750"
     assert not list((dep / "certs").rglob("ca.key")) and (dep / "certs/ca.crt").exists()
+    assert not list((dep / "certs/outbound").rglob("broker*")) and not list((dep / "certs/mosquitto").rglob("api*"))
+    assert all(mode(f"secrets/{d}") == "0o700" for d in ("outbound", "control4", "fusion"))
     if os.geteuid() == 0:
-        assert (uid("certs/api/api.key"), uid("secrets/mqtt_password"), uid("secrets/control4_token"),
-                uid("certs/broker/broker.key"), uid("data/pki")) == (10003, 10003, 10002, 1883, 10001)
+        assert (uid("certs/outbound/api/api.key"), uid("secrets/outbound/mqtt_password"),
+                uid("secrets/control4/control4_token"), uid("certs/mosquitto/broker/broker.key"),
+                uid("data/pki")) == (10003, 10003, 10002, 1883, 10001)
 
 
 def test_example_config_documents_every_new_key_and_loads():

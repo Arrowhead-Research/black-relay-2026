@@ -230,7 +230,7 @@ example file documents all of them.
 | `storage.data_dir`, `.retention_days` | `/data`, 30 | SQLite event log |
 | `site.id`, `site.name` | `default`, `default` | Identifies this installation in team messages |
 | `fusion.enabled` | false | Team MQTT output |
-| `fusion.host`, `.port` | `rf-mqtt`, 1883 | Team broker on the `fusion` Docker network |
+| `fusion.host`, `.port` | `rf-mqtt`, 1883 (example: `reg.bulexa.com`, 8883) | The central broker (repo-root `compose.yaml` on the central server) |
 | `fusion.tls` | null | null = plaintext (a warning is logged). Otherwise `{ca_file, certfile?, keyfile?}` |
 | `fusion.username`, `.password_file` | null | Optional; the password is read from the file |
 | `fusion.topic_prefix` | `detection/physical` | |
@@ -366,18 +366,22 @@ added/removed, partition arming/alarm) for the requested time. With `pin_mode: r
 `watch` stop with `NO PANEL PIN RECORDED ... Run br2 pair ... or br2 repin --yes` and send nothing. None of them prints key
 material.
 
-Team output (optional): set `fusion.enabled: true` in `config.yaml`, make sure the external network exists
-(`docker network create fusion` if the RF/camera compose has not created it), then:
+Team output (optional): the central broker runs on the central server (repo-root `compose.yaml`). Put its physical
+password in `deploy/secrets/fusion/fusion_password` (uid 10003, 0600). Automated: on the central server run
+`detection/central/share-broker-login.sh <device>` (seals it for this bridge in the secrets store), then here
+`deploy/scripts/fetch-broker-login.sh` (needs `central-store/secrets.sh setup` once). By hand:
+`sudo FUSION_PASSWORD=... ./scripts/gen-certs.sh <host>`. Then set `fusion.enabled: true`
+in `config.yaml` (the example already points at `reg.bulexa.com:8883` with TLS and the `physical-subsystem` login), then:
 
 ```sh
 docker compose --profile fusion up -d
 ```
 
-This starts one more container from the same image, attached only to the `fusion` network. It has a healthcheck
+This starts one more container from the same image, attached only to its own outbound network (`fusion-out`). It has a healthcheck
 (`python -m br2 healthcheck fusion`, backed by `GET /healthz` on `fusion.metrics_host:fusion.metrics_port`, default
 127.0.0.1:9101 inside the container) and serves `/metrics` there: outbox depth, drops, last PUBACK age (section 11 of
 MQTT-CONTRACT.md). `docker compose ps` shows it `healthy` once running. It is separate because the
-`outbound` container uses host networking and cannot join a Docker network.
+`outbound` container uses host networking, and the publisher should not.
 
 Without Docker (development, and how the harness runs it): `./harness_start.sh <config.yaml>` creates `.venv` and runs
 all services as separate processes under a supervisor. The script sets `BR2_IQ_PIN_MODE=tofu` and
@@ -451,7 +455,7 @@ Manual checks:
    `online`, `active_source: iq_remote`, and the zone count.
 2. Trip each sensor once. `GET /v1/zones` shows the state change and `GET /v1/events?after=0` shows the event with a
    new `seq`.
-3. With fusion enabled: `mosquitto_sub -h rf-mqtt -p 1883 -v -t 'detection/physical/#'`. Expect a panel status and one
+3. With fusion enabled, on the central server: `mosquitto_sub -h <address> -p 1883 -u fusion -P <BROKER_FUSION_PASSWORD> -v -t 'detection/physical/#'`. Expect a panel status and one
    zone status per zone within 60 s, and an event within about a second of each sensor trip.
 4. Stop the team broker, trip a sensor, start the broker: the event arrives with its original `id` and `timestamp`.
 5. Disconnect the panel from the LAN: after `fallback_after_s` the bridge uses Control4 (if enabled) or reports
@@ -520,8 +524,8 @@ relying on the stack; no result of such a run is recorded in this document.
 | `blackrelay_adapter_bad_zone_ids_total` rising | The panel sent a zone row whose id is not a plain integer; the row is dropped and one resync is requested. Look at `docker compose logs iq-remote` |
 | Log banner "WEAKENED PANEL CERTIFICATE PINNING" | `pin_mode` is `tofu` or `pin_accept_rotation` is on. Development only; switch back to the defaults |
 | `br2 pair`: "no panel completed the pairing" | Pair tapped on the panel? Same subnet? Inbound TCP to the printed port and UDP 5353 allowed on this host? `--plugin-ip` right on a multi-homed host? |
-| `fusion` container exits: network `fusion` not found | `docker network create fusion`, or start the team compose first |
-| Log line "fusion: TLS is OFF" | Expected while the team broker is plaintext |
+| `fusion` container cannot connect | `reg.bulexa.com` resolves to the central server from this host? Port 8883 reachable? Password in `secrets/fusion/fusion_password` matches `BROKER_PHYSICAL_PASSWORD`? |
+| Log line "fusion: TLS is OFF" | `fusion.tls` is null: use port 8883 with the `tls` block from the example |
 | No messages on `detection/physical/#` | `fusion.enabled: true`? Correct host? `physical_fusion_connected` metric (in-process mode) or the container log. Client id clash with another client on the broker makes both disconnect repeatedly |
 | Messages arrive late or twice | Normal after an outage: at-least-once; dedupe on `id` |
 | `physical_fusion_outbox_dropped_total` rising | The broker was unreachable longer than the outbox caps allow; raise `fusion.outbox.*` |

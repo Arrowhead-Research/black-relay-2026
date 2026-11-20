@@ -17,6 +17,9 @@
 #  * mosquitto ACL: only user `blackrelay` can publish; consumers are read-only; the bridge never subscribes.
 #  * secrets/keys are 0600 and owned by the single uid that reads them (scripts/gen-certs.sh); ca.key is never mounted.
 name: blackrelay
+# Images come from GitHub Container Registry (ghcr.io/arrowhead-research/..., built by
+# .github/workflows/publish-images.yml) by default. IMAGE_PREFIX= (empty, in .env) uses local builds;
+# IMAGE_PREFIX=reg.bulexa.com:5000/ uses the local registry instead (offline sites).
 
 x-hardening: &hardening
   read_only: true
@@ -27,6 +30,37 @@ x-hardening: &hardening
   logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
 
 services:
+  # One-shot first-start setup, so a new machine needs only `docker compose up` (and a deploy/.env, see
+  # .env.example): this machine's key, local certs and logins, config.yaml, and the panel pairing fetched from
+  # the secrets registry (it waits, printing the line to send Jayden, until the pairing is published for this
+  # machine). Later starts find everything in place and exit at once. scripts/bootstrap.sh.
+  bootstrap:
+    image: ${IMAGE_PREFIX-ghcr.io/arrowhead-research/}black-relay/central-tools:latest
+    build: {context: ../../central-store/tools}
+    network_mode: host             # reaches the secrets registry; serves nothing
+    user: "0:0"                    # only to hand files to the container uids
+    restart: "no"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
+    entrypoint: ["bash", "/deploy/scripts/bootstrap.sh"]
+    environment:
+      DEVICE: ${DEVICE:-}
+      PANEL_IP: ${PANEL_IP:-}
+      BRIDGE_HOSTS: ${BRIDGE_HOSTS:-127.0.0.1}
+      REGISTRY_USER: ${REGISTRY_USER:-}
+      REGISTRY_TOKEN: ${REGISTRY_TOKEN:-}
+      SECRETS_BASE: ${SECRETS_BASE:-ghcr.io/arrowhead-research/blackrelay-secrets}
+      SECRETS_CA: ${SECRETS_CA:-}
+      PAIRING_BUNDLE: ${PAIRING_BUNDLE:-}
+      FUSION_PASSWORD: ${FUSION_PASSWORD:-}
+      BOOTSTRAP_WAIT_S: ${BOOTSTRAP_WAIT_S:-0}
+    volumes:
+      - .:/deploy
+      - ${BR_HOME:-${HOME}/.black-relay}:/br
+
   # one-shot root helper: gives every named volume its owner (uids per docker/Dockerfile.*; shared group 10000).
   init-perms:
     # base images are pinned by digest (resolved 2026-11-15); bump deliberately (docker buildx imagetools inspect <tag>)
@@ -38,6 +72,7 @@ services:
     cap_add: [CHOWN, FOWNER, DAC_OVERRIDE]
     security_opt: ["no-new-privileges:true"]
     restart: "no"
+    depends_on: {bootstrap: {condition: service_completed_successfully}}
     volumes:
       - ipc-iq:/v/ipc-iq
       - ipc-c4:/v/ipc-c4
@@ -61,7 +96,7 @@ services:
   normalizer:
     <<: *hardening
     build: {context: .., dockerfile: docker/Dockerfile.normalizer}
-    image: blackrelay-f2/normalizer:latest
+    image: ${IMAGE_PREFIX-ghcr.io/arrowhead-research/}blackrelay-f2/normalizer:latest
     user: "10004:10000"
     network_mode: none
     depends_on: {init-perms: {condition: service_completed_successfully}}
@@ -70,7 +105,7 @@ services:
       - ipc-c4:/ipc-c4
       - ipc-out:/ipc-out
       - store:/data
-      - ./config/config.yaml:/config/config.yaml:ro
+      - ./config:/config:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import os,sys; sys.exit(0 if os.path.exists('/ipc-out/out.sock') else 1)"]
       interval: 10s
@@ -80,7 +115,7 @@ services:
   iq-remote:
     <<: *hardening
     build: {context: .., dockerfile: docker/Dockerfile.iq-remote}
-    image: blackrelay-f2/iq-remote:latest
+    image: ${IMAGE_PREFIX-ghcr.io/arrowhead-research/}blackrelay-f2/iq-remote:latest
     user: "10001:10000"
     network_mode: host            # must reach the panel on the LAN (panel_ip); publishes no ports; see nftables/
     depends_on: {normalizer: {condition: service_healthy}}
@@ -88,7 +123,7 @@ services:
       - ipc-iq:/ipc-iq
       - beacon:/beacon              # rw: the only writer of the primary-link beacon
       - ./data/pki:/data/pki:ro
-      - ./config/config.yaml:/config/config.yaml:ro
+      - ./config:/config:ro
 
   # Field tools as the SERVICE uid: `docker compose run --rm iq-tools snapshot|watch|repin --config /config/config.yaml`.
   # Same image, uid and host networking as iq-remote, so the nftables rule for uid 10001 (panel:8883 only) covers it and
@@ -98,7 +133,7 @@ services:
   iq-tools:
     <<: *hardening
     restart: "no"
-    image: blackrelay-f2/iq-remote:latest
+    image: ${IMAGE_PREFIX-ghcr.io/arrowhead-research/}blackrelay-f2/iq-remote:latest
     profiles: ["tools"]
     user: "10001:10000"
     network_mode: host
@@ -106,27 +141,27 @@ services:
     command: ["snapshot", "--config", "/config/config.yaml"]
     volumes:
       - ./data/pki:/data/pki
-      - ./config/config.yaml:/config/config.yaml:ro
+      - ./config:/config:ro
 
   control4:
     <<: *hardening
     build: {context: .., dockerfile: docker/Dockerfile.control4}
-    image: blackrelay-f2/control4:latest
+    image: ${IMAGE_PREFIX-ghcr.io/arrowhead-research/}blackrelay-f2/control4:latest
     user: "10002:10000"
     network_mode: host
     depends_on: {normalizer: {condition: service_healthy}}
     volumes:
       - ipc-c4:/ipc-c4
       - beacon:/beacon:ro           # read-only: control4 can never forge the primary's link state
-      - ./config/config.yaml:/config/config.yaml:ro
-    secrets: [control4_token]     # config: control4.token_file: /run/secrets/control4_token
+      - ./config:/config:ro
+      - ./secrets/control4:/run/secrets:ro   # control4_token only (config: control4.token_file: /run/secrets/control4_token)
     # Start only when control4.enabled: true in config.yaml, e.g.:  docker compose --profile fallback up -d
     profiles: ["fallback"]
 
   outbound:
     <<: *hardening
     build: {context: .., dockerfile: docker/Dockerfile.outbound}
-    image: blackrelay-f2/outbound:latest
+    image: ${IMAGE_PREFIX-ghcr.io/arrowhead-research/}blackrelay-f2/outbound:latest
     user: "10003:10000"
     network_mode: host            # serves 8443 (+ 9100 on metrics_host, default 127.0.0.1); reaches mosquitto at 127.0.0.1:8883
     depends_on:
@@ -136,10 +171,9 @@ services:
       - ipc-out:/ipc-out
       - store:/data:ro             # SQLite WAL: only ever read (mode=ro); a read-only mount works for WAL readers
       - out-state:/state           # replay pointer + published-topic set (outbound's own durable state)
-      - ./certs/ca.crt:/certs/ca.crt:ro
-      - ./certs/api:/certs/api:ro  # only the API key pair; the broker key is never visible here
-      - ./config/config.yaml:/config/config.yaml:ro
-    secrets: [mqtt_password]
+      - ./certs/outbound:/certs:ro # CA + the API key pair only; the broker key is never visible here
+      - ./config:/config:ro
+      - ./secrets/outbound:/run/secrets:ro   # mqtt_password only
     environment:
       BR2_FUSION_STANDALONE: "1"   # the team output runs in the `fusion` service below, never twice
     healthcheck:
@@ -151,25 +185,27 @@ services:
   # Team ("fusion") MQTT publisher. OPTIONAL: only started with `docker compose --profile fusion up -d`, and only
   # when fusion.enabled: true in config.yaml. It is the same outbound image and code (br2.outbound.fusion); it is a
   # separate container only because `outbound` uses host networking and so cannot join a Docker network.
-  # Needs the external network to exist first:  docker network create fusion   (the RF/camera/fusion team's compose
-  # normally creates it). Publish-only: it reads the one-way IPC stream + the event log and sends to the team broker.
+  # Sends to the central broker over the LAN (fusion.host, e.g. reg.bulexa.com:8883 with TLS) with its own login:
+  # put the password (BROKER_PHYSICAL_PASSWORD from the central server's .env) in secrets/fusion/fusion_password, owned by
+  # uid 10003, mode 0600. Publish-only: it reads the one-way IPC stream + the event log and sends to the team broker.
   fusion:
     <<: *hardening
-    image: blackrelay-f2/outbound:latest
+    image: ${IMAGE_PREFIX-ghcr.io/arrowhead-research/}blackrelay-f2/outbound:latest
     profiles: ["fusion"]
     user: "10003:10000"
     command: ["service", "fusion", "--config", "/config/config.yaml"]
-    networks: [fusion]             # nothing else: no host network, no panel access, no local broker
+    networks: [fusion-out]         # its own outbound-only network: no host network, no panel access, no local broker
     depends_on:
       normalizer: {condition: service_healthy}
     volumes:
       - ipc-out:/ipc-out
       - store:/data:ro             # the event log is only read: mounted read-only
       - fusion-state:/state        # its OWN small volume: the outbox journal + producer cursor (/state/fusion)
-      - ./config/config.yaml:/config/config.yaml:ro
-      # when the team broker gets TLS / passwords, add (read-only):
-      #   - ./certs/fusion-ca.crt:/certs/fusion-ca.crt:ro
-    # secrets: [fusion_password]   # and declare it under `secrets:` below; set fusion.password_file accordingly
+      - ./config:/config:ro
+      - ./secrets/fusion:/run/secrets:ro     # fusion_password only (fusion.password_file: /run/secrets/fusion_password)
+    # Lets the publisher reach the central broker by its certificate name even where LAN DNS will not resolve it
+    # (setup-central.sh --with-bridge sets these; the default is an unused placeholder).
+    extra_hosts: ["${CENTRAL_BROKER_NAME:-central-broker.invalid}:${CENTRAL_BROKER_IP:-127.0.0.1}"]
     # Health/metrics: the service serves /metrics and /healthz on fusion.metrics_host:fusion.metrics_port (default
     # 127.0.0.1:9101, i.e. inside this container only). Unhealthy = the producer loop stalled, or the oldest queued
     # message is older than fusion.health_max_backlog_age_s (broker unreachable / not acking). Outbox depth, drops and
@@ -188,20 +224,19 @@ services:
     <<: *hardening
     user: "1883:1883"             # non-root (the image's mosquitto user); keys are 0600 owned by 1883 (gen-certs.sh)
     depends_on: {init-perms: {condition: service_completed_successfully}}
-    ports: ["8883:8883"]          # TLS only. No 1883.
+    # TLS only, no 1883. BRIDGE_MQTT_PORT=8884 (deploy/.env) when this host also runs the central broker on 8883;
+    # then set mqtt.port: 8884 in config.yaml too (setup-central.sh --with-bridge does both).
+    ports: ["${BRIDGE_MQTT_PORT:-8883}:8883"]
     volumes:
-      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-      - ./mosquitto/acl:/mosquitto/config/acl:ro
-      - ./mosquitto/passwd:/mosquitto/config/passwd:ro
-      - ./certs/ca.crt:/certs/ca.crt:ro
-      - ./certs/broker:/certs/broker:ro
+      - ./mosquitto:/mosquitto/config:ro     # mosquitto.conf, acl, passwd (generated)
+      - ./certs/mosquitto:/certs:ro          # CA + the broker key pair only
       - mosquitto-data:/mosquitto/data
 
   # `docker compose --profile '*' build` first, then `docker compose run --rm bridge hash-key`  -> prints a new API key (once), its key_id and its argon2 hash
   bridge:
     <<: *hardening
     restart: "no"
-    image: blackrelay-f2/outbound:latest
+    image: ${IMAGE_PREFIX-ghcr.io/arrowhead-research/}blackrelay-f2/outbound:latest
     profiles: ["tools"]
     user: "10003:10000"
     network_mode: none
@@ -209,9 +244,7 @@ services:
     command: ["hash-key"]
 
 networks:
-  fusion:                          # shared team network, created outside this project. Only used by the `fusion` profile.
-    external: true
-    name: fusion
+  fusion-out: {}                   # only the `fusion` profile uses it; reaches the central broker through the host's LAN
 
 volumes:
   ipc-iq:
@@ -222,7 +255,3 @@ volumes:
   out-state:
   fusion-state:
   mosquitto-data:
-
-secrets:
-  mqtt_password: {file: ./secrets/mqtt_password}
-  control4_token: {file: ./secrets/control4_token}

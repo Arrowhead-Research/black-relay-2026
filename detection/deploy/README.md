@@ -33,6 +33,10 @@ Only two ports leave the host: the broker on 1883 and the fusion API on 8090, bo
 address given to make-env.sh. Simulator observations travel over the same broker on `detection/rf/sim/#`,
 which only the RF credential can read; fusion never subscribes to it.
 
+To pull from the central image registry instead of loading `images.tar`, set
+`IMAGE_PREFIX=SERVER:5000/` in `.env` (after `docker login SERVER:5000`), then `docker compose pull`.
+See `../central-store/README.md`.
+
 Camera video and the kits' NTP are a second compose project in `camera-relay-service/` inside the
 bundle (its images are in `images.tar` too). Fill its `.env` and `kits`, run `./render.sh`, then
 `docker compose up -d` there. See its README.
