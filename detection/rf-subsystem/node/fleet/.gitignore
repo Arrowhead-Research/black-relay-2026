@@ -1,0 +1,4 @@
+fleet.env
+ansible/host_vars/*.yml
+!ansible/host_vars/*.yml.example
+*.retry

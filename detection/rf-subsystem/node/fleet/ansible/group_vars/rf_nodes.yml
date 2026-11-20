@@ -1,0 +1,28 @@
+# Reached by mDNS until host_vars give an address (its LAN address or DHCP reservation).
+ansible_host: "{{ inventory_hostname }}.local"
+# fleet.sh exports these from fleet.env (ADMIN_USER, SSH_KEY).
+ansible_user: "{{ lookup('ansible.builtin.env', 'FLEET_ADMIN_USER') | default('pi', true) }}"
+ansible_ssh_private_key_file: "{{ lookup('ansible.builtin.env', 'FLEET_SSH_KEY') | default('~/.ssh/blackrelay_fleet', true) }}"
+
+# Where Kismet capture (TCP 3501) and console heartbeats (8080) go: the central server's LAN address. Nodes are not on
+# the tailnet; the RF stack must bind 3501/8080 on this address (BIND_ADDR in its .env).
+central_host: 172.20.100.150
+central_port: 3501
+
+# Central MQTT broker (the root compose's `broker`, shared with the physical subsystem). Each node logs
+# in as rf-node-<node> over TLS and publishes its health to detection/rf/nodes/<node>/. The certificate
+# is Let's Encrypt for broker_host; broker_address pins that name in /etc/hosts so it works on the LAN
+# whatever DNS says (empty: use DNS).
+broker_host: reg.bulexa.com
+broker_port: 8883
+broker_address: 172.20.100.150
+
+# Kismet capture helpers must match the central server's release (central/kismet/Dockerfile). The
+# Kismet apt repo only carries the current release: bump both together.
+kismet_version: 2026-10-R1
+capture_units: [kismet-cap-wifi, kismet-cap-bt, kismet-cap-tpms]
+
+# Capture adapters. Never the backhaul interface. Override per node in host_vars.
+wifi_iface: wlan1
+bt_prefer: usb
+# bt_addr: "AA:BB:CC:DD:EE:FF"   # pins the Bluetooth adapter (sudo btmgmt info); wins over bt_prefer

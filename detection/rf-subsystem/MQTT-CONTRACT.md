@@ -26,9 +26,11 @@ The prefix is `detection/rf` (setting `RF_TOPIC_PREFIX` in `central/.env`). Subs
 | `detection/rf/positions` | [`rf.position.v0`](schemas/position.v0.schema.json) | WBT Console | 0 | A device's position estimate has new readings: at most every 2 s per device, and every 30 s while it moves less than 1 ft |
 | `detection/rf/alerts` | [`rf.alert.v0`](schemas/alert.v0.schema.json) | WBT Console (rf-analytics, if run) | 1 | Each alert, once |
 | `detection/rf/status/nodes` | [`rf.node-status.v0`](schemas/node-status.v0.schema.json) | WBT Console (rf-analytics, if run) | 1 | A node's state, a capture source's status or a node health problem changes, and every 60 s per node |
+| `detection/rf/nodes/<node>/health` | rf-node-agent heartbeat (same JSON the console receives; no schema yet) | each WBT node, as its own login `rf-node-<node>` | 1, retained | Every 30 s (`AGENT_INTERVAL_S`) |
+| `detection/rf/nodes/<node>/online` | `1` or `0` | each WBT node (`0` is its last will, set by the broker when the node drops off) | 1, retained | On connect and on loss |
 | `detection/rf/cues/camera` | `rf.camera-cue.v0` (no schema yet) | rf-analytics only | 1 | TPMS-triggered camera cues, from rf-analytics on the central server. |
 
-The topic is the message type: every message on a topic has the same schema. Client IDs used: `rf-console-live` (positions), `rf-console-out` (alerts, node status), `rfanalytics-out` (rf-analytics).
+The topic is the message type: every message on a topic has the same schema. Client IDs used: `rf-console-live` (positions), `rf-console-out` (alerts, node status), `rfanalytics-out` (rf-analytics), `rf-node-<node>` (each node; logins from `detection/central/rf-node-logins.sh`, each limited to its own `detection/rf/nodes/<node>/#`).
 
 ## 3. Common envelope
 

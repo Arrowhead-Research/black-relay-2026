@@ -144,7 +144,11 @@ One code change plus configuration.
   Kismet port override stays.
 - `MQTT-CONTRACT.md` section 1: broker row and the "not acceptable for a field deployment" note
   updated. Section 10's open item on broker auth closes.
-- Kismet itself is untouched; nodes still reach it over the tailnet.
+- Kismet itself is untouched; nodes reach it on the LAN (TCP 3501), not over the tailnet.
+- WBT nodes have their own logins: `detection/central/rf-node-logins.sh wbt-1 ...` keeps one
+  password per node in `.env` (`BROKER_RF_NODE_LOGINS`); `entrypoint.sh` gives login
+  `rf-node-<node>` write access to `detection/rf/nodes/<node>/#` only. The fleet playbook
+  (`rf-subsystem/node/fleet`) creates them and installs each on its node over SSH.
 
 ### camera-subsystem
 

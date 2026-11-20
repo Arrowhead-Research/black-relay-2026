@@ -1,0 +1,4 @@
+# SSH login on the central server (needs Docker access) and this repo's checkout there (setup-central.sh).
+ansible_user: dev
+central_repo_dir: /srv/sensor-fusion
+rf_central_dir: "{{ central_repo_dir }}/detection/rf-subsystem/central"
