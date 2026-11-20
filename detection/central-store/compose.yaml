@@ -91,6 +91,9 @@ services:
       - ./state/auth/secrets-pull:/auth:ro
       - secrets-data:/var/lib/registry:ro
 
+# Fixed names: the same data whether this file runs alone or from the repo-root compose.yaml.
 volumes:
   images-data:
+    name: black-relay-central-store_images-data
   secrets-data:
+    name: black-relay-central-store_secrets-data

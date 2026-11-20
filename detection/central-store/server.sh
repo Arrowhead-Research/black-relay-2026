@@ -27,8 +27,16 @@ ensure_tools() { docker image inspect "$TOOLS_IMAGE" >/dev/null 2>&1 || docker b
 tool() { ensure_tools; docker run --rm -i --network none --user "$(id -u):$(id -g)" -v "$here/state:/state" -w /state "$TOOLS_IMAGE" "$@"; }
 valid_name() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || die "name must be lowercase letters, digits and dashes: $1"; }
 envadd() { touch .env; grep -q "^$1=" .env || printf '%s=%s\n' "$1" "$2" >>.env; }
-running() { docker compose ps --status running --services 2>/dev/null | grep -qx "$1"; }
-restart_if_running() { for s in "$@"; do running "$s" && docker compose restart "$s" >/dev/null 2>&1 && echo "restarted $s"; done; return 0; }
+# The store runs either alone (this folder, project black-relay-central-store) or as part of the
+# repo-root compose.yaml (project black-relay-central). dc talks to whichever one is running.
+ROOT_COMPOSE="$here/../../compose.yaml"
+dc() {
+  if [ -f "$ROOT_COMPOSE" ] && [ -n "$(docker ps -q --filter label=com.docker.compose.project=black-relay-central)" ]; then
+    docker compose -f "$ROOT_COMPOSE" "$@"
+  else docker compose "$@"; fi
+}
+running() { dc ps --status running --services 2>/dev/null | grep -qx "$1"; }
+restart_if_running() { for s in "$@"; do running "$s" && dc restart "$s" >/dev/null 2>&1 && echo "restarted $s"; done; return 0; }
 
 # set_user <auth dir> <user> -> prints the new password; the password goes to htpasswd on stdin
 set_user() {
@@ -134,9 +142,9 @@ cmd_users() {
 cmd_gc() {
   local store="${1:?usage: $0 gc images|secrets}"
   [[ "$store" == images || "$store" == secrets ]] || die "gc images|secrets"
-  docker compose stop "$store" "$store-pull"
-  docker compose run --rm --no-deps "$store" garbage-collect --delete-untagged /etc/distribution/config.yml
-  docker compose up -d --wait "$store" "$store-pull"
+  dc stop "$store" "$store-pull"
+  dc run --rm --no-deps "$store" garbage-collect --delete-untagged /etc/distribution/config.yml
+  dc up -d --wait "$store" "$store-pull"
 }
 
 # Let's Encrypt over DNS-01 (Cloudflare): the server never has to be reachable from the internet.
@@ -170,7 +178,7 @@ cmd_letsencrypt() {
   if ! cmp -s "$crt" state/tls/server.crt; then
     cp "$crt" state/tls/server.crt; cp "$key" state/tls/server.key; chmod 600 state/tls/server.key
     echo "installed a Let's Encrypt certificate for $name"
-    restart_if_running images images-pull secrets secrets-pull
+    restart_if_running images images-pull secrets secrets-pull broker
   else
     echo "certificate for $name is current"
   fi

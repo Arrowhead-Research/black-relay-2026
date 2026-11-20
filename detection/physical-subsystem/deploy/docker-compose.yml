@@ -153,15 +153,16 @@ services:
   # Team ("fusion") MQTT publisher. OPTIONAL: only started with `docker compose --profile fusion up -d`, and only
   # when fusion.enabled: true in config.yaml. It is the same outbound image and code (br2.outbound.fusion); it is a
   # separate container only because `outbound` uses host networking and so cannot join a Docker network.
-  # Needs the external network to exist first:  docker network create fusion   (the RF/camera/fusion team's compose
-  # normally creates it). Publish-only: it reads the one-way IPC stream + the event log and sends to the team broker.
+  # Sends to the central broker over the LAN (fusion.host, e.g. reg.bulexa.com:8883 with TLS) with its own login:
+  # put the password (BROKER_PHYSICAL_PASSWORD from the central server's .env) in secrets/fusion_password, owned by
+  # uid 10003, mode 0600. Publish-only: it reads the one-way IPC stream + the event log and sends to the team broker.
   fusion:
     <<: *hardening
     image: ${IMAGE_PREFIX-reg.bulexa.com:5000/}blackrelay-f2/outbound:latest
     profiles: ["fusion"]
     user: "10003:10000"
     command: ["service", "fusion", "--config", "/config/config.yaml"]
-    networks: [fusion]             # nothing else: no host network, no panel access, no local broker
+    networks: [fusion-out]         # its own outbound-only network: no host network, no panel access, no local broker
     depends_on:
       normalizer: {condition: service_healthy}
     volumes:
@@ -169,9 +170,7 @@ services:
       - store:/data:ro             # the event log is only read: mounted read-only
       - fusion-state:/state        # its OWN small volume: the outbox journal + producer cursor (/state/fusion)
       - ./config/config.yaml:/config/config.yaml:ro
-      # when the team broker gets TLS / passwords, add (read-only):
-      #   - ./certs/fusion-ca.crt:/certs/fusion-ca.crt:ro
-    # secrets: [fusion_password]   # and declare it under `secrets:` below; set fusion.password_file accordingly
+    secrets: [fusion_password]     # fusion.password_file: /run/secrets/fusion_password
     # Health/metrics: the service serves /metrics and /healthz on fusion.metrics_host:fusion.metrics_port (default
     # 127.0.0.1:9101, i.e. inside this container only). Unhealthy = the producer loop stalled, or the oldest queued
     # message is older than fusion.health_max_backlog_age_s (broker unreachable / not acking). Outbox depth, drops and
@@ -211,9 +210,7 @@ services:
     command: ["hash-key"]
 
 networks:
-  fusion:                          # shared team network, created outside this project. Only used by the `fusion` profile.
-    external: true
-    name: fusion
+  fusion-out: {}                   # only the `fusion` profile uses it; reaches the central broker through the host's LAN
 
 volumes:
   ipc-iq:
@@ -228,3 +225,4 @@ volumes:
 secrets:
   mqtt_password: {file: ./secrets/mqtt_password}
   control4_token: {file: ./secrets/control4_token}
+  fusion_password: {file: ./secrets/fusion_password}

@@ -36,9 +36,13 @@ add() { if [ -n "$PASSWD_TOOL" ]; then "$PASSWD_TOOL" -b "$MQ/passwd" "$1" "$2"
         else docker run --rm -v "$PWD/$MQ:/w" eclipse-mosquitto:2.0.18@sha256:d12c8f80dfc65b768bb9acecc7ef182b976f71fb681640b66358e5e0cf94e9e9 mosquitto_passwd -b /w/passwd "$1" "$2"; fi; }
 add blackrelay "$(cat "$SEC/mqtt_password")"; add homeassistant "$HA_PW"; add nodered "$NR_PW"
 [ -f "$SEC/control4_token" ] || { echo "REPLACE_WITH_CONTROL4_TOKEN" > "$SEC/control4_token"; }
+# Central broker login for the `fusion` profile: BROKER_PHYSICAL_PASSWORD from the central server's .env.
+# FUSION_PASSWORD=... gen-certs.sh writes it; otherwise a placeholder, replace it before enabling fusion.
+if [ -n "${FUSION_PASSWORD:-}" ]; then printf '%s\n' "$FUSION_PASSWORD" > "$SEC/fusion_password"
+elif [ ! -f "$SEC/fusion_password" ]; then echo "REPLACE_WITH_BROKER_PHYSICAL_PASSWORD" > "$SEC/fusion_password"; fi
 
 # ---- modes: secrets and keys 0600, public material 0644, directories 0700/0750
-chmod 0600 "$OUT/broker/broker.key" "$OUT/api/api.key" "$PRIV/ca.key" "$SEC/mqtt_password" "$SEC/control4_token" "$MQ/passwd"
+chmod 0600 "$OUT/broker/broker.key" "$OUT/api/api.key" "$PRIV/ca.key" "$SEC/mqtt_password" "$SEC/control4_token" "$SEC/fusion_password" "$MQ/passwd"
 chmod 0644 "$OUT/ca.crt" "$OUT/broker/broker.crt" "$OUT/api/api.crt"
 chmod 0700 "$PRIV" data/pki
 chmod 0750 "$OUT" "$OUT/broker" "$OUT/api" "$SEC" "$MQ"
@@ -46,7 +50,7 @@ chmod 0755 "$OUT" "$OUT/broker" "$OUT/api"       # certs are public; keys inside
 own() { local u=$1; shift; chown "$u" "$@" 2>/dev/null || sudo -n chown "$u" "$@" 2>/dev/null || \
         echo "WARNING: could not chown $* to uid $u (run as root): the container will not be able to read it" >&2; }
 own $UID_MQ "$OUT/broker/broker.key" "$MQ/passwd"
-own $UID_OUT "$OUT/api/api.key" "$SEC/mqtt_password"
+own $UID_OUT "$OUT/api/api.key" "$SEC/mqtt_password" "$SEC/fusion_password"
 own $UID_C4 "$SEC/control4_token"
 own $UID_IQ data/pki
 echo "homeassistant MQTT password: $HA_PW"; echo "nodered MQTT password: $NR_PW"

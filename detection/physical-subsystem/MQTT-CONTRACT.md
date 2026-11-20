@@ -13,8 +13,8 @@ Consumer: the fusion service (subscribes). The bridge is publish-only on this co
 
 | | |
 |---|---|
-| Broker | team broker on the Docker network `fusion`, e.g. `rf-mqtt:1883` |
-| Transport (v0) | plain TCP, anonymous. TLS and username/password are planned; the bridge supports both through config |
+| Broker | the central broker on the central server: `reg.bulexa.com:8883` (TLS) or `:1883`, repo-root `compose.yaml` |
+| Transport | TLS on 8883 (Let's Encrypt certificate) with a per-publisher username/password; the bridge logs in as `physical-subsystem` and may only write `detection/physical/#` |
 | MQTT version | 3.1.1 |
 | Client id | `physical-subsystem` (config `fusion.client_id`; must be unique on the broker) |
 | Session | clean session. The bridge keeps its own durable outbox instead of relying on broker session state |
@@ -267,7 +267,7 @@ One message per zone.
 ## 9. Trying it
 
 ```sh
-mosquitto_sub -h rf-mqtt -p 1883 -v -t 'detection/physical/#'
+mosquitto_sub -h <central address> -p 1883 -u fusion -P <BROKER_FUSION_PASSWORD> -v -t 'detection/physical/#'
 ```
 
 Add `| jq -c .` (or `-F '%p' | jq .`) to pretty-print. With nothing happening you should see a panel status and one

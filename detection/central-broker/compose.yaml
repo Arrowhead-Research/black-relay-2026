@@ -22,6 +22,8 @@ services:
       BROKER_PHYSICAL_PASSWORD: ${BROKER_PHYSICAL_PASSWORD:?run ./setup-credentials.sh}
       BROKER_RF_USER: ${BROKER_RF_USER:?run ./setup-credentials.sh}
       BROKER_RF_PASSWORD: ${BROKER_RF_PASSWORD:?run ./setup-credentials.sh}
+      BROKER_CAMERA_USER: ${BROKER_CAMERA_USER:?run ./setup-credentials.sh}
+      BROKER_CAMERA_PASSWORD: ${BROKER_CAMERA_PASSWORD:?run ./setup-credentials.sh}
     # Above mosquitto.conf's 64 MiB queue limit, so that limit is reached first.
     mem_limit: 256m
     tmpfs:
