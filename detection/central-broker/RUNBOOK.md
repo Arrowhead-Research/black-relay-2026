@@ -348,6 +348,8 @@ transport row loses "anonymous". Section 10's "broker auth plan not decided" ite
 
 ## 3. RF: write to the central broker
 
+> **Status (2026-11-20):** 3.1, 3.2 and 3.4 are done: the console and rf-analytics log in to the central broker, the RF stack's own Mosquitto and the fusion overlay are removed, and the RF services (rf-analytics included) start with the repo-root `compose.yaml`. Still to run on the hosts: 3.3 steps 1–4 (fusion's entry, restarting the console and analytics, the checks).
+
 This is the one step with a code change: neither RF publisher can authenticate today. Both
 create their paho client with only a client id (`console/publish.py` `LiveClient`,
 `analytics/src/rfanalytics/outbox.py` `MqttPublisher`). The change is small and the console's
@@ -420,47 +422,29 @@ against a fake client and asserts `username_pw_set` was called, so the path is c
 
 ### 3.2 Configuration on the central node
 
-`rf-subsystem/central/docker-compose.yml`, `rf-console` environment, two new lines:
-
-```yaml
-      CONSOLE_MQTT_USER: ${CONSOLE_MQTT_USER:-}
-      CONSOLE_MQTT_PASSWORD: ${CONSOLE_MQTT_PASSWORD:-}
-```
-
-and the same pair on `rf-analytics` as `--publish-user` / `--publish-password-env` in its
-command, if that profile is run.
-
-`central/.env`:
-
-```sh
-CONSOLE_MQTT_HOST=CENTRAL_ADDR
-CONSOLE_MQTT_USER=rf-console
-CONSOLE_MQTT_PASSWORD=<BROKER_RF_PASSWORD from the central-broker .env>
-```
-
-The console container reaches `CENTRAL_ADDR` through the host like any other outbound address.
-`.env` is already gitignored and already holds the Kismet and console passwords.
+Done in `rf-subsystem/central/docker-compose.yml`; nothing to set by hand. `rf-console` gets its
+login (`BROKER_RF_USER` / `BROKER_RF_PASSWORD` from the root `.env`) and publishes to `broker` when
+the root `.env` has a password. `rf-analytics` publishes as `rf-analytics`, with the password from
+the `rf-secrets` volume (`analytics-broker-password`, the file the broker reads too). Both run in the
+repo-root project, so the broker is `broker:1883` inside Docker.
 
 ### 3.3 Cut over, for the RF lead
 
 1. Add `rf` to fusion's `central` broker entry `subsystems` and remove `rf` from the old `rf`
    entry; restart fusion.
-2. `docker compose up -d rf-console` (and `--profile analytics` if used). Console logs:
+2. `docker compose up -d` from the repo root (starts the RF services with the rest of the central stack; `docker compose up -d rf-console rf-analytics` for just those two). Console logs:
    `console: publishing positions and node status to CENTRAL_ADDR`.
 3. The subscriber from 1.6 shows `detection/rf/status/nodes` within 60 seconds and
    `detection/rf/positions` as soon as a device has readings.
 4. Fusion's `/api/v1/health` shows the `central` broker's `accepted` count rising and `nodes`
    listing the four WBT nodes with `subsystem: rf`.
-5. Once camera has also moved and fusion has no entry pointing at `rf-mqtt`: remove the `mqtt`
-   service and `mqtt-data` volume from `central/docker-compose.yml`, the `mqtt` block from
-   `docker-compose.fusion.yml`, and `COMPOSE_FILE` no longer needs the overlay for the broker's
-   sake (it still keeps Kismet's 2501 on loopback).
+5. Once camera has also moved and fusion has no entry for the old RF broker: nothing is left to
+   remove in the RF stack, since its own Mosquitto and the fusion overlay are already gone.
 
 ### 3.4 Documentation
 
-`rf-subsystem/MQTT-CONTRACT.md` section 1: broker, address and authentication rows, plus a
-change-log row. `central/README.md` *Shared fusion host*: the `rf-mqtt` sentence. `AGENTS.md`
-current state: the "verified from the `fusion` network as `rf-mqtt`" note.
+Done: `rf-subsystem/MQTT-CONTRACT.md` section 1 (broker, address and authentication
+rows) and its change log, `central/README.md` *Shared central host*, and `AGENTS.md` current state.
 
 ## What this leaves
 

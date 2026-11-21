@@ -9,10 +9,10 @@ The operator web page for the RF subsystem. It shows where Wi-Fi, Bluetooth and 
 ```sh
 mkdir -p site && cp layout.example.yaml site/layout.yaml   # team template: node radio MACs, first layout
 cd ../central
-docker compose --profile console up -d --build
+docker compose up -d --build        # the whole RF stack; on the central server, `docker compose up -d` from the repo root
 open http://<BIND_ADDR>:8080        # e.g. http://127.0.0.1:8080
 # with synthetic emitters that have known positions (BLE walker, still laptop and headset, passing car with 4 TPMS sensors):
-CONSOLE_DEMO=1 docker compose --profile console up -d --build
+CONSOLE_DEMO=1 docker compose up -d --build rf-console
 ```
 
 Kismet must have `keep_per_datasource_stats=true` (already set in `central/kismet/kismet_site.conf`). Otherwise every node reports the same RSSI and nothing can be located.
@@ -31,7 +31,7 @@ Data per site lives in the `rf-console-data` volume under `/data/sites/<id>/`; e
 
 ## Sign-in
 
-Set or change the passwords with `central/set-console-passwords.sh` on the host (it prompts, writes `.env` and restarts the console). Two roles, with passwords from `central/.env`: **operator** (watch, set up the site, calibrate, create and switch sites) and **admin** (also export, clear, wipe and retention). Sessions are signed cookies valid for 12 hours. With neither password set, sign-in is off and the header says *sign-in off*: use that only in the lab. Every POST must be JSON (a cross-site form cannot send it). Keep the console on the LAN or tailnet; it does not serve HTTPS itself. Survivability's identity stack (Pocket ID OIDC with team groups) is the likely future sign-in.
+The stack generates the passwords on first start ([`../central/README.md`](../central/README.md#passwords)), so sign-in is always on there. To choose them yourself, set them in `central/.env`, or run the optional prompt `central/set-console-passwords.sh` (it needs `central/.env` to exist and writes the two passwords there). Two roles: **operator** (watch, set up the site, calibrate, create and switch sites) and **admin** (also export, clear, wipe and retention). Sessions are signed cookies valid for 12 hours. Outside the stack, with neither password set, sign-in is off and the header says *sign-in off*: use that only in the lab. Every POST must be JSON (a cross-site form cannot send it). Keep the console on the LAN or tailnet; it does not serve HTTPS itself. Survivability's identity stack (Pocket ID OIDC with team groups) is the likely future sign-in.
 
 ## What the page shows
 
@@ -184,7 +184,7 @@ The fit maths was checked on synthetic spots generated from known parameters (n 
 
 ## Publishing
 
-With `CONSOLE_MQTT_HOST` set (compose default: the stack's own broker, which other teams reach as `rf-mqtt:1883` on the `fusion` network), the console publishes:
+With `CONSOLE_MQTT_HOST` set (the stack sets it to the central broker, `broker` on port 1883, when the root `.env` has `BROKER_RF_PASSWORD`, with the `rf-console` login from `BROKER_RF_USER` and `BROKER_RF_PASSWORD`; standalone it is empty and publishing is off), the console publishes:
 
 | Topic | Schema | When | Delivery |
 |---|---|---|---|
@@ -192,7 +192,7 @@ With `CONSOLE_MQTT_HOST` set (compose default: the stack's own broker, which oth
 | `detection/rf/alerts` | [`rf.alert.v0`](../schemas/alert.v0.schema.json) | every alert (see *Marks, areas and alerts*) | QoS 1 through the durable outbox |
 | `detection/rf/status/nodes` | [`rf.node-status.v0`](../schemas/node-status.v0.schema.json) | a node's state (`online`, `degraded`, `offline`) or a source's status changes, and every 60 s | QoS 1 through the durable outbox (`/data/rf-outbox.jsonl`) |
 
-A position carries site feet, `lat`/`lon` once the site is geo-referenced, the measured error (`null` until calibrated) and the nodes that heard the device (two nodes fix a curve, not a point). The nodes' own radios are not published. `analytics/src/rfanalytics/formats.py` is the only code that knows topics and envelopes: when the fusion standard arrives, it and the schemas change. `/api/state` → `publish` shows counters and the connection. Watch the feed: `docker run --rm --network fusion eclipse-mosquitto:2.0.22 mosquitto_sub -h rf-mqtt -t 'detection/rf/#' -v`.
+A position carries site feet, `lat`/`lon` once the site is geo-referenced, the measured error (`null` until calibrated) and the nodes that heard the device (two nodes fix a curve, not a point). The nodes' own radios are not published. `analytics/src/rfanalytics/formats.py` is the only code that knows topics and envelopes: when the fusion standard arrives, it and the schemas change. `/api/state` → `publish` shows counters and the connection. Watch the feed on the central server, from the repo root, with the fusion login: `docker compose exec broker sh -c 'mosquitto_sub -u "$BROKER_FUSION_USER" -P "$BROKER_FUSION_PASSWORD" -t "detection/rf/#" -v'`. The `rf-console` login cannot subscribe to it: its ACL allows writes to `detection/rf/#` and reads only of `detection/rf/sim/#`.
 
 ## Site files
 
@@ -211,16 +211,17 @@ The code and the defaults are general; the example layout is a placeholder. Node
 | Setting | Where | Default |
 |---|---|---|
 | Team template: node radio MACs (`self_emitters`), `node_sd_ft`, per-band model defaults (incl. `wall_db`), first site's node positions | `console/site/layout.yaml`, mounted at `/site`. Template: [`layout.example.yaml`](layout.example.yaml) | the example, if no file |
-| `CONSOLE_OPERATOR_PASSWORD`, `CONSOLE_ADMIN_PASSWORD` | `central/.env` | sign-in passwords (operator, admin); neither set = sign-in off |
+| `CONSOLE_OPERATOR_PASSWORD`, `CONSOLE_ADMIN_PASSWORD` | `central/.env`, else generated into the `rf-secrets` volume | sign-in passwords (operator, admin); the stack always has them; outside the stack, neither set = sign-in off |
 | `CONSOLE_SITE` | `central/.env` | `default`: the site used before one is chosen in the Site menu |
 | `CONSOLE_DATA` | container environment | `/data` (the `rf-console-data` volume) |
 | Kismet packet logs (read-only, for recording spots) | `kismet-logs` volume at `/kismet-data/logs` (`CONSOLE_KISMET_LOGS`) | — |
-| `CONSOLE_MQTT_HOST` / `CONSOLE_MQTT_PORT` / `CONSOLE_TOPIC_PREFIX` | `central/.env` (`RF_TOPIC_PREFIX` for the prefix) | `mqtt` / 1883 / `detection/rf`; set the host empty to stop publishing |
+| `CONSOLE_MQTT_HOST` / `CONSOLE_MQTT_PORT` / `CONSOLE_TOPIC_PREFIX` | `central/docker-compose.yml`: host `broker` when the root `.env` has `BROKER_RF_PASSWORD` (override in `central/.env`); prefix fixed | empty (publishing off) / 1883 / `detection/rf`; set the host empty to stop publishing |
+| `CONSOLE_MQTT_USER` / `CONSOLE_MQTT_PASSWORD` | the root `.env`'s `BROKER_RF_USER` / `BROKER_RF_PASSWORD`, passed through by `central/docker-compose.yml` | `rf-console` (user); empty password = no login |
 | `CONSOLE_NODE_TOKEN` | `central/.env` (set by `node/set-node-token.sh`) | empty: node heartbeats accepted without a token |
 | `CONSOLE_DEMO` | `central/.env` | empty (`1` adds demo emitters, `only` uses them without Kismet) |
 | `CONSOLE_PORT` | `central/.env` | 8080 (bound to `BIND_ADDR`) |
 | `CONSOLE_POLL_S` | container environment | 3 s poll |
-| Kismet login | `KISMET_ADMIN_USER` / `KISMET_ADMIN_PASSWORD` from `central/.env` | — |
+| Kismet login | `KISMET_ADMIN_USER` (default `admin`); password `KISMET_ADMIN_PASSWORD` from `central/.env`, else the generated `kismet-admin-password` in `rf-secrets` | — |
 
 The older `DFVIZ_*` names are still read. Data from the earlier single-site layout (`/data/<name>/calibration.json`) is moved into `/data/sites/<name>/` on start.
 

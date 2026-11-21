@@ -1,71 +1,174 @@
-# Device secrets
+# Central store: image registry + device secrets
 
-Tools for moving a device's secrets (the IQ5 pairing keys and certificates, broker passwords)
-between machines without anyone else being able to read them. The bundles are stored as private
-packages on GitHub's registry (ghcr.io).
+Two stores on the central server, side by side but separate:
 
-There is no local registry any more. Container images come from ghcr.io too, built by
-`.github/workflows/publish-images.yml`; nothing in this folder runs on the central server.
+| Store | Holds | Who writes | Who reads |
+|---|---|---|---|
+| **Images** (ports 5000/5001) | Container images: fusion, physical bridge, RF, camera, tools | `publisher` login on 5001 | Each host's own login on 5000 (read-only) |
+| **Secrets** (ports 5002/5003) | One encrypted bundle per device: IQ5 pairing keys and certs, broker passwords | `keeper` login on 5003 | Each device's own login on 5002 (read-only) |
 
-| File | What it is |
-|---|---|
-| `secrets.sh` | Seals a device's files into an encrypted bundle, and fetches and opens one on the device |
-| `publish-bundles.sh` | Pushes sealed bundles to the registry. Used by `.github/workflows/publish-secrets.yml` |
-| `tools/Dockerfile` | The small toolbox image (age, oras, mosquitto_passwd) the scripts and the bridge's first start use |
+Every port is bound only to the address given to `server.sh init` (no VPN or Tailscale needed).
+Put the server on the sensor network or a management VLAN and firewall 5000-5003 to the hosts
+that need them; the traffic is TLS and every request needs a login.
+
+Both are the stock Docker registry (`registry:3.1.2`, pinned by digest), TLS only, non-root,
+read-only filesystem, no capabilities. Each store runs as two containers over one volume: a
+read-write one that only the publisher/keeper can log into, and a read-only one (storage mounted
+`:ro`, registry in read-only mode) for everyone else. A host's pull login therefore cannot push,
+overwrite or delete anything, and the logins for one store don't work on the other.
 
 ## Why keys don't go in images
 
-An image is meant to be copied: every host that can pull it gets every layer, layers are cached on
-disk, and anything in them is there for good. Pairing keys are per device and must be revocable, so
-they stay out of images and out of git.
+An image is meant to be copied: every host with a pull login gets every layer, layers are cached on
+disk, and anything in them is there for good (deleting it in a later layer doesn't remove it).
+Pairing keys are per device and must be revocable, so they stay out of images and out of git, as the
+physical subsystem already requires.
 
-A bundle is a tar of the paths you name (for example `data/pki` and `secrets`), encrypted with
-[age](https://age-encryption.org) to the device's own key, and to an admin recovery key if you made
-one. Neither private key is on GitHub. The device's private key is made on the device
-(`secrets.sh setup`) and never leaves it. Every seal is kept as a dated version as well as `:latest`.
+The secrets store keeps them on the server without trusting the server with them:
 
-## Seal a device's secrets
+* A bundle is a tar of the paths you name (for example `data/pki` and `secrets`), encrypted with
+  [age](https://age-encryption.org) to **the device's own key** and to an **admin recovery key**.
+  Neither private key is on the server. The plaintext only exists as a pipe (`tar | age`) inside a
+  throwaway container on the machine that seals it.
+* The device's private key is made on the device (`secrets.sh setup`) and never leaves it.
+* The admin recovery key is made once (`secrets.sh admin-keygen`) and kept offline. It lets you
+  open any bundle if a device dies and you need its pairing on a replacement.
+* Every seal is kept as a dated version (`:20261120T173312Z`) as well as `:latest`.
 
-On the device, after pairing. This writes a text file; nothing is uploaded yet:
+**Tradeoff vs. a vault (HashiCorp Vault / OpenBao).** A vault would give per-path access policies,
+an audit log of every read and short-lived credentials, but it is a stateful service that must be
+unsealed after every reboot, and the server could read every secret. Encrypted bundles need nothing
+running beyond the registry and a stolen server disk gives up no keys. What you give up: any device
+login can download any device's bundle (still ciphertext only it can't open), there is no per-read
+audit log beyond the registry's access log, and rotating means re-pairing and sealing again. For a
+handful of devices on a private network that is the better trade; if the fleet grows or you need audited
+access, the bundles can move into OpenBao without changing the devices' layout.
 
-```sh
-detection/central-store/secrets.sh seal kit-01 detection/physical-subsystem/deploy data/pki secrets --out kit-01.age
-```
+## Server setup (once)
 
-Hand it to GitHub as a secret of the `secrets` environment, then run Actions > publish-secrets:
-
-```sh
-gh secret set BUNDLE_KIT_01 --env secrets < kit-01.age
-```
-
-To seal from another machine, give the device's `age1...` key with `--to` (the device prints it
-with `secrets.sh recipient`).
-
-## Fetch them on the device
-
-Once per device, with a GitHub token that has `read:packages`:
-
-```sh
-detection/central-store/secrets.sh setup ghcr.io/arrowhead-research/blackrelay-secrets kit-01 - <github-user>
-```
-
-Then, whenever the device is set up or rebuilt:
+On the central server (Linux, Docker with Compose v2), with this folder copied there:
 
 ```sh
-detection/central-store/secrets.sh fetch detection/physical-subsystem/deploy
+./server.sh init 192.168.10.5 central.lan    # the server's LAN address hosts use, plus any other names
+docker compose up -d --wait
 ```
 
-It replaces exactly the sealed paths and nothing else. File modes are kept; add
-`--chown 10001:10000` if the bundle was sealed on another machine. The physical bridge's first
-start (`deploy/scripts/bootstrap.sh`) does this fetch by itself.
+`init` makes a small CA and a TLS certificate for those names, the `publisher` and `keeper` logins
+(printed once and kept in `state/credentials/`), and `.env`. Everything goes in `state/` (0700,
+gitignored). Already have a certificate from your own CA? Run
+`TLS_CERT=central.crt TLS_KEY=central.key ./server.sh init ...` and hosts need no extra CA.
 
-## Recovery key
+### Publicly trusted certificate (recommended): Let's Encrypt
 
-`secrets.sh admin-keygen <file>` makes an admin recovery key once. Keep the file offline. Bundles
-sealed on a machine that has its public half in `~/.black-relay/admin-recipients` can also be opened
-with it, which is how a dead device's pairing moves to a replacement.
+With a real certificate hosts trust the store out of the box: nothing to copy, nothing to trust,
+just `docker login`. Let's Encrypt checks the name through DNS (DNS-01), so the server stays on the
+LAN and never has to be reachable from the internet.
 
-## One-time GitHub setup
+1. In Cloudflare, add `A docker.bulexa.com -> 172.20.100.150`, **DNS only** (grey cloud).
+2. Create a Cloudflare API token: *My Profile > API Tokens > Create Token > Edit zone DNS*, then
+   **add a second permission, Zone > Zone > Read** (without it: "failed to find zone"), and set
+   Zone Resources to Include > Specific zone > `bulexa.com`. On the server, save it (`state/` is private):
+   `printf '%s' 'TOKEN' > state/cloudflare.token && chmod 600 state/cloudflare.token`
+3. Get the certificate (asks once to accept the Let's Encrypt Subscriber Agreement; the email is
+   only for expiry notices):
+   `./server.sh letsencrypt docker.bulexa.com you@yourmail`
+4. Renew automatically: `crontab -e` and add
+   `0 4 * * * cd /PATH/central-store && ./server.sh letsencrypt >> state/renew.log 2>&1`
+   (renews when a third of its life is left and restarts the registries only when it changed).
 
-Create the `secrets` environment (Settings > Environments) with a required reviewer, and after the
-first run check that the `blackrelay-secrets/*` packages are private (Organization > Packages).
+Hosts then use `docker.bulexa.com:5000` (pull) and `docker.bulexa.com:5001` (push), and devices
+run `./secrets.sh setup docker.bulexa.com NAME -` (the `-` means "no extra CA"). If a router on
+the way blocks public DNS answers that point at private IPs (DNS rebinding protection), allow
+`docker.bulexa.com` there or add it to your local DNS.
+
+Then one login per host:
+
+```sh
+./server.sh add-client kit-01 --secrets    # a sensor device: images + its own secrets bundle
+./server.sh add-client fusion-01           # a host that only pulls images
+./server.sh users                          # who can log in where
+./server.sh remove-client kit-01           # revoke
+```
+
+Hand each host its `state/credentials/client-NAME.txt` and `state/ca-public.crt`, then delete the
+credentials file. Back up the two volumes (`black-relay-central-store_images-data`,
+`..._secrets-data`) and `state/`.
+
+## Each host: trust the store and log in
+
+With the Let's Encrypt certificate above, skip to `docker login`. Otherwise:
+
+Linux:
+
+```sh
+sudo mkdir -p /etc/docker/certs.d/SERVER:5000
+sudo cp ca-public.crt /etc/docker/certs.d/SERVER:5000/ca.crt
+docker login SERVER:5000 -u NAME
+```
+
+macOS (Docker Desktop or OrbStack): add `ca-public.crt` to the login keychain as trusted
+(`security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db ca-public.crt`),
+then restart Docker. Not needed if the certificate is already trusted by the host.
+
+## Publishing images (build machine)
+
+```sh
+PLATFORM=linux/amd64 ../deploy/build.sh                   # as before
+docker login SERVER:5001 -u publisher                     # needs the CA trusted, as above, for :5001
+./publish-images.sh SERVER
+```
+
+On the host, `IMAGE_PREFIX=SERVER:5000/` in the sf-dev bundle's `.env` makes its `compose.yaml`
+pull from the store; `docker compose pull && docker compose up -d --wait`. Leaving `IMAGE_PREFIX`
+unset keeps the tarball flow working.
+
+## Sealing and fetching a device's secrets
+
+On the device, once (it needs this folder, e.g. the repo checkout, and Docker):
+
+```sh
+./secrets.sh setup SERVER kit-01 ca-public.crt     # asks for kit-01's password; prints its age1... key
+```
+
+On the admin's machine, once: `./secrets.sh setup SERVER admin ca-public.crt` (any image login
+works for this), then `./secrets.sh admin-keygen /Volumes/OFFLINE/blackrelay-admin.key`.
+
+Sealing is done where the files are, usually the device right after pairing. It asks for the keeper
+password (or reads `BR_KEEPER_PASSWORD`) and never stores it:
+
+```sh
+cd detection/physical-subsystem/deploy
+../../central-store/secrets.sh seal kit-01 . data/pki secrets --to age1...   # first time: the device's key
+../../central-store/secrets.sh seal kit-01 . data/pki secrets                 # later: key is remembered
+```
+
+To seal from another machine, put the device's `age1...` key in `--to`; to include the admin
+recovery key, copy `admin-recipients` into that machine's `~/.black-relay/` first.
+
+On the device, to restore or redeploy:
+
+```sh
+cd detection/physical-subsystem/deploy
+../../central-store/secrets.sh fetch .            # replaces exactly data/pki and secrets, nothing else
+../../central-store/secrets.sh fetch . --chown 10001:10000   # set one owner if it was sealed elsewhere
+../../central-store/secrets.sh list               # stored versions
+docker compose up -d
+```
+
+File modes are kept, and so are numeric owners when sealed on the device itself (the bridge expects
+its key 0600 owned by uid 10001).
+
+## Maintenance
+
+* `./server.sh gc images` removes layers no tag points to (stops that store for a few seconds).
+  Secrets keep every dated version unless you delete tags.
+* Certificates: the store's own certificate lasts 825 days, the CA 10 years. Delete
+  `state/tls/server.crt` and re-run `init` to reissue. The CA key (`state/ca/ca.key`) can be moved
+  offline once the certificate is issued.
+* Lost device: `./server.sh remove-client NAME`, then pair the replacement (which makes new keys)
+  and seal for it. To reuse the old pairing, open its bundle with the admin key.
+
+Tested locally: push only via 5001/5003, pulls via 5000/5002 with push and delete refused (405),
+logins rejected on the wrong store, real `docker login`/`pull`/`push`, seal → fetch round trip,
+no plaintext anywhere in the secrets volume, the admin key opens a bundle and an unrelated key cannot,
+revocation, and `gc`.

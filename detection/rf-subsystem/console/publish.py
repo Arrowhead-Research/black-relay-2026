@@ -38,12 +38,15 @@ NODE_HEARTBEAT_S = 60.0     # a subscriber that joins late learns every node wit
 class LiveClient:
     """paho-mqtt client for latest-wins messages: QoS 0, nothing kept while disconnected."""
 
-    def __init__(self, host: str, port: int = 1883, client_id: str = "rf-console-live") -> None:
+    def __init__(self, host: str, port: int = 1883, client_id: str = "rf-console-live",
+                 username: str | None = None, password: str | None = None) -> None:
         import paho.mqtt.client as mqtt
 
         self._mqtt = mqtt
         self.connected = threading.Event()
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
+        if username:
+            self.client.username_pw_set(username, password)
         self.client.on_connect = lambda c, u, f, rc, p: self.connected.set() if not rc.is_failure else None
         self.client.on_disconnect = lambda *a: self.connected.clear()
         self.client.reconnect_delay_set(1, 30)
@@ -89,10 +92,13 @@ class Publisher:
         self.stats = {"positions_sent": 0, "positions_dropped": 0, "node_status_queued": 0}
 
     @classmethod
-    def mqtt(cls, host: str, port: int, outbox_path: Path, topic_prefix: str = TOPIC_PREFIX) -> "Publisher":
+    def mqtt(cls, host: str, port: int, outbox_path: Path, topic_prefix: str = TOPIC_PREFIX,
+             username: str | None = None, password: str | None = None) -> "Publisher":
         from rfanalytics.outbox import MqttPublisher, Outbox
 
-        return cls(LiveClient(host, port), MqttPublisher(Outbox(outbox_path), host, port, client_id="rf-console-out"),
+        return cls(LiveClient(host, port, username=username, password=password),
+                   MqttPublisher(Outbox(outbox_path), host, port, client_id="rf-console-out",
+                                 username=username, password=password),
                    topic_prefix)
 
     def positions(self, positions: dict[str, dict[str, Any]], devices: dict[str, dict[str, Any]],

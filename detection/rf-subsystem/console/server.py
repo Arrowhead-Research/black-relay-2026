@@ -99,6 +99,8 @@ Environment (CONSOLE_*; the older DFVIZ_* names still work):
     CONSOLE_MQTT_HOST  publish positions and node status to this broker (unset: off;
                      ``publish.py``); CONSOLE_MQTT_PORT (1883), CONSOLE_TOPIC_PREFIX
                      (detection/rf)
+    CONSOLE_MQTT_USER / CONSOLE_MQTT_PASSWORD  broker sign-in (unset: anonymous)
+    Any *_PASSWORD may instead name a file in *_PASSWORD_FILE (the compose stack's generated secrets).
     CONSOLE_NODE_TOKEN  token rf-node-agent heartbeats must send (unset: accepted without)
     CONSOLE_DEMO     "1": add synthetic emitters with known positions (BLE
                      walker, passing car with TPMS, ...); "only": demo alone
@@ -123,6 +125,7 @@ from typing import Any
 import yaml
 
 from rfanalytics.kismet import KismetIngestError, KismetPoller, describe_device, seenby_history
+from rfanalytics.secrets import env_secret
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -1611,7 +1614,7 @@ def main() -> int:
     template = load_layout(template_path)
     data_dir = Path(env("DATA", HERE / "data"))
     sites = SiteManager(data_dir, template, CalibrationStore, initial=env("SITE"))
-    auth = Auth(os.environ.get("CONSOLE_OPERATOR_PASSWORD"), os.environ.get("CONSOLE_ADMIN_PASSWORD"),
+    auth = Auth(env_secret("CONSOLE_OPERATOR_PASSWORD"), env_secret("CONSOLE_ADMIN_PASSWORD"),
                 data_dir / ".session_key")
     if not auth.enabled:
         print("console: sign-in is OFF (set CONSOLE_OPERATOR_PASSWORD / CONSOLE_ADMIN_PASSWORD)", file=sys.stderr)
@@ -1619,7 +1622,7 @@ def main() -> int:
     poller = None if demo == "only" else KismetPoller(
         os.environ.get("KISMET_URL", "http://kismet-server:2501"),
         username=os.environ.get("KISMET_USER"),
-        password=os.environ.get("KISMET_PASSWORD"),
+        password=env_secret("KISMET_PASSWORD"),
     )
     extra = []
     if demo in ("1", "true", "yes", "only"):
@@ -1633,7 +1636,8 @@ def main() -> int:
         from rfanalytics.formats import TOPIC_PREFIX
 
         publisher = Publisher.mqtt(env("MQTT_HOST"), int(env("MQTT_PORT", 1883)), data_dir / "rf-outbox.jsonl",
-                                   env("TOPIC_PREFIX", TOPIC_PREFIX))
+                                   env("TOPIC_PREFIX", TOPIC_PREFIX),
+                                   username=env("MQTT_USER"), password=env_secret("CONSOLE_MQTT_PASSWORD"))
         print(f"console: publishing positions and node status to {env('MQTT_HOST')}", file=sys.stderr)
     app = App(poller, None, window, float(env("POLL_S", 3)), extra, None, klog, sites=sites, auth=auth,
               publisher=publisher, data_dir=data_dir, node_token=os.environ.get("CONSOLE_NODE_TOKEN"))

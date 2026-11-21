@@ -1,0 +1,99 @@
+# BlackRelay central store: a private image registry and a separate store for per-device secrets,
+# on the central server. See README.md. Set up with ./server.sh init <address>, then:
+#   docker compose up -d --wait
+#
+#   port 5000  images, pull only   (client logins)        ─┐ same image storage
+#   port 5001  images, push        (publisher login only) ─┘
+#   port 5002  secrets, pull only  (device logins)        ─┐ same secrets storage, separate from images
+#   port 5003  secrets, push       (keeper login only)    ─┘
+#
+# The secrets store only ever holds age-encrypted bundles. The server has no key that opens them:
+# each bundle is encrypted to its device's own key (and the admin recovery key, kept off the server).
+
+name: black-relay-central-store
+
+x-registry: &registry
+  image: registry:3.1.2@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
+  user: "${RUN_UID:?run ./server.sh init}:${RUN_GID:?run ./server.sh init}"
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs: [/tmp]
+  mem_limit: 512m
+  depends_on:
+    init-perms: {condition: service_completed_successfully}
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: "3"}
+
+services:
+  # One-shot: the storage volumes belong to the uid that owns state/ (no root at run time).
+  init-perms:
+    image: registry:3.1.2@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
+    entrypoint: ["sh", "-c", "chown ${RUN_UID}:${RUN_GID} /v/images /v/secrets && chmod 0700 /v/images /v/secrets"]
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+    volumes:
+      - images-data:/v/images
+      - secrets-data:/v/secrets
+
+  images:
+    <<: *registry
+    ports: ["${BIND_ADDRESS:?run ./server.sh init}:5001:5000"]
+    environment:
+      REGISTRY_HTTP_SECRET: ${REGISTRY_HTTP_SECRET:?run ./server.sh init}
+      REGISTRY_AUTH_HTPASSWD_REALM: black-relay images (push)
+    volumes:
+      - ./registry/rw.yml:/etc/distribution/config.yml:ro
+      - ./state/tls:/tls:ro
+      - ./state/auth/images-push:/auth:ro
+      - images-data:/var/lib/registry
+
+  images-pull:
+    <<: *registry
+    ports: ["${BIND_ADDRESS}:5000:5000"]
+    environment:
+      REGISTRY_HTTP_SECRET: ${REGISTRY_HTTP_SECRET}
+      REGISTRY_AUTH_HTPASSWD_REALM: black-relay images
+    volumes:
+      - ./registry/ro.yml:/etc/distribution/config.yml:ro
+      - ./state/tls:/tls:ro
+      - ./state/auth/images-pull:/auth:ro
+      - images-data:/var/lib/registry:ro
+
+  secrets:
+    <<: *registry
+    ports: ["${BIND_ADDRESS}:5003:5000"]
+    environment:
+      REGISTRY_HTTP_SECRET: ${REGISTRY_HTTP_SECRET}
+      REGISTRY_AUTH_HTPASSWD_REALM: black-relay secrets (push)
+    volumes:
+      - ./registry/rw.yml:/etc/distribution/config.yml:ro
+      - ./state/tls:/tls:ro
+      - ./state/auth/secrets-push:/auth:ro
+      - secrets-data:/var/lib/registry
+
+  secrets-pull:
+    <<: *registry
+    ports: ["${BIND_ADDRESS}:5002:5000"]
+    environment:
+      REGISTRY_HTTP_SECRET: ${REGISTRY_HTTP_SECRET}
+      REGISTRY_AUTH_HTPASSWD_REALM: black-relay secrets
+    volumes:
+      - ./registry/ro.yml:/etc/distribution/config.yml:ro
+      - ./state/tls:/tls:ro
+      - ./state/auth/secrets-pull:/auth:ro
+      - secrets-data:/var/lib/registry:ro
+
+# Fixed names: the same data whether this file runs alone or from the repo-root compose.yaml.
+volumes:
+  images-data:
+    name: black-relay-central-store_images-data
+  secrets-data:
+    name: black-relay-central-store_secrets-data

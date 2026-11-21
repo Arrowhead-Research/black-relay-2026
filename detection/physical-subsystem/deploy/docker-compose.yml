@@ -18,7 +18,8 @@
 #  * secrets/keys are 0600 and owned by the single uid that reads them (scripts/gen-certs.sh); ca.key is never mounted.
 name: blackrelay
 # Images come from GitHub Container Registry (ghcr.io/arrowhead-research/..., built by
-# .github/workflows/publish-images.yml) by default. IMAGE_PREFIX= (empty, in .env) uses local builds.
+# .github/workflows/publish-images.yml) by default. IMAGE_PREFIX= (empty, in .env) uses local builds;
+# IMAGE_PREFIX=reg.bulexa.com:5000/ uses the local registry instead (offline sites).
 
 x-hardening: &hardening
   read_only: true
@@ -184,7 +185,7 @@ services:
   # Team ("fusion") MQTT publisher. OPTIONAL: only started with `docker compose --profile fusion up -d`, and only
   # when fusion.enabled: true in config.yaml. It is the same outbound image and code (br2.outbound.fusion); it is a
   # separate container only because `outbound` uses host networking and so cannot join a Docker network.
-  # Sends to the central broker over the LAN (fusion.host, port 1883) with its own login:
+  # Sends to the central broker over the LAN (fusion.host, e.g. reg.bulexa.com:8883 with TLS) with its own login:
   # put the password (BROKER_PHYSICAL_PASSWORD from the central server's .env) in secrets/fusion/fusion_password, owned by
   # uid 10003, mode 0600. Publish-only: it reads the one-way IPC stream + the event log and sends to the team broker.
   fusion:

@@ -213,6 +213,6 @@ def test_disabled_by_default_and_config_example_loads():
     assert C.parse({}).fusion["enabled"] is False and C.parse({}).site["id"] == "default"
     c = C.load(ROOT / "deploy/config/config.example.yaml")
     assert c.fusion["enabled"] is False and c.fusion["topic_prefix"] == "detection/physical"
-    # The example points at the central broker's one listener: a login on 1883, no TLS.
-    assert c.fusion["port"] == 1883 and c.fusion["tls"] is None
+    # The example points at the central broker over TLS (public CA bundle: Let's Encrypt certificate).
+    assert c.fusion["port"] == 8883 and c.fusion["tls"]["ca_file"] == "/etc/ssl/certs/ca-certificates.crt"
     assert c.fusion["password_file"] == "/run/secrets/fusion_password"

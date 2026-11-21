@@ -31,6 +31,9 @@ jobs:
           - {name: blackrelay-f2/outbound,   context: detection/physical-subsystem, file: docker/Dockerfile.outbound}
           - {name: black-relay/fusion-service, context: detection, file: fusion-service/Dockerfile}
           - {name: black-relay/central-tools,  context: detection/central-store/tools, file: Dockerfile}
+          - {name: black-relay/rf-analytics,   context: detection/rf-subsystem/analytics, file: Dockerfile}
+          - {name: black-relay/rf-console,     context: detection/rf-subsystem, file: console/Dockerfile}
+          - {name: black-relay/rf-kismet-server, context: detection/rf-subsystem/central/kismet, file: Dockerfile}
     steps:
       - uses: actions/checkout@v4
         with: {persist-credentials: false}

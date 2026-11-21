@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Per-device secrets in a registry (ghcr.io): sealed (age-encrypted) where they are made, opened only
-# on the device they belong to. Runs on any machine with Docker (macOS or Linux).
+# Per-device secrets on the central store: sealed (age-encrypted) where they are made, opened only on
+# the device they belong to. Runs on any machine with Docker (macOS or Linux).
 #
 #   ./secrets.sh setup <server> <name> <ca.crt|-> [user]
 #                                                   once per machine: login, CA and this machine's own key.
-#                                                   <server> is a registry path, e.g.
-#                                                   ghcr.io/arrowhead-research/blackrelay-secrets ([user] is the
-#                                                   GitHub user, the password a read:packages token, <ca.crt> is -)
+#                                                   <server> is the central store (reg.bulexa.com) or a
+#                                                   registry path, e.g. ghcr.io/arrowhead-research/blackrelay-secrets
+#                                                   (then [user] is the GitHub user, password a read:packages token)
 #   ./secrets.sh recipient                          print this machine's public key (age1...)
 #   ./secrets.sh admin-keygen <file>                make the admin recovery key (keep <file> OFF the server)
 #   ./secrets.sh seal <device> <dir> <path>... [--to age1...] [--out FILE]
@@ -20,7 +20,7 @@
 #   ./secrets.sh list [device]                      bundles stored for a device (latest + dated versions)
 #
 # seal, fetch and list take --bundle NAME for a second, independent bundle per device (e.g. `broker`,
-# a bridge's central broker login, read by deploy/scripts/fetch-broker-login.sh). Without it: the main
+# the central broker login that detection/central/share-broker-login.sh seals). Without it: the main
 # bundle (pairing keys). BR_RESOLVE=host:port:address pins a name to an address (like curl --resolve).
 #
 # Settings live in $BR_HOME (default ~/.black-relay, 0700): server, name, password, ca.crt, identity.key

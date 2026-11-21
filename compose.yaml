@@ -1,21 +1,29 @@
 # BlackRelay central server: everything that runs on the central node, in one project.
 #
-#   broker    the team's central MQTT broker: 1883 (login) and 8883 (TLS + login, reg.bulexa.com)
-#   fusion    the fusion service and its API on 8090
+#   registry + secrets store   detection/central-store (ports 5000-5003)   images and sealed device secrets
+#   broker                     the team's central MQTT broker: 1883 (login) and 8883 (TLS + login)
+#   fusion                     the fusion service and its API on 8090
+#   RF                         detection/rf-subsystem/central: Kismet (2501, 3501 for the nodes), the WBT
+#                              Console (8080) and rf-analytics, publishing to the broker; passwords are
+#                              generated on first start by its rf-bootstrap service
 #
 # First time, on the central server, from the repo root:
-#   detection/central/make-env.sh <address>    # writes ./.env: the bind address, broker logins, fusion token
-#   detection/central-broker/cert.sh reg.bulexa.com <email>   # the TLS certificate (Let's Encrypt)
+#   detection/central-store/server.sh init <address> [names]   # registry TLS, logins (and letsencrypt, see its README)
+#   detection/central/make-env.sh                               # writes ./.env: broker logins, fusion token
 #   docker compose up -d --wait
-# (./setup-central.sh <address> --domain reg.bulexa.com --email <email> does all three.)
 #
-# Publishers connect to reg.bulexa.com:8883 with TLS (or <address>:1883 without) and their own login
-# (physical: user physical-subsystem, password BROKER_PHYSICAL_PASSWORD in ./.env). reg.bulexa.com
-# must resolve to <address> for them (DNS, or an /etc/hosts line). Without a certificate the broker
-# runs 1883 only. Nothing here listens anywhere but BIND_ADDRESS.
-# Images come from GitHub's registry (ghcr.io); `docker compose up --build` builds fusion here instead.
+# Publishers connect to <address or reg.bulexa.com>:8883 with TLS and their own login (physical: user
+# physical-subsystem, password BROKER_PHYSICAL_PASSWORD in ./.env). Camera kits use 1883 until
+# they support TLS. The RF console and rf-analytics run here and reach the broker inside Docker.
+# Nothing here listens anywhere but BIND_ADDRESS.
 
 name: black-relay-central
+
+include:
+  - path: detection/central-store/compose.yaml
+    env_file: detection/central-store/.env
+  # Each subsystem keeps its own compose file; this one includes them.
+  - path: detection/rf-subsystem/central/docker-compose.yml
 
 x-hardening: &hardening
   restart: unless-stopped
@@ -30,7 +38,7 @@ services:
   broker:
     <<: *hardening
     image: eclipse-mosquitto:2.1.2-alpine
-    # DAC_READ_SEARCH: entrypoint.sh (root) reads the private TLS key once, copies it for the
+    # DAC_READ_SEARCH: entrypoint.sh (root) reads the store's private TLS key once, copies it for the
     # mosquitto user, then mosquitto drops root.
     cap_add: [CHOWN, SETUID, SETGID, DAC_READ_SEARCH]
     entrypoint: ["/bin/sh", "/broker/entrypoint.sh"]
@@ -43,14 +51,20 @@ services:
       BROKER_RF_PASSWORD: ${BROKER_RF_PASSWORD:?run detection/central/make-env.sh}
       BROKER_CAMERA_USER: ${BROKER_CAMERA_USER:?run detection/central/make-env.sh}
       BROKER_CAMERA_PASSWORD: ${BROKER_CAMERA_PASSWORD:?run detection/central/make-env.sh}
+      # rf-analytics' login: generated with the RF passwords by rf-bootstrap (nothing in .env).
+      BROKER_RF_ANALYTICS_USER: rf-analytics
+      BROKER_RF_ANALYTICS_PASSWORD_FILE: /run/rf-secrets/analytics-broker-password
+    depends_on:
+      rf-bootstrap: {condition: service_completed_successfully}
     mem_limit: 256m
     tmpfs: [/tmp, "/run/mosquitto-auth:mode=0700", /mosquitto/log]
     volumes:
       - ./detection/central-broker/mosquitto.conf:/broker/mosquitto.conf:ro
       - ./detection/central-broker/aclfile:/broker/aclfile:ro
       - ./detection/central-broker/entrypoint.sh:/broker/entrypoint.sh:ro
-      - ./detection/central-broker/state/tls:/tls:ro   # cert.sh; empty: no TLS listener
+      - ./detection/central-store/state/tls:/tls:ro
       - broker-data:/mosquitto/data
+      - rf-secrets:/run/rf-secrets:ro
     ports:
       - "${BIND_ADDRESS:?run detection/central/make-env.sh}:1883:1883"
       - "${BIND_ADDRESS}:8883:8883"
