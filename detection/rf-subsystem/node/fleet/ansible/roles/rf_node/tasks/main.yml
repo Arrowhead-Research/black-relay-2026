@@ -25,6 +25,11 @@
     name: "{{ item }}"
     selection: hold
   loop: "{{ capture_units | map('extract', kismet_packages) | list }}"
+  # dpkg --set-selections doesn't wait for the dpkg lock (apt does): retry while another apt run holds it.
+  register: kismet_hold
+  retries: 20
+  delay: 6
+  until: kismet_hold is succeeded
 
 - name: Not on the tailnet
   ansible.builtin.include_tasks: tailscale.yml
