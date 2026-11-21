@@ -95,7 +95,7 @@ Full notes: the physical thread's `central-server-physical-bridge.md`.
    ./setup-central.sh <SERVER_IP> --domain reg.bulexa.com --email <EMAIL> --with-bridge --panel-ip <PANEL_IP>
    ```
    It makes the broker answer as reg.bulexa.com inside Docker, points the bridge at it on 8883 with TLS,
-   sets the bridge's site id to fusion's (`central`), writes the bridge's broker password and starts the
+   sets the bridge's site id to fusion's (`sh1`), writes the bridge's broker password and starts the
    bridge. No `CENTRAL_BROKER_NAME`/`CENTRAL_BROKER_IP` settings and no compose override are needed.
    Re-run this command whenever something drifts.
 4. Start or stop the bridge with `--profile fusion`, or its sender to fusion does not run. The panel
@@ -215,8 +215,8 @@ cd <REPO>/detection/physical-subsystem/deploy
 docker compose --profile fusion logs fusion | grep -E 'publisher up|connected|refused|cannot' | tail
 ```
 
-Expect `fusion publisher up: reg.bulexa.com:8883 prefix=detection/physical site=central` and
-`connected`. The `/api/v1/nodes` call above should list `physical-bridge-01` with site `central` within
+Expect `fusion publisher up: reg.bulexa.com:8883 prefix=detection/physical site=sh1` and
+`connected`. The `/api/v1/nodes` call above should list `physical-bridge-01` with site `sh1` within
 about a minute. Open and close a door, then:
 
 ```
