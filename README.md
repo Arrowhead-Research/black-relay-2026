@@ -7,8 +7,11 @@ Black Relay 2026 is a four-month, open-source build to create a portable, surviv
 ## Central server
 
 One command sets up (or updates) the central server: the image registry and device secrets store
-(`detection/central-store`), the team's central MQTT broker (`detection/central-broker`, 1883 and 8883 with TLS)
-and the fusion service (API on 8090), all from `compose.yaml` at the repo root. On the central server:
+(`detection/central-store`), the team's central MQTT broker (`detection/central-broker`, 1883 and 8883 with TLS),
+the fusion service (API on 8090), the RF services (Kismet, WBT Console, rf-analytics) and the camera relay
+(relay API on 8091, live video on 8554 and 8889), all from `compose.yaml` at the repo root. The central server is
+172.22.41.10 (AMD x86_64, Ubuntu 22.04), with this repo at `/srv/sensor-fusion`. The full deploy and update
+steps are in [DEPLOY.md](DEPLOY.md). On the central server:
 
 ```sh
 ./setup-central.sh <address> --domain reg.bulexa.com --email <you>
@@ -26,10 +29,14 @@ server needs a network interface that reaches the panel, and the panel pairing (
 `detection/central-store/secrets.sh fetch detection/physical-subsystem/deploy` to restore it).
 The bridge's team publisher then reaches the central broker inside Docker, on the network `black-relay-local`
 (`detection/physical-subsystem/deploy/docker-compose.samehost.yml`, turned on by `COMPOSE_FILE` in
-`deploy/.env`), because a container on Docker Desktop cannot reach its own host's LAN address. With `--domain`
+`deploy/.env`), so it does not depend on the host's LAN address (a container on Docker Desktop cannot reach its
+own host's). With `--domain`
 the broker answers there as that name, so TLS on 8883 still verifies; without it the bridge uses
 `central-broker:1883`. The script also makes the bridge's broker password readable by the publisher only
 (`deploy/scripts/fusion-secret.sh`; run it again after editing that file by hand).
+
+Live video from the camera kits goes through the camera relay: RTSP at `rtsp://viewer:<password>@<address>:8554/<node_id>`
+and WebRTC at `http://<address>:8889/<node_id>` (UDP 8189 for media). The viewer password is `RELAY_READ_PASSWORD` in `.env`.
 
 After that:
 
@@ -44,7 +51,7 @@ RF, panel and camera sources with their own broker and fusion on one machine.
 
 ## Images and device secrets on GitHub (ghcr.io)
 
-Images are built for amd64 and arm64 by `.github/workflows/publish-images.yml` on every push to `main` and pushed to
+Images are built for amd64 and arm64 by `.github/workflows/publish-images.yml` on every push to `main` or `detection/develop` (changes under `detection/`) and pushed to
 `ghcr.io/arrowhead-research/...`; the compose files pull from there by default (`IMAGE_PREFIX=` uses local builds,
 `IMAGE_PREFIX=reg.bulexa.com:5000/` the local registry for an offline site). If the packages are private, run
 `docker login ghcr.io` (a classic token with `read:packages`) on each host first.

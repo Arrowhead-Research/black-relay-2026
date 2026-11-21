@@ -9,7 +9,7 @@ The operator web page for the RF subsystem. It shows where Wi-Fi, Bluetooth and 
 ```sh
 mkdir -p site && cp layout.example.yaml site/layout.yaml   # team template: node radio MACs, first layout
 cd ../central
-docker compose up -d --build        # the whole RF stack; on the central server, `docker compose up -d` from the repo root
+docker compose up -d --build        # the whole RF stack; on the central server, `./setup-central.sh <address>` from the repo root
 open http://<BIND_ADDR>:8080        # e.g. http://127.0.0.1:8080
 # with synthetic emitters that have known positions (BLE walker, still laptop and headset, passing car with 4 TPMS sensors):
 CONSOLE_DEMO=1 docker compose up -d --build rf-console
@@ -90,7 +90,7 @@ docker compose exec rf-console python replay.py --site default \
     --start 2026-11-08T18:00:00Z --end 2026-11-08T20:00:00Z --out /tmp/replay
 ```
 
-On sf-dev, 30 minutes replay in about 30 s. Its baseline starts empty at `--start` (`--learn-s` sets the learning period); TPMS and node-offline alerts are not replayed. Kismet's logs stay in the `kismet-logs` volume until removed, so a window can be replayed only while its log is kept.
+On sf-dev (its stack is now down), 30 minutes replay in about 30 s. Its baseline starts empty at `--start` (`--learn-s` sets the learning period); TPMS and node-offline alerts are not replayed. Kismet's logs stay in the `kismet-logs` volume until removed, so a window can be replayed only while its log is kept.
 
 ## Node health
 
@@ -130,7 +130,7 @@ Press **Calibrate** in the header.
 
 1. **Device:** select the device you carry in the list (phone hotspot, laptop, BLE beacon). **What is selected is what gets recorded**: the Record button names it, and each spot stores the device's address and name. Several devices or SSIDs can be used; each gets its own transmit power in the fit.
 2. **Stand still at a spot and click that spot on the map** (it snaps to 0.5 ft).
-3. **Record 15 s.** The server reads **every packet** the nodes logged from that device in the window from Kismet's packet log (the `kismet-logs` volume, mounted read-only) and stores the median per node. It waits for the log to catch up (Kismet writes about 10 s behind). A node needs 3+ packets; a spot needs 2+ nodes.
+3. **Record 15 s** (45 s for Bluetooth). The server reads **every packet** the nodes logged from that device in the window from Kismet's packet log (the `kismet-logs` volume, mounted read-only) and stores the median per node. It waits for the log to catch up (Kismet writes about 10 s behind). A node needs 3+ packets; a spot needs 2+ nodes.
 4. Repeat at **5–10 spots spread over the area**, at varied distances from the nodes. Node radios can be recorded like any device (their node's position is used automatically).
 5. The panel fits (shown with the standard error of n, e.g. `n = 1.8 ± 0.4`; a poorly determined n is flagged), per band, by least squares `rssi = P0[device] + c_k − 10·n·log10(d_k) − W·walls_k`: one transmit power per device, optional per-node offsets `c_k` (average 0), σ = residual standard deviation.
 6. **Measured error (leave-one-out):** each spot is located with a model fitted on the other spots; its distance to where you clicked is its error (red line on the map). The median is an **empirical CEP50 for those spots**; with 10+ spots the 90th percentile is shown too. It is accuracy at the spots you recorded, not a guarantee elsewhere.

@@ -16,7 +16,7 @@ hailo_install_sha256: 700f75db1669ca3447d4acd52bb418efe529962c990290eaa15a1ea5da
 fleet_admin_nets: ['10.42.0.0/24']
 
 # Time server for the node (the central server's chrony by default).
-# camera_ntp_server: 172.20.100.150
+# camera_ntp_server: 172.22.41.10
 
 # Run a prebuilt image instead of building on the node (docker compose pull).
 # camera_node_image: ghcr.io/example/black-relay-camera-node:1.0

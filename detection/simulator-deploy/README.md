@@ -13,5 +13,5 @@ How to run it: [RUNBOOK.md](RUNBOOK.md).
 | `rfsim` | Replays a one-hour RF scenario in real time, then starts again. Its alerts come about 21 minutes in |
 | `rf-analytics` | Turns the RF simulator's observations into alerts (three per hour in this scenario) |
 | `physical-sim` | A simulated alarm panel with the real panel bridge reading it |
-| `mock-camera.sh` | Publishes one fake camera kit's heartbeat and one person detection |
+| `mock-camera.sh` | Publishes one fake camera kit's heartbeat and one person walking through (start, update, end) |
 | `mock_rf.sh` | Publishes one fake RF alert, or one RF position |

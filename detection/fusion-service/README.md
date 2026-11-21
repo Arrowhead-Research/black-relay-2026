@@ -33,7 +33,7 @@ fusion-service/
   Dockerfile                non-root container build
   Dockerfile.dockerignore   restricts the parent build context to code and schemas
   compose.yaml              API container and persistent data volume
-  compose.fusion.yaml       optional existing fusion Docker network attachment
+  compose.fusion.yaml       optional attachment to an external network named `fusion` (not created by the central stack)
   scripts/physical-sim-bench.sh  runs the physical simulator and bridge against a local team broker
   src/fusion_service/
     app.py                  create_app() factory and main() entrypoint (serve, check-config)
@@ -44,11 +44,12 @@ fusion-service/
       security.py           bearer token dependency
       errors.py             error envelope and exception handlers
       dependencies.py       typed access to the runtime from routes
-      v1/                   /api/v1 router: events.py, nodes.py, health.py, schemas.py
+      v1/                   /api/v1 router: events.py, snapshots.py, nodes.py, health.py, schemas.py
     domain/                 shared vocabulary: event envelope, node snapshot, topics, time, errors
     ingest/                 contracts.py (reference schema validation), adapters/ (field mapping),
                             normalize.py (envelope, site identity, timestamps), pipeline.py (decode, normalize, store)
     mqtt/                   broker connections and acknowledgements
+    snapshots/              frigate.py: camera still images, fetched from the kit on request
     storage/                SQLite: store.py, retention.py, schema.py, sql/001_initial.sql
   tests/                    smoke tests over the HTTP surface
 ```
@@ -73,7 +74,9 @@ openssl rand -hex 32
 
 Put the generated token in `FUSION_API_TOKEN` in `.env`, fill in camera MQTT credentials, and edit
 `config.yaml`. Both local files are gitignored. Fusion never reads another subsystem's secrets
-automatically. If running outside Docker, load `.env` using uv's `--env-file` option below.
+automatically. If running outside Docker, load `.env` using uv's `--env-file` option below. On the central server, the token and broker
+logins come from the repo's root `.env` (written by `detection/central/make-env.sh`), and the config is
+`detection/central/fusion.config.yaml`.
 
 | Setting | Purpose/default |
 |---|---|
@@ -162,22 +165,26 @@ bench/sim.in` drops the panel link and produces `zone_stale` events; `iq restore
 Stopping and restarting the broker while tripping zones shows the bridge's outbox replay arriving
 with the original ids, which fusion deduplicates.
 
-### Central host containers
+### Central server
 
-Ensure `config.yaml` exists as a file. Keep camera relay/broker and RF Kismet/Console/broker
-running. To reach the current RF broker (`rf-mqtt`) on its external `fusion` network:
+Fusion runs in the repo-root compose project, configured by `detection/central/fusion.config.yaml`: one connection,
+`central`, to the broker at `broker:1883`, with subsystems camera, rf and physical and site `sh1`. `./setup-central.sh`
+brings the stack up (`docker compose up -d --wait --build` from the repo root does the same without the setup steps). The
+API listens on `BIND_ADDRESS`:8090 from the root `.env`.
+
+The standalone `compose.yaml` here runs fusion on its own. `compose.fusion.yaml` attaches it to an external network named
+`fusion` (`FUSION_NETWORK_NAME`). The central stack does not create that network, so use the overlay only on a host where
+that network and a broker exist:
 
 ```sh
 docker compose -f compose.yaml -f compose.fusion.yaml config --quiet
 docker compose -f compose.yaml -f compose.fusion.yaml up -d --build
 ```
 
-The RF deployment supplies that external network. Camera can stay at the central LAN IP in
-the YAML. Camera credentials need read access to the three `detection/camera/` topics, QoS 1
+Without that network, use `docker compose up -d --build`. Camera credentials need read access to the three `detection/camera/` topics, QoS 1
 subscriptions and a persistent session. Use fusion's own client ID, never the relay API's ID.
 
-Without the external network requirement, use `docker compose up -d --build`. With a single
-shared broker, configure one connection with the required subsystems. Keep namespaces stable so old
+With a single shared broker, configure one connection with the required subsystems. Keep namespaces stable so old
 messages do not gain new deduplication identities.
 
 The API binds host loopback port 8090 by default, avoiding the existing 8080 APIs. Set
@@ -191,8 +198,9 @@ use the deployment's protected network or existing TLS proxy as appropriate.
 Fusion reads the versioned `detection/physical/...` feed directly from Mosquitto, not the
 physical REST API, SQLite file, panel, or native `blackrelay/v1/...` topics. Physical's optional
 team publisher must be enabled (`fusion.enabled: true` and its `fusion` Compose profile).
-The default physical publisher uses `rf-mqtt:1883`, so the example subscribes to RF and physical
-using one connection. Physical's own TLS broker on 8883 is a different interface.
+The physical publisher's example routing is the broker RF uses (`rf-mqtt:1883` in the generic example), so one connection
+subscribes to RF and physical. On the central server that is the central broker (`broker:1883`, connection `central`). The
+physical bridge's own local TLS broker is a different interface (8883, or 8884 on the central server).
 
 Set `physical_node_id` to a stable identity for the physical bridge, such as
 `physical-bridge-01`. All physical messages use that top-level `node_id`; individual sensor
@@ -201,7 +209,7 @@ status remain in `/events`. Panel status becomes stale after 120 seconds without
 The v0 source contract lacks a panel/bridge ID: assume one bridge per site on a connection.
 Multiple bridges in the same site need separate topic routing/identity agreement first.
 
-Physical's `site.id` is authoritative. `data.seq` and `data.prev_seq` remain the physical log
+Physical's `site.id` is authoritative (`sh1` on the central server, the same as the broker's `site_id`). `data.seq` and `data.prev_seq` remain the physical log
 sequence/chain; they never replace fusion's REST cursor. Keep `synthetic` and sensor `stale`
 flags when interpreting detections. A zone is an enrolled sensor, not automatically a shared
 camera/RF spatial zone. Fusion does not create alerts or infer motion duration from panel delays.
@@ -212,7 +220,7 @@ from source on the same host as the bench, or update the broker address for cont
 
 ### REST consumers
 
-All three API routes require a bearer token. These examples assume it is exported in the shell.
+All `/api/v1/` routes require a bearer token. These examples assume it is exported in the shell.
 
 ```sh
 curl -H "Authorization: Bearer $FUSION_API_TOKEN" http://127.0.0.1:8090/api/v1/health
@@ -224,6 +232,9 @@ curl -H "Authorization: Bearer $FUSION_API_TOKEN" http://127.0.0.1:8090/api/v1/n
 Process each page before saving `next_cursor`. Continue while `has_more`, then wait and poll
 again. Late events use new cursors with their original source timestamps. See
 [API-CONTRACT.md](API-CONTRACT.md) for filters and explicit retention-gap recovery.
+
+`GET /api/v1/events/{event_id}/snapshot` returns a camera detection's still as `image/jpeg`, fetched from the kit on each
+request. It answers 501 unless `camera_snapshot_password_env` is set (the central config sets it).
 
 `/docs` offers interactive OpenAPI with bearer authorization. `/openapi.json` is the generated
 schema. Documentation routes are public and contain no deployment secrets.
@@ -240,15 +251,15 @@ uv run ruff format --check src tests
 uv build
 ```
 
-After deployment, inspect `/health`, confirm every broker is connected/subscribed, wait for
-node heartbeats, then poll `/events` and `/nodes`. A broker connection alone does not establish
+After deployment, inspect `/api/v1/health`, confirm every broker is connected/subscribed, wait for
+node heartbeats, then poll `/api/v1/events` and `/api/v1/nodes`. A broker connection alone does not establish
 sensor liveness: inspect message times and node freshness.
 
 | Symptom | Check |
 |---|---|
 | Startup fails | Config/schema paths, required variables, storage permissions and database version |
 | Degraded health, REST works | Broker `last_error`, network membership, subscription grants |
-| No RF events | RF Console profile enabled; `rf-mqtt` reachable on `fusion` |
+| No RF events | RF console and rf-analytics running and publishing; the `central` connection subscribed (`/api/v1/health`) |
 | No camera events | Camera host/credentials/topic permissions, unique persistent client ID |
 | Rejections increase | Logged reason codes, source versions, site mappings and clock |
 | Storage not ready | Disk and dedupe/database capacity; QoS 1 waits for retry |
@@ -256,11 +267,15 @@ sensor liveness: inspect message times and node freshness.
 | HTTP 410 | Explicitly accept the retention gap using returned `resume_after` |
 | HTTP 400 `cursor_ahead` | Cursor belongs to a later/different database; coordinate reset |
 
-For offline backup, stop fusion, copy its whole data volume, then restart. Do not copy only a
+For offline backup, stop fusion, copy its whole data volume (`fusion-data` on the central server), then restart. Do not copy only a
 live `.sqlite3` file while ignoring WAL. Preserve the volume on upgrades. Database restoration
 or replacement requires cursor coordination with consumers.
 
 ## Change notes
+
+- 2026-11-21: Docs only. The central server runs fusion in the repo-root compose project (`detection/central/fusion.config.yaml`,
+  broker `broker:1883`, site `sh1`); the `rf-mqtt` / external `fusion` network path is for other hosts. API paths and route
+  count corrected.
 
 - 2026-11-17: Initial camera/RF normalization, SQLite persistence and JSON/REST deployment bundle.
 - 2026-11-17: Added physical team-MQTT events, panel/zone status, bridge freshness and configuration.

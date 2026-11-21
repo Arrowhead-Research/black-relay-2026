@@ -18,7 +18,10 @@ rf-subsystem/
 ├── DESIGN.md                    # Subsystem design: requirements, architecture, interfaces
 ├── README.md                    # This file
 ├── schemas/
-│   └── observation.v0.schema.json   # Normalized observation contract (ingest → analytics)
+│   ├── observation.v0.schema.json   # Normalized observation contract (ingest → analytics)
+│   ├── alert.v0.schema.json         # rf.alert.v0 on detection/rf/alerts
+│   ├── position.v0.schema.json      # rf.position.v0 on detection/rf/positions
+│   └── node-status.v0.schema.json   # rf.node-status.v0 on detection/rf/status/nodes
 ├── analytics/                   # rf-analytics: ingest, exclusion, visits, localization, alerts (Python, uv)
 │   ├── src/rfanalytics/         # Kismet ingest, analyzer, localization, alert rules, wire format, outbox, scorer, CLI
 │   ├── config/                  # Example friendly list, alert rules, and WBT node site mapping
@@ -32,6 +35,9 @@ rf-subsystem/
 ├── node/                        # WBT node artifacts
 │   ├── systemd/                 # Example Kismet remote-capture units and env template (no secrets)
 │   ├── scripts/                 # rf-bt-capture (adapter by address/kind), rf-bt-doctor (diagnose/fix silent Bluetooth)
+│   ├── agent/                   # rf-node-agent: health heartbeats to the WBT Console
+│   ├── modprobe/                # RTL-SDR driver blacklist
+│   ├── fleet/                   # flash and provision the Pi nodes with Ansible (see fleet/README.md)
 │   └── tests/                   # Adapter-selection tests (bash, fake sysfs)
 └── simulator/                   # rfsim: multi-node observation simulator (Python, uv)
     ├── src/rfsim/               # Engine, propagation model, devices, scenario loader, CLI
@@ -44,7 +50,7 @@ rf-subsystem/
 
 Document this so a person unfamiliar with the project can assemble the system from its parts. Include diagrams or photos where they clarify placement or connections.
 
-> **Draft: not yet validated on hardware.** These steps are written from the BOM ([`../docs/BOM.md`](../docs/BOM.md)) and the node design (DESIGN.md section 6). Confirm them on the first assembled node and update this section.
+> **Draft: not yet validated on hardware.** These steps are written from the BOM ([`../../BOM.md`](../../BOM.md)) and the node design (DESIGN.md section 6). Confirm them on the first assembled node and update this section.
 
 The central service has no physical assembly. It runs as Docker containers on the safehouse central server (see [Startup](#startup)). The steps below are for **WBT nodes**. HackRF nodes are not part of the current build.
 
@@ -102,9 +108,9 @@ Central stack overrides are optional and go in `central/.env` (see `central/.env
 
 | Setting | Required | Description / example |
 |---|---|---|
-| `BIND_ADDR` | No | Host address to expose ports on (default: the root `.env`'s `BIND_ADDRESS`, else `127.0.0.1`). Use `127.0.0.1` for development, the host's Tailscale IP, or `0.0.0.0` on a shared host behind a subnet router (see [`central/README.md`](central/README.md#shared-central-host)). |
+| `BIND_ADDR` | No | Host address to expose ports on (default: the root `.env`'s `BIND_ADDRESS`, else `127.0.0.1`). Use `127.0.0.1` for development, the host's Tailscale IP or LAN address, or `0.0.0.0` on a shared host behind a subnet router (see [`central/README.md`](central/README.md#shared-central-host)). |
 | `KISMET_VERSION` | No | Pinned Kismet release, default `2026-10-R1`. Nodes must use the same version. |
-| `KISMET_ADMIN_USER` / `KISMET_ADMIN_PASSWORD` | No | Kismet web admin account (default user `admin`). The password is generated on first start unless set here; Kismet reads it on first start only. |
+| `KISMET_ADMIN_USER` / `KISMET_ADMIN_PASSWORD` | No | Kismet web admin account (default user `admin`). The password is generated on first start unless set here; Kismet's login is rewritten from it on every start. |
 
 WBT Console settings (`central/.env` and the local `console/site/layout.yaml`):
 
@@ -122,20 +128,20 @@ Node configuration (`/etc/rf-node/node.yaml`) is specified in DESIGN.md section 
 
 **Prerequisites:** Docker with Compose v2, plus Tailscale for node connectivity. The simulator also needs Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
-1. Start the central stack: on the central server, `docker compose up -d` from the repo root; on its own (lab), `cd central && docker compose up -d --build`. See [`central/README.md`](central/README.md).
+1. Start the central stack: on the central server, `./setup-central.sh <address>` from the repo root (then `docker compose up -d` there); on its own (lab), `cd central && docker compose up -d --build`. See [`central/README.md`](central/README.md).
 2. Without node hardware, feed the stack simulated data: `cd simulator && uv sync --extra mqtt && uv run rfsim run scenarios/loiterer.yaml --start-now --realtime --speed 60 --mqtt-host 127.0.0.1 -o /dev/null`. See [`simulator/README.md`](simulator/README.md).
    To process the feed and publish alerts, run `cd analytics && uv sync --extra mqtt && uv run rfanalytics run --site ../simulator/sites/dev-site.yaml --mqtt-host 127.0.0.1 -o events.jsonl --rules config/rules.example.yaml --publish-host 127.0.0.1`. See [`analytics/README.md`](analytics/README.md).
    With live nodes instead, rf-analytics runs with the stack on the central server (no flag needed); watch its output with `docker compose logs -f rf-analytics` from the repo root. Set `RF_SITE`, `RF_RULES` and `RF_FRIENDLY` in `central/.env` to the real site files before running it; the example site geometry is a placeholder. See [`central/README.md`](central/README.md#live-analytics-kismet--alerts--mqtt).
 3. **Bring up WBT nodes.** This is a draft until it is validated on hardware. The node agent is not built yet. Steps 3.4–3.5 can be run manually, or capture can be made persistent with the example systemd units in [`node/README.md`](node/README.md).
-   1. Make sure the central stack is running and the central server is on the tailnet as `rf-central`, or reachable through the site's subnet router (see [`node/README.md`](node/README.md#tailscale-headscale-tailnet)).
+   1. Make sure the central stack is running and the nodes can reach the central server on its LAN address (`central_host` in the fleet's Ansible settings; see [`node/README.md`](node/README.md#network-lan-not-the-tailnet)).
    2. **Power order:** power the USB hub **first**, wait about 5 seconds, then power the Pi. This way all radios are present when the Pi enumerates USB devices.
    3. **First boot only:** SSH in, then:
       - run `sudo apt update && sudo apt full-upgrade`
-      - install Tailscale and join with the tagged auth key: `sudo tailscale up --auth-key=<key> --hostname=<node-id>` (use a tagged, pre-authorized key; never commit it)
+      - Tailscale is not needed for capture: the fleet does not put nodes on the tailnet (see [`node/fleet/README.md`](node/fleet/README.md)). If you do join a node for remote access, use a tagged, pre-authorized key and never commit it: `sudo tailscale up --auth-key=<key> --hostname=<node-id>`
       - add the Kismet apt repository for the node's OS release (for example `trixie` on Debian 13 / recent Raspberry Pi OS) and install the capture helpers pinned to the **same release as the central server** (currently `2026-10-R1`). Install `rtl-433` as well: `kismet-capture-rtl433-v2` depends on the `rtl_433` decoder binary. See [`central/README.md`](central/README.md) for working remote-capture commands.
       - add the capture user to the `kismet` group if running helpers without root: `sudo usermod -aG kismet <user>` (new login required)
    4. **Check the radios** using the commands under [Testing and Verification](#testing-and-verification).
-   5. **Start capture** against `rf-central`, using the stand-in node commands in [`central/README.md`](central/README.md). Confirm that each data source shows as running in the Kismet web UI (*Data Sources*).
+   5. **Start capture** against the central server, using the stand-in node commands in [`central/README.md`](central/README.md). Confirm that each data source shows as running in the Kismet web UI (*Data Sources*).
    6. **Shutdown:** run `sudo poweroff` on the Pi, wait for the green LED to stop, then unplug the Pi and the hub.
 
 ### WBT Console (rf-console)
@@ -171,7 +177,7 @@ Focus checks on business rules, event definitions, and contracts with connected 
   | Bluetooth adapter present | `bluetoothctl list` | Two controllers: the onboard one and the UB500. |
   | SDR working | `rtl_test -t` | The device is found and no errors are reported. Press Ctrl+C to stop. |
   | TPMS reception | `rtl_433 -f 315M` near a moving car | TPMS decodes appear. |
-  | Tailnet reachable | `tailscale ping rf-central` | Replies arrive. |
+  | Central reachable | `nc -vz <central address> 3501` (the `CENTRAL_HOST` in `/etc/rf-node/rf-node.env`) | The connection succeeds. |
 
 - **Live end-to-end check (manual):** with nodes streaming, start `rf-analytics` (above) and subscribe to `detection/rf/#`. Within a minute the stats line in `docker compose logs rf-analytics` (repo root) shows `observations` growing and `stale` small; alerts appear on the subscriber when rules fire. To force one, put a nearby access point's MAC on the `watchlist` rule. `wc -l /data/rf-outbox.jsonl` inside the container should return to 0.
 - **Events or interfaces verified:** the observation contract (`rf.observation.v0`); Kismet → `rf-analytics` with per-node RSSI; alerts on `detection/rf/alerts` received from the development broker (2026-11-07). The fusion message format is not yet defined.
@@ -216,7 +222,7 @@ Focus checks on business rules, event definitions, and contracts with connected 
 | `rf-console` web page and API | Operators | HTTP on `CONSOLE_PORT` (8080): `/api/state`, `/api/sites/*`, `/api/site/nodes`, `/api/calibration/*`, `/api/walls/*`, `/api/login`; reads Kismet REST and the packet log (read-only) | Implemented, with sign-in (operator/admin). Plain HTTP, so keep it on the LAN or tailnet only. |
 
 **Dependencies:**
-- **Tailscale tailnet:** connects nodes and the central server, directly or through the deployment's subnet router when the central server is not on the tailnet.
+- **Network:** nodes reach the central server on its LAN address (`central_host`, see [`node/README.md`](node/README.md#network-lan-not-the-tailnet)), not over the tailnet. Operators reach the console on the LAN or over the tailnet.
 - **Docker** on the central server.
 - **Kismet `2026-10-R1`** on both nodes and server.
 - **Fusion service MQTT broker:** the central broker (repo-root `compose.yaml`) stands in for it until it is available.
@@ -227,6 +233,7 @@ Focus checks on business rules, event definitions, and contracts with connected 
 
 | Date | Change |
 |---|---|
+| 2026-11-21 | Central is the central server at `172.22.41.10` (Ubuntu 22.04, x86_64; checkout at `/srv/sensor-fusion`, started with `./setup-central.sh`), replacing the retired Mac central at `172.20.100.150`. The fleet's `central_host`, `broker_address` and inventory point at `172.22.41.10`; the docs follow. |
 | 2026-11-11 | Central moved from sf-dev to the deployment's JOC server, which is reached through the site's subnet router instead of joining the tailnet. Nodes accept subnet routes; docs cover the setup, the Headscale rule, the real node tag (`tag:sensor-fusion`) and moving console data between hosts. |
 | 2026-11-08 | `rf-dfviz` became the **WBT Console** (`console/`, compose service `rf-console`, profile `console`): one workspace per building (new, switch, rename, export, clear history, wipe, retention), node placement in the page, Live/Setup modes, and sign-in with operator and admin roles. Existing calibration and walls were moved into the first site. |
 | 2026-11-08 | Bluetooth capture fixed: UB500 dongles stayed "discovering" after a helper exited, so their sources delivered nothing after Kismet restarts. `rf-bt-capture` (systemd unit) clears discovery before every start, reconnects through systemd (`--disable-retry`), and picks the adapter by address instead of `hci` index; `rf-bt-doctor` diagnoses and repairs; the direction-finding page warns about silent or stopped capture sources. Verified: all four nodes recover within 10 s of a Kismet restart. |

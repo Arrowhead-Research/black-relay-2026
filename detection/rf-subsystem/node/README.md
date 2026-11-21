@@ -39,7 +39,7 @@ Tests for the adapter selection and `btmgmt info` parsing run anywhere with bash
 
 ## Network: LAN, not the tailnet
 
-Nodes are **not** on the Headscale tailnet. They connect straight to the central server on the LAN (`CENTRAL_HOST`, default `172.20.100.150`): Kismet remote capture on TCP 3501, console heartbeats on 8080 and the central MQTT broker on 8883 (TLS, as `reg.bulexa.com`), so the RF stack's `BIND_ADDR` must be that address and the nodes' network must reach it. wbt-1 … wbt-4 were joined to the tailnet on 2026-11-08 (`node-wbt-1` …); `fleet/fleet.sh provision <node> -e leave_tailnet=true` takes one off it and points it at the LAN address.
+Nodes are **not** on the Headscale tailnet. They connect straight to the central server on the LAN (`CENTRAL_HOST`, which the fleet sets to `central_host`: `172.22.41.10`): Kismet remote capture on TCP 3501, console heartbeats on 8080 and the central MQTT broker on 8883 (TLS, as `reg.bulexa.com`), so the RF stack must publish on that address (`BIND_ADDRESS` in the root `.env`, or `BIND_ADDR` in `central/.env`) and the nodes' network must reach it. wbt-1 … wbt-4 were joined to the tailnet on 2026-11-08 (`node-wbt-1` …); `fleet/fleet.sh provision <node> -e leave_tailnet=true` takes one off it and points it at the LAN address.
 
 ## Node agent (rf-node-agent)
 

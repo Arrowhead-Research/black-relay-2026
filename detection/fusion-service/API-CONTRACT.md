@@ -194,8 +194,10 @@ API queries return 503 when storage is unavailable.
 |---|---|---|
 | 400 | `cursor_ahead` | Cursor exceeds the database high watermark |
 | 401 | `unauthorized` | Missing or incorrect bearer token |
+| 404 | `not_found` | Snapshot route: no such event, image or kit address |
 | 410 | `cursor_expired` | Retention removed history; includes `resume_after` |
 | 422 | `invalid_request` | Invalid query type, enum or limit |
+| 501 | `not_configured` | Snapshot route: `camera_snapshot_password_env` is not set |
 | 503 | `storage_unavailable` | Database cannot serve the query |
 
 Errors use `{"error":{"code":"..."}}` with optional explanatory fields. A 422 carries only the

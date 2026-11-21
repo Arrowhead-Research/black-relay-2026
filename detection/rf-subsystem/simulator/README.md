@@ -1,6 +1,6 @@
 # rfsim: RF Observation Simulator
 
-`rfsim` generates realistic multi-node RF observations from scripted scenarios, so `rf-analytics` can be developed and tested without WBT node hardware. Its output follows the same normalized observation format that the Kismet ingest adapter will produce ([`../schemas/observation.v0.schema.json`](../schemas/observation.v0.schema.json)). For every run it also writes a **ground truth** file, which records which actor owned each emitter, where that actor was, and for how long. Analytics output can be scored against it.
+`rfsim` generates realistic multi-node RF observations from scripted scenarios, so `rf-analytics` can be developed and tested without WBT node hardware. Its output follows the same normalized observation format that the Kismet ingest adapter (`rfanalytics kismet`) produces ([`../schemas/observation.v0.schema.json`](../schemas/observation.v0.schema.json)). For every run it also writes a **ground truth** file, which records which actor owned each emitter, where that actor was, and for how long. Analytics output can be scored against it.
 
 ## What it models
 
@@ -30,7 +30,8 @@ uv sync                     # add --extra mqtt for MQTT publishing
 uv run rfsim summary scenarios/loiterer.yaml
 uv run rfsim run scenarios/loiterer.yaml -o out/loiterer.jsonl -t out/loiterer.truth.json
 
-# Live feed for analytics development: stream to the central stack's broker at 60x speed
+# Live feed for analytics development: stream to a broker on this machine at 60x speed
+# (the central broker needs a login: add --mqtt-user and --mqtt-password-env)
 uv run rfsim run scenarios/repeat-vehicle-co-travelers.yaml \
     --start-now --realtime --speed 60 --mqtt-host 127.0.0.1 -o /dev/null
 ```
@@ -43,6 +44,7 @@ uv run rfsim run scenarios/repeat-vehicle-co-travelers.yaml \
 | `--start-now` | Rebases timestamps so the scenario starts at the current time. |
 | `--realtime --speed X` | Paces output to the simulated timestamps, sped up by a factor of X. |
 | `--mqtt-host / --mqtt-port / --mqtt-topic` | Also publishes each observation (QoS 1). The default topic is `detection/rf/sim/observations`. |
+| `--mqtt-user / --mqtt-password-env` | Login for the broker, and the name of the environment variable holding its password. |
 
 ## Scenarios
 

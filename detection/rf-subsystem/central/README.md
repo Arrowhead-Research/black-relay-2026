@@ -17,10 +17,12 @@ The analytics database is not part of the stack yet.
 
 ## Start
 
-On the central server, from the repo root, after `detection/central/make-env.sh` has written the root `.env` (`setup-central.sh` does both):
+On the central server, from the repo root, run `setup-central.sh` with the server's LAN address (`172.22.41.10` on the current server). It sets up the whole central project (registry, broker, fusion, these RF services and the camera relay), runs `detection/central/make-env.sh` (which writes the root `.env`) and then `docker compose up -d --wait --build`. Running it again updates the stack and keeps existing logins, passwords and data:
 
 ```sh
-docker compose up -d
+./setup-central.sh 172.22.41.10     # first time, and after an update
+docker compose ps                   # later, from the repo root: status, logs, restarts
+docker compose up -d                # start the stack again after a stop
 ```
 
 Nothing else to prepare: the passwords are generated, and `central/.env` is optional (see [`.env.example`](.env.example)). Kismet's UI is at `http://127.0.0.1:2501` on the host (SSH tunnel; `KISMET_UI_BIND` publishes it elsewhere), the console at `http://<BIND_ADDR>:8080`.
@@ -54,7 +56,7 @@ docker compose exec rf-console cat /run/rf-secrets/console-admin-password
 
 Console sign-in is always on in the stack. To choose the console passwords yourself, set them in `central/.env` and run `docker compose up -d rf-console`, or use the optional prompt `central/set-console-passwords.sh` (it needs `central/.env` to exist).
 
-Kismet seeds its login only when `kismet-home` is first created. To change the Kismet login later, change it in Kismet's UI and set the same value as `KISMET_ADMIN_PASSWORD` in `central/.env`, then `docker compose up -d`. To wipe everything and start again, run `docker compose down -v` in this directory; that deletes every RF volume (logs, console sites, passwords).
+Kismet's login is written from `KISMET_ADMIN_PASSWORD` (or the generated file) on every start. To change it, set `KISMET_ADMIN_PASSWORD` in `central/.env` and run `docker compose up -d`; a password changed in Kismet's UI is replaced at the next start. To wipe everything and start again, run `docker compose down -v` in this directory; that deletes every RF volume (logs, console sites, passwords).
 
 ## Shared central host
 
@@ -64,9 +66,9 @@ On the central server the RF services come from the repo-root project, so the ho
 BIND_ADDR=<tailnet address>    # 0.0.0.0 only behind a subnet router (see Security notes)
 ```
 
-3501 and 8080 bind to `BIND_ADDR`; Kismet's 2501 stays on loopback unless `KISMET_UI_BIND` is set. Claim published ports in the host's `PORTS.md` first. Nodes point `CENTRAL_HOST` in `/etc/rf-node/rf-node.env` at the host's tailnet address.
+3501 and 8080 bind to `BIND_ADDR`; Kismet's 2501 stays on loopback unless `KISMET_UI_BIND` is set. Claim published ports in the host's `PORTS.md` first. Nodes point `CENTRAL_HOST` in `/etc/rf-node/rf-node.env` at the host's address: its tailnet address if the node is on the tailnet, otherwise the LAN address the fleet sets (`central_host`).
 
-**Host behind a site's subnet router** (not on the tailnet itself): set `BIND_ADDR` to the host's LAN address (or `0.0.0.0`). Nodes reach the host through the router: they need `tailscale set --accept-routes` and a Headscale rule for ports 3501 and 8080 on the host's network, and `CENTRAL_HOST` is the host's LAN address (see [`../node/README.md`](../node/README.md#tailscale-headscale-tailnet)). When copying the checkout, carry the git-ignored `.env` files over separately: the repo-root `.env` (broker logins) and `central/.env` (it holds the Kismet and console passwords you set). The new host's rf-bootstrap generates its own passwords unless `central/.env` sets them. For a new building, leave out the git-ignored `console/site/` and start the site fresh. To move the same deployment to another host, also carry over `console/site/layout.yaml` and the console's data (sites, calibration, areas, marks, history, sign-in sessions). Stop `rf-console` on both hosts, then:
+**Host behind a site's subnet router** (not on the tailnet itself): set `BIND_ADDR` to the host's LAN address (or `0.0.0.0`). Nodes reach the host through the router: they need `tailscale set --accept-routes` and a Headscale rule for ports 3501 and 8080 on the host's network, and `CENTRAL_HOST` is the host's LAN address (see [`../node/README.md`](../node/README.md#network-lan-not-the-tailnet)). When copying the checkout, carry the git-ignored `.env` files over separately: the repo-root `.env` (broker logins) and `central/.env` (it holds the Kismet and console passwords you set). The new host's rf-bootstrap generates its own passwords unless `central/.env` sets them. For a new building, leave out the git-ignored `console/site/` and start the site fresh. To move the same deployment to another host, also carry over `console/site/layout.yaml` and the console's data (sites, calibration, areas, marks, history, sign-in sessions). Stop `rf-console` on both hosts, then:
 
 ```sh
 # old host
@@ -121,7 +123,7 @@ sudo apt install \
 
 **Remote capture (validated on Kismet 2026-10-R1, legacy TCP on port 3501):**
 
-Replace `<central-ip>` with the central host (for example `rf-central` over MagicDNS/Tailscale, or a LAN IP that the node can reach). Replace interfaces and `name=` values with the node's actual devices/ID. **Do not capture on the interface used for backhaul/SSH** (for example, do not put an onboard Wi-Fi interface into monitor mode if it carries your connection).
+Replace `<central-ip>` with the central host (its LAN address, which the node can reach; or `rf-central` over MagicDNS if the host is on the tailnet). Replace interfaces and `name=` values with the node's actual devices/ID. **Do not capture on the interface used for backhaul/SSH** (for example, do not put an onboard Wi-Fi interface into monitor mode if it carries your connection).
 
 ```sh
 # Wi-Fi (external adapter; monitor mode is handled by the helper)
@@ -141,7 +143,7 @@ WebSocket remote capture on port 2501 (with `--user`/`--password` or `--apikey`)
 
 ## Security notes
 
-- `BIND_ADDR` sets where 3501 (nodes) and 8080 (console) are published. Use `127.0.0.1` or the host's Tailscale IP, or `0.0.0.0` only behind a subnet router. Kismet's 2501 stays on `127.0.0.1` (`KISMET_UI_BIND` to change). Never expose any of them on a public interface.
+- `BIND_ADDR` sets where 3501 (nodes) and 8080 (console) are published. Use `127.0.0.1`, the host's Tailscale IP or its LAN address (what the nodes use), or `0.0.0.0` only behind a subnet router. Kismet's 2501 stays on `127.0.0.1` (`KISMET_UI_BIND` to change). Never expose any of them on a public interface.
 - Passwords are generated into the `rf-secrets` volume. `.env` files are git-ignored. Never commit real credentials.
 
 ## Kismet version upgrades

@@ -1,16 +1,20 @@
 # Central broker
 
 One MQTT broker on the central node that every detection subsystem publishes to and the fusion
-service reads from. This directory will hold its configuration: a Compose file, the mosquitto
-configuration, an access-control template, a credentials script and this README. Nothing else
-runs here; the broker carries events and status, never video.
+service reads from. This directory holds its configuration: the mosquitto configuration, an
+access-control template, the entrypoint that builds the password and ACL files, a credentials
+script for running it alone, and a standalone `compose.yaml`. Nothing else runs here; the broker
+carries events and status, never video.
 
-Status: the broker files exist and start under Compose; nothing is deployed yet. See
-[RUNBOOK.md](RUNBOOK.md) for the step-by-step on the central node, the physical move and the RF move.
+Status: deployed. On the central server (172.22.41.10, `/srv/sensor-fusion`) the broker runs as the
+`broker` service of the repo-root `compose.yaml`, with logins from the repo-root `.env`
+(`detection/central/make-env.sh`, run by `setup-central.sh`), plain MQTT on 1883 and TLS on 8883.
+Physical, RF and camera all publish to it and fusion has one broker entry. The sections below keep
+the reasoning and the migration plan; [RUNBOOK.md](RUNBOOK.md) is the operating guide.
 
 ## 1. Rationale
 
-Today there are two brokers and the physical subsystem cannot reach either from where its
+This is why the broker exists. Before it, there were two brokers and the physical subsystem cannot reach either from where its
 design puts it.
 
 - The camera relay bundle ships its own mosquitto (`camera-relay-service`), authenticated with
@@ -45,7 +49,7 @@ through fusion's code review.
 
 ## 2. Plan
 
-Five steps, each shippable and reversible on its own. Fusion's multi-broker configuration is the
+The migration steps, all done except the clean-up of leftover files noted in the runbook. Five steps, each shippable and reversible on its own. Fusion's multi-broker configuration is the
 migration tool: it can subscribe to the old and new brokers at the same time, and its
 deduplication is keyed per broker namespace, so nothing is counted twice.
 
@@ -72,13 +76,13 @@ change their own credential and ACL line by pull request here.
 
 | File | Purpose | Source |
 |---|---|---|
-| `compose.yaml` | One `mosquitto` service, hardened as the camera relay's is, publishing the VLAN listener | `camera-relay-service/compose.yaml`, `mosquitto` service |
-| `mosquitto.conf` | `allow_anonymous false`, password file, ACL, persistence, queue and message size limits | `camera-relay-service/mosquitto/mosquitto.conf` |
-| `aclfile` | Per-publisher write on its own prefix; fusion read on `detection/#` | `camera-relay-service/mosquitto/aclfile`, extended |
-| `setup-credentials.sh` | Writes `.env` with one random password per client | `camera-relay-service/setup-credentials.sh` |
-| `entrypoint.sh` | Builds the password and ACL files from `.env` inside the container at each start | `camera-relay-service/mosquitto/entrypoint.sh` |
-| `.env.example` | Credential names, bind address, port | new |
-| `PORTS.md` | The one published port, claimed as the RF overlay asks | new |
+| `compose.yaml` | One `mosquitto` service for running the broker alone, hardened as the camera relay's is. On the central server the root `compose.yaml` defines the broker instead and mounts the files below | `camera-relay-service/compose.yaml`, `mosquitto` service |
+| `mosquitto.conf` | `allow_anonymous false`, password file, ACL, persistence, queue and message size limits, and `include_dir` for the TLS listener | `camera-relay-service/mosquitto/mosquitto.conf` |
+| `aclfile` | Per-publisher write on its own prefix; fusion read on `detection/#`; optional rf-analytics and relay API blocks | `camera-relay-service/mosquitto/aclfile`, extended |
+| `setup-credentials.sh` | Writes `.env` here with one random password per client, for the standalone compose. The central server uses `detection/central/make-env.sh` | `camera-relay-service/setup-credentials.sh` |
+| `entrypoint.sh` | Builds the password and ACL files from the environment at each start, adds the per-node logins and the 8883 TLS listener when a certificate is mounted at `/tls` | `camera-relay-service/mosquitto/entrypoint.sh` |
+| `.env.example` | Credential names, bind address, port (standalone) | new |
+| `PORTS.md` | The published ports, claimed as the RF overlay asks | new |
 
 ACL shape:
 
@@ -93,16 +97,28 @@ user rf-console
 topic write detection/rf/#
 topic read detection/rf/sim/#      # simulator observations for rf-analytics
 
+user rf-analytics              # central server only
+topic write detection/rf/#
+
 user relay                     # all camera kits share one login: their Frigate proxy secret derives from it
 topic write detection/camera/#
 topic read detection/rf/cues/camera
+
+user relay-api                 # central server only: the camera relay API reads what it stores
+topic read detection/camera/detections
+topic read detection/camera/cue-acks
+topic read detection/camera/status/nodes
 ```
+
+Per-node logins (`rf-node-<node>`, `cam-node-<node>`) are added by `entrypoint.sh`; see below.
 
 Client ids stay as each subsystem already uses them: `fusion-*`, `physical-subsystem`,
 `rf-console-live`, `rf-console-out`, `rfanalytics-out`, and the camera bridges' node ids. They
 must be unique on the broker; the fusion configuration already enforces this for its own.
 
 ## 4. Changes per system
+
+The changes each subsystem needed. They have been made; the code references are the record.
 
 ### fusion-service
 
@@ -114,7 +130,7 @@ Configuration only.
   per source.
 - `.env.example` and `compose.yaml`: the new credential variables.
 - `compose.fusion.yaml`: no longer needed once `rf-mqtt` is gone; fusion reaches the broker by
-  address.
+  address. The file is still in `fusion-service/` but the central server does not use it.
 - `FUSION-ARCHITECTURE.md` and the README's deployment facts: one broker.
 
 ### physical-subsystem
@@ -177,11 +193,8 @@ the relay API reads `RELAY_BROKER_HOST` and `RELAY_BROKER_PORT`.
 
 ## 5. Open questions
 
-- TLS on the VLAN listener from day one, or password-only first with TLS as a follow-up. Both
-  physical and fusion support TLS now; RF would gain it with the same change that adds
-  passwords. The camera relay's broker is password-only today.
-- Whether the camera nodes' `readwrite detection/#` ACL line should narrow to write on
-  `detection/camera/#` plus read on `detection/rf/cues/camera`, now that other subsystems share
-  the broker.
-- Where the broker's persistence volume and logs live on the central node, and who rotates the
-  credentials.
+- Settled: TLS is on 8883 beside the password-only 1883 listener, with the Let's Encrypt
+  certificate. The camera nodes' ACL is narrowed to write on `detection/camera/#` plus read on
+  `detection/rf/cues/camera`.
+- Where the broker's persistence volume (`broker-data` in the root project) is backed up, and who
+  rotates the credentials.

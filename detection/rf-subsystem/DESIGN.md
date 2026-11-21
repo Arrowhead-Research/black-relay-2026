@@ -5,10 +5,12 @@
 | **Subsystem** | `rf-subsystem` |
 | **Owner** | RF Subsystem Lead |
 | **Status** | Draft. Open for team review. |
-| **Last updated** | 2026-11-02 |
-| **Related documents** | [`../README.md`](../README.md), [`../docs/BOM.md`](../docs/BOM.md), [`README.md`](README.md) |
+| **Last updated** | 2026-11-21 |
+| **Related documents** | [`../README.md`](../README.md), [`../../BOM.md`](../../BOM.md), [`README.md`](README.md) |
 
 > **Note on certainty.** This document separates three kinds of statement. **Decisions** are settled. **Proposals** are the recommended approach and still need team review. **Open questions** are tracked in [Section 12](#12-open-questions). Anything that depends on another team's standard, such as the fusion message format or the TAK configuration format, is marked **TBD** and should not be built against until that standard is published.
+
+> **Deployment note (2026-11-21).** Several sections below describe a tailnet-only design (5.3 NFR-05, 6.5, 7.3.9, 10). As deployed, nodes reach the central server on its LAN address (`172.22.41.10`, the fleet's `central_host`), and the WBT Console is served over plain HTTP on that LAN. See [`README.md`](README.md#interfaces-and-dependencies) for what is in use today.
 
 ---
 
@@ -194,7 +196,8 @@ placement:
 - Tailscale ACLs allow `tag:rf-node` to reach only the Kismet remote-capture port and the agent registration endpoint on `tag:rf-central`.
 - If the server moves to another host, only that host's Tailscale hostname needs to change. Nodes do not need reconfiguring.
 - **Fallback:** `node.yaml` can override the server hostname for testing off the tailnet.
-- **As deployed (2026-11-11):** the central server is a VM behind the deployment's subnet router and does not join the tailnet, so nodes use its LAN address through the router (`tailscale set --accept-routes` plus a Headscale rule). Moving the server means changing `CENTRAL_HOST` on every node. See [`node/README.md`](node/README.md#tailscale-headscale-tailnet).
+- **As deployed (2026-11-11):** the central server is a VM behind the deployment's subnet router and does not join the tailnet, so nodes use its LAN address through the router (`tailscale set --accept-routes` plus a Headscale rule). Moving the server means changing `CENTRAL_HOST` on every node. See [`node/README.md`](node/README.md#network-lan-not-the-tailnet).
+- **As deployed (2026-11-21):** the central server is `172.22.41.10` (it replaced the retired Mac central at `172.20.100.150`). The fleet's `central_host` and `broker_address` in `node/fleet/ansible/group_vars/fleet_nodes.yml` hold that address, and the Ansible provisioning sets `CENTRAL_HOST` on each node from it.
 
 ### 6.6 Self-registration and automatic exclusion (NODE-05)
 
@@ -221,7 +224,8 @@ The central service is deployed as a Docker Compose stack on the safehouse centr
 |---|---|---|
 | `kismet-server` | Kismet (pinned release) | Receives remote captures, tracks devices, provides the REST and WebSocket APIs. |
 | `rf-analytics` | Built in this repository | Identity, exclusion, localization, pattern-of-life, co-traveler, alerting, and the config UI and API. |
-| `rf-db` | PostgreSQL (TimescaleDB is optional) or SQLite | Stores observations, visits, and configuration. See [Section 12](#12-open-questions). |
+| `rf-console` | Built in this repository (`console/`) | WBT Console: live map, sites, calibration, alerts. Publishes positions, alerts and node status to the central broker. |
+| `rf-db` (not built yet) | PostgreSQL (TimescaleDB is optional) or SQLite | Would store observations, visits, and configuration. Until then analytics keeps state in memory and files. See [Section 12](#12-open-questions). |
 
 - Tailscale runs on the host, or as a sidecar container. Containers bind only to the tailnet interface or to localhost.
 - Configuration lives in a mounted volume. Secrets (Kismet API key, MQTT credentials) come from an `.env` file that is excluded from git.
@@ -229,7 +233,7 @@ The central service is deployed as a Docker Compose stack on the safehouse centr
 
 ### 7.2 Kismet server
 
-- Remote capture is enabled. Recent Kismet releases accept remote sources over WebSockets on the main web port (2501). Older releases use the legacy TCP remote-capture port (3501). **Confirm which applies to the pinned release.**
+- Remote capture is enabled. Recent Kismet releases accept remote sources over WebSockets on the main web port (2501). Older releases use the legacy TCP remote-capture port (3501). The pinned release (`2026-10-R1`) uses the legacy TCP listener, validated for the nodes; WebSocket capture is not validated (open question 5).
 - The analytics service reads through an API key with read-only permissions.
 - Kismet's own log (`.kismet` SQLite) is kept as the raw record so data can be reprocessed if the analytics logic changes. Rotate it daily.
 
@@ -237,7 +241,7 @@ The central service is deployed as a Docker Compose stack on the safehouse centr
 
 #### 7.3.1 Ingest (CEN-01)
 
-- Subscribe to Kismet's event bus (`/eventbus/events.ws`) for new and updated devices, and poll the device-view APIs for RSSI per data source.
+- Subscribe to Kismet's event bus (`/eventbus/events.ws`) for new and updated devices, and poll the device-view APIs for RSSI per data source. *As built:* `rfanalytics live` polls the REST API every 5 s (see [`analytics/README.md`](analytics/README.md)); the event bus is not used.
 - Normalize each record into an **observation**: `{emitter_id, emitter_type, node_id, timestamp, rssi, channel/frequency, attributes}`.
 - Write observations in batches. Apply friendly exclusion **before** storage so friendly data is never kept.
 
@@ -360,7 +364,7 @@ Every derived statistic is stored together with the sample size it was computed 
 | Interface | From → To | Transport | Status |
 |---|---|---|---|
 | Remote capture | WBT node → `kismet-server` | Kismet remote-capture protocol over Tailscale | Defined by Kismet |
-| Node registration and heartbeat | `rf-node-agent` → `rf-analytics` | HTTPS/JSON over Tailscale | Proposed below |
+| Node registration and heartbeat | `rf-node-agent` → WBT Console | HTTP POST to `/api/nodes/heartbeat` every 30 s (see [`node/README.md`](node/README.md#node-agent-rf-node-agent)) | Heartbeat implemented; registration (9.2) proposed, not built |
 | Device data | `kismet-server` → `rf-analytics` | Kismet REST and event-bus WebSocket | Defined by Kismet |
 | Alerts, cues, status | `rf-analytics` → fusion MQTT | MQTT, QoS 1 | **Envelope TBD with fusion team** |
 | Alert configuration | TAK → `rf-analytics` | **TBD** | **TBD with TAK team** |

@@ -5,7 +5,7 @@ laptop or a server. It assumes nothing else about the host. Design: `../camera-s
 
 | Service | Does | Listens on (host) |
 |---|---|---|
-| `api` | The one way in for users: node status, events, and each node's Frigate | TCP 8080 |
+| `api` | The one way in for users: node status, events, and each node's Frigate | TCP 8080 (8091 on the BlackRelay central server) |
 | `netguard` | Holds MediaMTX's network and its published ports, and limits what it can reach | TCP 8554 (RTSP), TCP 8889 and UDP 8189 (WebRTC) |
 | `mediamtx` | One video endpoint for all cameras. Pulls a node's stream only while someone watches | Through `netguard` |
 | `chrony` | NTP for the site, from this host's clock, without touching it | UDP 123 |
@@ -48,7 +48,7 @@ Pi, a laptop and a server.
    - `RELAY_CENTRAL_IP`, this host's LAN IP, which no node may then claim.
    - `RELAY_WEBRTC_HOSTS`, the addresses browsers reach this host on, for example
      `192.168.8.10,100.101.102.103`. Without them, WebRTC signalling answers but no media flows.
-4. Start it. Compose builds the API and chrony images on this host, for its own architecture.
+4. Start it. Compose builds the API, netguard and chrony images on this host, for its own architecture.
 
    ```bash
    docker compose up -d --build
@@ -58,17 +58,17 @@ Pi, a laptop and a server.
    not an exact revision, because Alpine drops old revisions and an exact pin would stop a fresh build in the
    field. So two builds a while apart can differ in the package's `-rN` revision.
 
-5. In each node's portal, set the broker address to this host's LAN IP, the broker login to
-   `RELAY_BROKER_USER` and `RELAY_BROKER_PASSWORD` from `.env` (the default, unless you changed it),
+5. In each node's portal (kits built from the SD image), set the broker address to this host's LAN IP, the
+   broker login to `RELAY_BROKER_USER` and `RELAY_BROKER_PASSWORD` from `.env` (the default, unless you changed it),
    and leave the time server on its default, which follows the broker address. A `node_id` must be at
    most 63 lowercase letters, digits and hyphens, and not `all`. The portal refuses any other at save,
    but a node saved before that rule keeps its old value until it is saved again, and the relay
-   refuses that value.
+   refuses that value. Kits provisioned by the fleet tool get the same values from its inventory instead.
 6. Check it. A node appears within a status interval, about 30 s.
 
    ```bash
    . ./.env
-   curl -H "Authorization: Bearer $RELAY_API_TOKEN" http://localhost:8080/nodes
+   curl -H "Authorization: Bearer $RELAY_API_TOKEN" http://localhost:${RELAY_API_PORT:-8080}/nodes
    ```
 
 To use the shared compute node's broker instead, empty `COMPOSE_PROFILES` in `.env`, and set
@@ -82,18 +82,34 @@ a persistent session, or events published during an API restart are not replayed
 There the relay is part of the root project: the repo-root `compose.yaml` includes this file, and
 `./setup-central.sh <address>` (or `detection/central/make-env.sh` then `docker compose up -d` at the
 repo root) starts it with everything else. Nothing in this directory is set up by hand, and its own
-`.env` is not read:
+`.env` is not read. The current central server (its address is in `DEPLOY.md`) runs Ubuntu 22.04 on amd64, with the
+checkout at `/srv/sensor-fusion`. Run the commands in this section there, from the repo root:
 
 - `make-env.sh` writes the `RELAY_*` settings into the root `.env`. The kit login is the central broker's
   `BROKER_CAMERA_USER` / `BROKER_CAMERA_PASSWORD` (`RELAY_BROKER_USER` and `RELAY_BROKER_PASSWORD` refer to
   them), and the API reads the camera topics as its own broker login, `relay-api`. Addresses follow
-  `BIND_ADDRESS`, `RELAY_SITE_SUBNET` defaults to its `/24`, the viewer login is `viewer` with a random
-  `RELAY_READ_PASSWORD`, and the API is on **8091** (the WBT Console has 8080). Edit the root `.env` to
-  change any of them.
-- The `broker` profile stays off: nodes and the API use the central broker on 1883.
+  `BIND_ADDRESS`, and every relay port binds to it, not to the wildcard. `RELAY_SITE_SUBNET` defaults to the
+  `/24` of `BIND_ADDRESS`, the server's own LAN, so every camera node must sit inside it.
+  The viewer login is `viewer`, and the API is on **8091** (the WBT Console has 8080). Edit the root `.env`
+  to change any of them.
+- The logins are random, not the fleet default, which applies only to this directory's standalone `.env`. `BROKER_CAMERA_PASSWORD` (kits) and `RELAY_READ_PASSWORD` (viewers) are random 16-character
+  values, unless `BROKER_CAMERA_PASSWORD` was set when `make-env.sh` first ran. Read them from the root `.env`
+  when a kit or a viewer needs one.
+- The `broker` profile stays off. Nodes and the API use the root compose's `broker`: 1883 (login) and 8883 (TLS),
+  both on `BIND_ADDRESS`.
 - Fleet camera nodes (`detection/rf-subsystem/node/fleet`) each log in as `cam-node-<node>` and hold the
-  kit login for video. `./change-passwords.sh` is for this directory's own `.env` only; on the central
-  server, change `BROKER_CAMERA_PASSWORD` in the root `.env` and re-provision the camera nodes.
+  kit login for video. `./change-passwords.sh` is for this directory's own `.env` only. To change the kit
+  login, set `BROKER_CAMERA_PASSWORD` in the root `.env`, run `docker compose up -d` at the repo root, and
+  re-provision the camera nodes with `./fleet.sh provision camera`, run from `detection/rf-subsystem/node/fleet`.
+  To change the viewer login, set
+  `RELAY_READ_PASSWORD` in the root `.env` and run `docker compose up -d` there too.
+
+Checks on this server use the root `.env`, where the API is on `RELAY_API_PORT` (8091):
+
+```bash
+. ./.env
+curl -s -H "Authorization: Bearer $RELAY_API_TOKEN" http://localhost:$RELAY_API_PORT/nodes
+```
 
 **In v0 the relay must run on the broker's host for video and the Frigate proxy to work.** The node's firewall admits
 only the broker address, and has no other setting for it. With an external broker on another host, events and heartbeats
@@ -232,7 +248,9 @@ it has internet, its usual time service does that. A wrong clock here shows up a
 
 ## Changing the broker or viewer password
 
-Both start as the fleet default (see Install). To change one, run this on this host:
+Both start as the fleet default (see Install). To change one, run this on this host. On the BlackRelay central
+server, change the root `.env` instead, as "On the BlackRelay central server" above says: this script edits only
+this directory's own `.env`.
 
 ```bash
 ./change-passwords.sh broker    # the login every kit holds
@@ -273,7 +291,7 @@ On the site's WiFi, these travel in the clear. Anyone who can capture that traff
 - **MQTT:** the broker login, and every event and heartbeat.
 - **Node RTSP:** the video pulled from a node, and its login, sent as Basic auth. That login is the broker's.
   Anyone who captures it can derive the Frigate proxy secret.
-- **Reader traffic on the LAN:** RTSP on 8554, WebRTC signalling on 8889 and the API on 8080, with their
+- **Reader traffic on the LAN:** RTSP on 8554, WebRTC signalling on 8889 and the API on 8080 (8091 on the BlackRelay central server), with their
   logins, have no TLS either. Over Tailscale they are inside its tunnel.
 
 Frigate traffic is TLS, with a self-signed certificate the API does not verify, as it has nothing to
