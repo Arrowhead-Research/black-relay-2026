@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
-"""rf-node-agent: WBT node health heartbeats to the WBT Console.
+"""rf-node-agent: WBT node health heartbeats to the WBT Console and the central broker.
 
 Every AGENT_INTERVAL_S (default 30) the agent POSTs the node's health to
-http://CENTRAL_HOST:CONSOLE_PORT/api/nodes/heartbeat (over the tailnet):
+http://CENTRAL_HOST:CONSOLE_PORT/api/nodes/heartbeat:
 temperature, throttling/undervoltage (vcgencmd), uptime, load, memory, disk,
-the capture units (kismet-cap-wifi/bt/tpms, tailscaled: state and restart
+the capture units (kismet-cap-wifi/bt/tpms, tailscaled where installed: state and restart
 count), whether the capture adapters are present (Wi-Fi interface,
-Bluetooth adapter, RTL-SDR), and the node's tailnet address.
+Bluetooth adapter, RTL-SDR), and the node's tailnet address if it has one.
+
+With MQTT_HOST set it also publishes the same heartbeat, retained, to the
+central MQTT broker as this node's own login (MQTT_USER/MQTT_PASSWORD; TLS
+unless MQTT_TLS=0, checked against MQTT_CA if set, else the system CAs): <MQTT_PREFIX>/<node>/health, plus <MQTT_PREFIX>/<node>/online
+("1" while connected; the broker sets "0" when the node drops off). MQTT_PREFIX
+defaults to detection/rf/nodes. Needs python3-paho-mqtt.
 
 The reply can ask the agent to restart one of the capture units (queued by an
 admin in the console); only those three units can be restarted, and the
@@ -26,7 +32,8 @@ restart). TPMS is not watched: tire sensors can be silent for hours.
 Configuration: /etc/rf-node/rf-node.env (systemd EnvironmentFile): CENTRAL_HOST,
 NODE_NAME, WIFI_IFACE, BT_ADDR, and optionally CONSOLE_PORT (8080),
 AGENT_INTERVAL_S and NODE_TOKEN (sent as X-Node-Token when the console
-requires it). Standard library only; runs as root (systemctl, vcgencmd).
+requires it), MQTT_* above. Standard library (plus paho-mqtt for the
+broker); runs as root (systemctl, vcgencmd).
 """
 
 from __future__ import annotations
@@ -44,6 +51,7 @@ from pathlib import Path
 
 VERSION = "2"
 UNITS = ("kismet-cap-wifi", "kismet-cap-bt", "kismet-cap-tpms", "tailscaled")
+OPTIONAL_UNITS = ("tailscaled",)   # reported only where installed: fleet nodes are not on the tailnet
 RESTARTABLE = ("kismet-cap-wifi", "kismet-cap-bt", "kismet-cap-tpms")
 RTLSDR_IDS = {("0bda", "2838"), ("0bda", "2832")}
 WATCHED = ("kismet-cap-wifi", "kismet-cap-bt")
@@ -148,6 +156,10 @@ def unit_state(unit: str) -> dict:
             "restarts": int(kv["NRestarts"]) if kv.get("NRestarts", "").isdigit() else None}
 
 
+def unit_installed(unit: str) -> bool:
+    return run(["systemctl", "show", unit, "-p", "LoadState", "--value"]) not in ("", "not-found")
+
+
 def usb_ids() -> set[tuple[str, str]]:
     ids = set()
     for d in Path("/sys/bus/usb/devices").glob("*"):
@@ -186,7 +198,7 @@ def collect(env: dict, actions: list[dict], watchdog_status: dict | None = None)
         "load": [round(x, 2) for x in os.getloadavg()],
         "mem_free_pct": round(100 * mem["MemAvailable"] / mem["MemTotal"], 1) if mem.get("MemTotal") else None,
         "disk_free_pct": round(100 * disk.free / disk.total, 1),
-        "units": {u: unit_state(u) for u in UNITS},
+        "units": {u: unit_state(u) for u in UNITS if u not in OPTIONAL_UNITS or unit_installed(u)},
         "adapters": {
             "wifi": Path(f"/sys/class/net/{wifi}").exists(),
             "bt": (bt_addr in bt_addrs or "present" in bt_addrs) if bt_addr else bool(bt_addrs),
@@ -198,6 +210,42 @@ def collect(env: dict, actions: list[dict], watchdog_status: dict | None = None)
     }
 
 
+class BrokerPublisher:
+    """The node's own connection to the central broker. paho reconnects in the background; a
+    heartbeat published while it is down is dropped (the next one replaces it)."""
+
+    def __init__(self, env: dict):
+        import paho.mqtt.client as mqtt  # python3-paho-mqtt; only needed when MQTT_HOST is set
+
+        node = env["NODE_NAME"]
+        prefix = env.get("MQTT_PREFIX", "detection/rf/nodes").rstrip("/")
+        self.health_topic, self.online_topic = f"{prefix}/{node}/health", f"{prefix}/{node}/online"
+        kwargs = {"client_id": f"rf-node-{node}"}
+        if hasattr(mqtt, "CallbackAPIVersion"):  # paho 2.x
+            kwargs["callback_api_version"] = mqtt.CallbackAPIVersion.VERSION2
+        self.client = mqtt.Client(**kwargs)
+        self.client.username_pw_set(env.get("MQTT_USER") or f"rf-node-{node}", env.get("MQTT_PASSWORD") or None)
+        tls = env.get("MQTT_TLS", "1") != "0"
+        if tls:
+            self.client.tls_set(ca_certs=env.get("MQTT_CA") or None)  # MQTT_CA: the team's CA; else system CAs
+        self.client.will_set(self.online_topic, "0", qos=1, retain=True)
+        self.client.on_connect = self._on_connect
+        self.client.reconnect_delay_set(1, 60)
+        port = int(env.get("MQTT_PORT") or (8883 if tls else 1883))
+        self.client.connect_async(env["MQTT_HOST"], port, keepalive=60)
+        self.client.loop_start()
+
+    def _on_connect(self, client, _userdata, _flags, rc, _props=None):
+        if rc == 0:
+            client.publish(self.online_topic, "1", qos=1, retain=True)
+        else:
+            print(f"rf-node-agent: broker refused the connection: {rc}", file=sys.stderr)
+
+    def publish(self, body: bytes) -> None:
+        if self.client.is_connected():
+            self.client.publish(self.health_topic, body, qos=1, retain=True)
+
+
 def load_env(path: str = "/etc/rf-node/rf-node.env") -> dict:
     env = {}
     for line in read(path).splitlines():
@@ -206,7 +254,8 @@ def load_env(path: str = "/etc/rf-node/rf-node.env") -> dict:
             k, v = line.split("=", 1)
             env[k.strip()] = v.strip().strip("'\"")
     env.update({k: v for k, v in os.environ.items() if k in ("CENTRAL_HOST", "NODE_NAME", "CONSOLE_PORT", "NODE_TOKEN",
-                                                             "AGENT_INTERVAL_S", "WIFI_IFACE", "BT_ADDR", "CENTRAL_PORT")})
+                                                             "AGENT_INTERVAL_S", "WIFI_IFACE", "BT_ADDR", "CENTRAL_PORT")
+                or k.startswith("MQTT_")})
     return env
 
 
@@ -220,6 +269,12 @@ def main() -> int:
     actions: list[dict] = []
     failures = 0
     dog = Watchdog()
+    broker = None
+    if env.get("MQTT_HOST"):
+        try:
+            broker = BrokerPublisher(env)
+        except Exception as exc:  # noqa: BLE001 - the console heartbeats must go on without the broker
+            print(f"rf-node-agent: central broker disabled: {exc}", file=sys.stderr)
     while True:
         now = time.time()
         try:
@@ -232,6 +287,8 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001 - the watchdog must never stop the heartbeats
             print(f"rf-node-agent: watchdog check failed: {exc}", file=sys.stderr)
         body = json.dumps(collect(env, actions, dog.status(now))).encode()
+        if broker:
+            broker.publish(body)
         headers = {"Content-Type": "application/json"}
         if env.get("NODE_TOKEN"):
             headers["X-Node-Token"] = env["NODE_TOKEN"]

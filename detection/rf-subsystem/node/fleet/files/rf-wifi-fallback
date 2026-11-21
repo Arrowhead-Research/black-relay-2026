@@ -1,0 +1,39 @@
+#!/bin/sh
+# rf-wifi-fallback: the node's setup / rescue hotspot on its onboard radio (NetworkManager profile
+# "setup-ap", written by fleet.sh seed). Run every minute by rf-wifi-fallback.timer.
+#
+#  - Hub while staging (setup-ap has autoconnect=yes): NetworkManager keeps the hotspot up; nothing to do.
+#  - Otherwise: if the node has had no default route (no Ethernet, no Wi-Fi) for OFFLINE_S, bring the
+#    hotspot up so someone nearby can join it and run `fleet.sh wifi`. While nobody is connected to it,
+#    drop it every RETRY_S so NetworkManager can try the known networks again.
+set -u
+OFFLINE_S="${OFFLINE_S:-180}" RETRY_S="${RETRY_S:-600}" IFACE="${IFACE:-wlan0}"
+state=/run/rf-wifi-fallback; mkdir -p "$state"
+now=$(date +%s)
+log() { echo "rf-wifi-fallback: $*"; }
+
+nmcli -t -f NAME connection show | grep -qx setup-ap || exit 0
+[ "$(nmcli -g connection.autoconnect connection show setup-ap)" = yes ] && exit 0
+ap_up() { nmcli -t -f NAME connection show --active | grep -qx setup-ap; }
+
+if ap_up; then
+  rm -f "$state/offline_since"
+  [ -f "$state/ap_since" ] || echo "$now" >"$state/ap_since"
+  if iw dev "$IFACE" station dump 2>/dev/null | grep -q '^Station'; then
+    echo "$now" >"$state/ap_since"            # someone is on it: keep it
+  elif [ $((now - $(cat "$state/ap_since"))) -ge "$RETRY_S" ]; then
+    log "nobody on the hotspot; retrying known networks"
+    rm -f "$state/ap_since"
+    nmcli connection down setup-ap >/dev/null 2>&1 || true
+  fi
+  exit 0
+fi
+
+rm -f "$state/ap_since"
+if ip -4 route show default | grep -q .; then rm -f "$state/offline_since"; exit 0; fi
+[ -f "$state/offline_since" ] || echo "$now" >"$state/offline_since"
+if [ $((now - $(cat "$state/offline_since"))) -ge "$OFFLINE_S" ]; then
+  log "offline for ${OFFLINE_S}s; starting the rescue hotspot"
+  rm -f "$state/offline_since"
+  nmcli connection up setup-ap >/dev/null 2>&1 || log "could not start setup-ap"
+fi

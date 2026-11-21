@@ -1,0 +1,110 @@
+# Provision the RF nodes: packages, capture units, node agent, the node's own central broker login and
+# the console heartbeat token.
+# Run through ../fleet.sh provision [node|all]. Secrets are read at run time, never stored here:
+#   - the heartbeat token comes from the central RF stack's .env (CONSOLE_NODE_TOKEN), or is created
+#     there on the first full run (nodes first, then the console, like ../../set-node-token.sh);
+#   - each node's broker login (rf-node-<node>) is made on the central server by
+#     detection/central/rf-node-logins.sh (kept in its .env) and read back over SSH.
+# Without SSH to the central server: run detection/central/rf-node-secrets.sh there by hand, save its
+# output on the admin machine and set CENTRAL_SECRETS to that file (fleet.env or the environment);
+# fleet.sh then leaves the central host out and the nodes take their values from the file.
+# Nodes are not on the tailnet; -e leave_tailnet=true takes older nodes off it.
+
+- name: Broker logins and heartbeat token from the central server
+  hosts: central
+  gather_facts: false
+  vars:
+    play_nodes: "{{ groups['rf_nodes'] | intersect(query('inventory_hostnames', ansible_limit | default('all'))) | sort }}"
+  tasks:
+    - name: A broker login for each node (new ones re-create the broker)
+      ansible.builtin.command:
+        argv: "{{ [central_repo_dir ~ '/detection/central/rf-node-logins.sh'] + play_nodes }}"
+      register: logins_added
+      changed_when: "'added' in logins_added.stdout"
+      when: play_nodes | length > 0
+
+    - name: Read the nodes' broker passwords
+      ansible.builtin.command:
+        argv: "{{ [central_repo_dir ~ '/detection/central/rf-node-logins.sh', '--get'] + play_nodes }}"
+      register: logins
+      changed_when: false
+      check_mode: false
+      no_log: true
+      when: play_nodes | length > 0
+
+    - name: Keep them for the node play
+      ansible.builtin.set_fact:
+        broker_passwords: "{{ dict(logins.stdout_lines | default([]) | map('split', ' ', 1)) }}"
+      no_log: true
+
+    - name: Read CONSOLE_NODE_TOKEN
+      ansible.builtin.shell: "grep -m1 '^CONSOLE_NODE_TOKEN=' .env | cut -d= -f2- || true"
+      args:
+        chdir: "{{ rf_central_dir }}"
+      register: central_token
+      changed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Keep it, or make a new one
+      ansible.builtin.set_fact:
+        node_token: >-
+          {{ central_token.stdout | trim
+             or lookup('ansible.builtin.password', '/dev/null', chars=['ascii_lowercase', 'digits'], length=48) }}
+        node_token_is_new: "{{ (central_token.stdout | trim) == '' }}"
+      no_log: true
+
+    - name: A new token must reach every node in the same run
+      ansible.builtin.assert:
+        that: groups['rf_nodes'] | difference(ansible_play_hosts_all + query('inventory_hostnames', ansible_limit | default('all'))) | length == 0
+        fail_msg: >-
+          The console has no node token yet, so the first run must include every node
+          (fleet.sh provision all); otherwise nodes left out would be rejected once it is set.
+      when: node_token_is_new and ansible_limit is defined and 'rf_nodes' not in ansible_limit
+
+- name: RF nodes
+  hosts: rf_nodes
+  become: true
+  vars:
+    central_secrets_file: ""
+    central_secrets: "{{ dict(lookup('ansible.builtin.file', central_secrets_file).splitlines() | select | map('split', ' ', 1)) }}"
+    node_token: >-
+      {{ central_secrets['token'] if central_secrets_file else hostvars[groups['central'][0]].node_token }}
+    broker_password: >-
+      {{ central_secrets[inventory_hostname] if central_secrets_file
+         else hostvars[groups['central'][0]].broker_passwords[inventory_hostname] }}
+  pre_tasks:
+    - name: The secrets file has this node's values
+      ansible.builtin.assert:
+        that:
+          - central_secrets['token'] | default('') | length > 0
+          - central_secrets[inventory_hostname] | default('') | length > 0
+        fail_msg: >-
+          {{ central_secrets_file }} needs a "token" line and a "{{ inventory_hostname }}" line: on the
+          central server, detection/central/rf-node-secrets.sh {{ inventory_hostname }}
+        quiet: true
+      no_log: true
+      when: central_secrets_file | length > 0
+  roles:
+    - rf_node
+
+- name: Turn on heartbeat authentication on the console
+  hosts: central
+  gather_facts: false
+  tasks:
+    - name: Write CONSOLE_NODE_TOKEN to the RF stack's .env
+      ansible.builtin.lineinfile:
+        path: "{{ rf_central_dir }}/.env"
+        regexp: "^CONSOLE_NODE_TOKEN="
+        line: "CONSOLE_NODE_TOKEN={{ node_token }}"
+        mode: "0600"
+        create: true
+      no_log: true
+      when: node_token_is_new
+      register: token_written
+
+    - name: Restart the console with it
+      ansible.builtin.command: docker compose up -d rf-console
+      args:
+        chdir: "{{ rf_central_dir }}"
+      when: token_written is changed

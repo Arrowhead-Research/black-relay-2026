@@ -1,0 +1,163 @@
+- name: Base packages (rtl-433 decodes TPMS for Kismet's helper; bluez gives btmgmt; python3-debian for the deb822 repository below)
+  ansible.builtin.apt:
+    name: [ca-certificates, curl, python3, python3-debian, python3-paho-mqtt, bluez, rfkill, usbutils, iw, rtl-433]
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Kismet apt repository
+  ansible.builtin.deb822_repository:
+    name: kismet
+    uris: "https://www.kismetwireless.net/repos/apt/release/{{ ansible_facts['distribution_release'] }}"
+    suites: "{{ ansible_facts['distribution_release'] }}"
+    components: [main]
+    signed_by: https://www.kismetwireless.net/repos/kismet-release.gpg.key
+  register: kismet_repo
+
+- name: Kismet capture helpers, same release as the central server
+  ansible.builtin.apt:
+    name: "{{ capture_units | map('extract', kismet_packages) | map('regex_replace', '$', '=' ~ kismet_version) | list }}"
+    update_cache: "{{ kismet_repo is changed }}"
+    allow_downgrade: true
+  notify: Restart capture
+
+- name: Hold them there (unattended upgrades must not drift from the server)
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop: "{{ capture_units | map('extract', kismet_packages) | list }}"
+  # dpkg --set-selections doesn't wait for the dpkg lock (apt does): retry while another apt run holds it.
+  register: kismet_hold
+  retries: 20
+  delay: 6
+  until: kismet_hold is succeeded
+
+- name: Not on the tailnet
+  ansible.builtin.include_tasks: tailscale.yml
+
+- name: Keep the kernel's TV-tuner drivers off the RTL-SDR
+  ansible.builtin.copy:
+    src: "{{ node_src }}/modprobe/rf-rtlsdr-blacklist.conf"
+    dest: /etc/modprobe.d/rf-rtlsdr-blacklist.conf
+    mode: "0644"
+  register: blacklist
+
+- name: Unbind those drivers now (no reboot needed)
+  ansible.builtin.shell: modprobe -r rtl2832_sdr dvb_usb_rtl28xxu rtl2832 dvb_usb_v2 2>/dev/null || true
+  when: blacklist is changed
+  notify: Restart capture
+
+- name: Bluetooth helper scripts and node agent
+  ansible.builtin.copy:
+    src: "{{ node_src }}/{{ item.src }}"
+    dest: "/usr/local/sbin/{{ item.dest }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { src: scripts/rf-bt-capture.sh, dest: rf-bt-capture, mode: "0755" }
+    - { src: scripts/rf-bt-doctor.sh, dest: rf-bt-doctor, mode: "0755" }
+    - { src: scripts/rf-bt-lib.sh, dest: rf-bt-lib.sh, mode: "0644" }
+    - { src: agent/rf-node-agent, dest: rf-node-agent, mode: "0755" }
+  notify: Restart capture
+
+- name: systemd units
+  ansible.builtin.copy:
+    src: "{{ node_src }}/systemd/{{ item }}.service"
+    dest: "/etc/systemd/system/{{ item }}.service"
+    mode: "0644"
+  loop: "{{ capture_units + ['rf-node-agent'] }}"
+  notify: [Reload systemd, Restart capture]
+
+- name: /etc/rf-node
+  ansible.builtin.file:
+    path: /etc/rf-node
+    state: directory
+    mode: "0755"
+
+- name: rf-node.env from the example, once (keys set below; hand edits to other keys are kept)
+  ansible.builtin.copy:
+    src: "{{ node_src }}/systemd/rf-node.env.example"
+    dest: /etc/rf-node/rf-node.env
+    mode: "0600"
+    force: false
+
+- name: rf-node.env settings
+  ansible.builtin.lineinfile:
+    path: /etc/rf-node/rf-node.env
+    regexp: "^{{ item.key }}="
+    line: "{{ item.key }}={{ item.value }}"
+    mode: "0600"
+  loop: "{{ env | dict2items | selectattr('value', 'ne', '') | list }}"
+  loop_control:
+    label: "{{ item.key }}"
+  vars:
+    env:
+      CENTRAL_HOST: "{{ central_host }}"
+      CENTRAL_PORT: "{{ central_port }}"
+      NODE_NAME: "{{ inventory_hostname }}"
+      WIFI_IFACE: "{{ wifi_iface | default('') }}"
+      BT_PREFER: "{{ bt_prefer | default('') }}"
+      BT_ADDR: "{{ bt_addr | default('') }}"
+  notify: Restart capture
+
+- name: Broker name resolves to the central server on the LAN
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: "\\s{{ broker_host | regex_escape }}$"
+    line: "{{ broker_address }} {{ broker_host }}"
+  when: broker_address | default('') | length > 0
+  notify: Restart capture
+
+- name: Broker CA certificate
+  ansible.builtin.copy:
+    src: "{{ broker_ca_file }}"
+    dest: /etc/rf-node/broker-ca.crt
+    mode: "0644"
+  when: broker_ca_file | default('') | length > 0
+  notify: Restart capture
+
+- name: Heartbeat token and broker login (secrets, 0600)
+  ansible.builtin.lineinfile:
+    path: /etc/rf-node/rf-node.env
+    regexp: "^{{ item.key }}="
+    line: "{{ item.key }}={{ item.value }}"
+    mode: "0600"
+  loop: "{{ secrets | dict2items }}"
+  vars:
+    secrets:
+      NODE_TOKEN: "{{ node_token }}"
+      MQTT_HOST: "{{ broker_host }}"
+      MQTT_PORT: "{{ broker_port }}"
+      MQTT_TLS: "{{ '1' if broker_tls | bool else '0' }}"
+      MQTT_CA: "{{ '/etc/rf-node/broker-ca.crt' if broker_ca_file | default('') | length > 0 else '' }}"
+      MQTT_USER: "rf-node-{{ inventory_hostname }}"
+      MQTT_PASSWORD: "{{ broker_password }}"
+  no_log: true
+  notify: Restart capture
+
+- name: Rescue hotspot watchdog (acts only on nodes flashed with a setup network)
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../files/{{ item.name }}"
+    dest: "{{ item.dest }}/{{ item.name }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { name: rf-wifi-fallback, dest: /usr/local/sbin, mode: "0755" }
+    - { name: rf-wifi-fallback.service, dest: /etc/systemd/system, mode: "0644" }
+    - { name: rf-wifi-fallback.timer, dest: /etc/systemd/system, mode: "0644" }
+  loop_control:
+    label: "{{ item.name }}"
+  notify: Reload systemd
+
+- name: Apply unit changes before starting
+  ansible.builtin.meta: flush_handlers
+
+- name: Rescue hotspot timer
+  ansible.builtin.systemd_service:
+    name: rf-wifi-fallback.timer
+    state: started
+    enabled: true
+
+- name: Capture and agent running and enabled
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop: "{{ capture_units + ['rf-node-agent'] }}"
