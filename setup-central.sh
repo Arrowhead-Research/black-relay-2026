@@ -72,6 +72,12 @@ fi
 
 step "Broker logins and fusion token"
 "$root/detection/central/make-env.sh" "$address" | sed 's/^/   /'
+# The broker answers as its certificate name on the shared network black-relay-local (compose.yaml), so a
+# publisher on this machine (--with-bridge) can use TLS without leaving Docker.
+if [ -n "$domain" ]; then
+  { grep -v '^BROKER_DOMAIN=' "$root/.env" || true; echo "BROKER_DOMAIN=$domain"; } >"$root/.env.new"
+  chmod 600 "$root/.env.new"; mv "$root/.env.new" "$root/.env"
+fi
 
 # The store may have been started on its own before; the root project takes it over (same volumes).
 if [ -n "$(docker ps -q --filter label=com.docker.compose.project=black-relay-central-store)" ]; then
@@ -93,6 +99,7 @@ docker compose ps --format '   {{.Service}}: {{.Status}}'
 if [ "$bridge" = 1 ]; then
   dep="$root/detection/physical-subsystem/deploy"
   as_root() { if [ "$(id -u)" = 0 ] || [ -n "${NO_SUDO:-}" ]; then "$@"; else sudo "$@"; fi; }
+  export NO_SUDO     # deploy/scripts/fusion-secret.sh uses the same rule
   # Sets KEY inside a top-level YAML block (keeps any trailing comment). The example config is flat enough.
   set_yaml() { # set_yaml <block> <key> <value>
     # A key that held a nested block (e.g. fusion.tls) loses its nested lines when set to a scalar.
@@ -105,6 +112,8 @@ if [ "$bridge" = 1 ]; then
       { print }' "$dep/config/config.yaml" >"$dep/config/config.yaml.new" && mv "$dep/config/config.yaml.new" "$dep/config/config.yaml"
   }
   envset() { touch "$dep/.env"; grep -q "^$1=" "$dep/.env" || printf '%s=%s\n' "$1" "$2" >>"$dep/.env"; }
+  envforce() { touch "$dep/.env"; { grep -v "^$1=" "$dep/.env" || true; [ -z "${2+x}" ] || printf '%s=%s\n' "$1" "$2"; } \
+                 >"$dep/.env.new" && mv "$dep/.env.new" "$dep/.env"; }   # envforce KEY [VALUE]: replace, or remove
 
   step "Physical bridge on this server"
   phys_pw="$(grep '^BROKER_PHYSICAL_PASSWORD=' "$root/.env" | cut -d= -f2-)"
@@ -112,12 +121,16 @@ if [ "$bridge" = 1 ]; then
   envset BRIDGE_MQTT_PORT 8884
   envset BRIDGE_HOSTS "$address${domain:+ $domain}"   # the bridge's cert names (+ 127.0.0.1, localhost always)
   envset IMAGE_PREFIX ""                     # bridge images are built here from this checkout
-  if [ -n "$domain" ]; then envset CENTRAL_BROKER_NAME "$domain"; envset CENTRAL_BROKER_IP "$address"; fi
+  # Same machine: the publisher joins the central broker's network (docker-compose.samehost.yml) instead of
+  # going through $address, which a container on Docker Desktop cannot reach. A CENTRAL_BROKER_NAME/IP
+  # mapping would override the network alias, so it is removed.
+  envforce COMPOSE_FILE "docker-compose.yml:docker-compose.samehost.yml"
+  envforce CENTRAL_BROKER_NAME; envforce CENTRAL_BROKER_IP
   if [ ! -f "$dep/certs/mosquitto/broker/broker.crt" ]; then
     echo "   generating the bridge's certificates and logins (sudo: files belong to the container users)"
     (cd "$dep" && as_root env FUSION_PASSWORD="$phys_pw" ./scripts/gen-certs.sh "$address" ${domain:+"$domain"}) | sed 's/^/   /'
   else
-    printf '%s\n' "$phys_pw" | as_root sh -c "umask 077; mkdir -p '$dep/secrets/fusion' && cat >'$dep/secrets/fusion/fusion_password' && chown 10003 '$dep/secrets/fusion' '$dep/secrets/fusion/fusion_password'"
+    printf '%s\n' "$phys_pw" | as_root sh -c "umask 077; mkdir -p '$dep/secrets/fusion' && cat >'$dep/secrets/fusion/fusion_password'"
   fi
   if [ ! -f "$dep/config/config.yaml" ]; then
     [ -n "$panel_ip" ] || { echo "--with-bridge needs --panel-ip the first time" >&2; exit 2; }
@@ -126,16 +139,21 @@ if [ "$bridge" = 1 ]; then
   [ -z "$panel_ip" ] || set_yaml iq_remote panel_ip "$panel_ip"
   set_yaml mqtt port 8884
   set_yaml fusion enabled true
-  if [ -n "$domain" ]; then
+  if [ -n "$domain" ]; then  # the broker's alias on black-relay-local is its certificate name: TLS verifies
     set_yaml fusion host "$domain"; set_yaml fusion port 8883
-  else  # no public certificate: same host, so plain 1883 to the central broker never leaves this machine
-    set_yaml fusion host "$address"; set_yaml fusion port 1883; set_yaml fusion tls null
+    set_yaml fusion tls "{ca_file: /etc/ssl/certs/ca-certificates.crt}"
+  else  # no public certificate: plain 1883 over the shared Docker network, which never leaves this machine
+    set_yaml fusion host central-broker; set_yaml fusion port 1883; set_yaml fusion tls null
   fi
   if ! as_root sh -c "ls '$dep'/data/pki/panel_pin.json '$dep'/data/pki/*/panel_pin.json" >/dev/null 2>&1; then
     echo "   NOTE: no panel pairing in $dep/data/pki yet. Pair once (detection/physical-subsystem/README.md,"
     echo "   'Pairing'), or restore a sealed bundle: detection/central-store/secrets.sh fetch $dep"
   fi
-  (cd "$dep" && docker compose --profile fusion up -d --build --wait normalizer outbound mosquitto fusion iq-remote)
+  (cd "$dep" && docker compose --profile fusion build normalizer outbound iq-remote)
+  # Owner 10003:10000, modes 0700/0600, then a read test as the publisher's user: fails here with the fix
+  # instead of a publisher that silently never connects.
+  "$dep/scripts/fusion-secret.sh"
+  (cd "$dep" && docker compose --profile fusion up -d --wait normalizer outbound mosquitto fusion iq-remote)
   (cd "$dep" && docker compose --profile fusion ps --format '   {{.Service}}: {{.Status}}')
   echo "   Firewall: set PANEL_IP in $dep/nftables/blackrelay-egress.nft and load it (sudo nft -f ...)."
   [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo 0)" = 0 ] || \
