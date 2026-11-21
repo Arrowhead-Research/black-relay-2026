@@ -1,0 +1,221 @@
+name: blackrelay
+
+x-tak-build: &tak-build
+  context: ./tak-server
+  dockerfile: Dockerfile
+
+x-gateway: &gateway
+  build: ./gateway
+  restart: unless-stopped
+  networks: [takserver]
+  depends_on:
+    takserver-core:
+      condition: service_started
+    pki:
+      condition: service_healthy
+
+  volumes:
+    - gateway-certs:/certs:ro  # TakConnection copies the .p12 to a private file (pytak opens it "br+")
+
+  environment: &gateway-env
+    COT_URL: tls+wo://takserver:8089
+    TLS_CERT: /certs/pytak-gateway.p12
+    TLS_KEY: /certs/pytak-gateway.p12
+    TLS_CAFILE: /certs/ca-bundle.pem # root + intermediate, published by the pki service
+    TLS_PASSWORD: ${TLS_PASSWORD:-atakatak}
+    TLS_DONT_CHECK_HOSTNAME: ${TLS_DONT_CHECK_HOSTNAME:-true}
+    # TAK's REST API (mission packages), over mTLS with the same gateway client cert, as PEM + key
+    TAK_API_URL: ${TAK_API_URL:-https://takserver:8443}
+    TAK_API_CERT: /certs/pytak-gateway.pem
+    TAK_API_KEY: /certs/pytak-gateway.key
+    GATEWAY_DEBUG: ${GATEWAY_DEBUG:-} # 1: log every build/update package as it arrives (no passwords)
+
+services:
+  # Owns the PKI: builds the CA, the server certs and the gateway's client cert once into the tak-pki volume,
+  # then keeps the public part (CA bundle, CRL, gateway certs) synced into gateway-certs. See tak-server/pki-init.sh.
+  pki:
+    build: *tak-build
+    container_name: pki
+    user: "0" # chowns tak-pki to the tak user and writes the root-owned gateway-certs mount
+    init: true
+    restart: unless-stopped
+    networks: [takserver]
+    entrypoint: ["/bin/bash", "/opt/configurator/pki-init.sh"]
+    command: ["run"]
+    environment:
+      STATE: ${STATE:?set STATE in .env}
+      CITY: ${CITY:?set CITY in .env}
+      ORGANIZATION: ${ORGANIZATION:-TAK}
+      ORGANIZATIONAL_UNIT: ${ORGANIZATIONAL_UNIT:?set ORGANIZATIONAL_UNIT in .env}
+      GATEWAY_TLS_NAME: ${GATEWAY_TLS_NAME:-${BIND_ADDR:?set BIND_ADDR in .env}} # the name sources connect to
+      # TAK 5.6's cert-metadata.sh defaults these to test123test123, but CoreConfig.xml expects atakatak
+      CAPASS: ${TLS_PASSWORD:-atakatak}
+      PASS: ${TLS_PASSWORD:-atakatak}
+    volumes:
+      - tak-pki:/opt/tak/certs/files # the whole PKI, CA private keys included: only TAK and this service mount it
+      - gateway-certs:/opt/tak/certs/gateway
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/pki-ready"]
+      interval: 3s
+      retries: 100
+
+  takserver-db:
+    build:
+      context: ./tak-server
+      dockerfile: Dockerfile.db
+    container_name: tak-database # CoreConfig.xml connects to this hostname
+    hostname: tak-database
+    init: true
+    tty: true
+    restart: unless-stopped
+    networks: [takserver]
+    volumes:
+      - tak-db:/var/lib/postgresql
+
+  takserver-core:
+    build: *tak-build
+    container_name: takserver # also the CN of the server certificate
+    hostname: takserver
+    init: true
+    tty: true
+    restart: unless-stopped
+    networks: [takserver]
+    depends_on:
+      takserver-db:
+        condition: service_started
+      pki:
+        condition: service_healthy
+
+    # Stock entrypoint, but pre-create TAKIgniteConfig.xml so the config/messaging/api
+    # JVMs don't race to copy it (FileAlreadyExistsException kills messaging otherwise).
+    entrypoint:
+      - /bin/bash
+      - -c
+      - cp -n /opt/tak/TAKIgniteConfig.example.xml /opt/tak/TAKIgniteConfig.xml; exec /opt/tak/configureInDocker.sh init
+
+    # Every published port binds to BIND_ADDR (the host's VPN address), never 0.0.0.0: nothing
+    # here answers from off the VPN, the admin port 8443 included (PRD, Securing the endpoints).
+    ports:
+      - "${BIND_ADDR:?set BIND_ADDR in .env}:8443:8443" # web UI / API (client cert)
+      - "${BIND_ADDR:?set BIND_ADDR in .env}:8446:8446" # certificate enrollment (username/password)
+      - "${BIND_ADDR:?set BIND_ADDR in .env}:8089:8089" # CoT streaming over TLS
+      - "${BIND_ADDR:?set BIND_ADDR in .env}:8444:8444" # federation
+
+    environment:
+      COUNTRY_CODE: ${COUNTRY_CODE:-US}
+      STATE: ${STATE:?set STATE in .env}
+      CITY: ${CITY:?set CITY in .env}
+      ORGANIZATION: ${ORGANIZATION:-TAK}
+      ORGANIZATIONAL_UNIT: ${ORGANIZATIONAL_UNIT:?set ORGANIZATIONAL_UNIT in .env}
+      ENROLLMENT_TYPE: ${ENROLLMENT_TYPE:-automated_enrollment}
+      ADMINS_COUNT: ${ADMINS_COUNT:-1}
+      USER_COUNT: ${USER_COUNT:-1}
+      SERVER_NAME: ${SERVER_NAME:-}
+      IP_OR_DOMAIN_NAME: ${IP_OR_DOMAIN_NAME:-}
+      AUTOMATED_ADMIN_USERNAME: ${AUTOMATED_ADMIN_USERNAME:-admin}
+      AUTOMATED_ADMIN_PASSWORD: ${AUTOMATED_ADMIN_PASSWORD:?set AUTOMATED_ADMIN_PASSWORD in .env}
+      AUTOMATED_CLIENT_USERNAME: ${AUTOMATED_CLIENT_USERNAME:-user}
+      AUTOMATED_CLIENT_PASSWORD: ${AUTOMATED_CLIENT_PASSWORD:?set AUTOMATED_CLIENT_PASSWORD in .env}
+      CAPASS: ${TLS_PASSWORD:-atakatak} # must match the pki service and CoreConfig.xml
+      PASS: ${TLS_PASSWORD:-atakatak}
+
+    volumes:
+      - tak-pki:/opt/tak/certs/files # CA, server and client certs, built once by the pki service
+      - ./shared:/opt/tak/certs/shared # truststore / mission packages for clients
+      - ./plugins:/opt/tak/webcontent/webtak-plugins/plugins/
+
+  gateway-http:
+    <<: *gateway
+    command: pytak-gw http
+    ports:
+      - "${BIND_ADDR:?set BIND_ADDR in .env}:8000:8000"
+    volumes:
+      - gateway-certs:/certs:ro
+      - gateway-data:/data
+    environment:
+      <<: *gateway-env
+      SITE_ADMIN_HASH: ${SITE_ADMIN_HASH:?set SITE_ADMIN_HASH in .env}
+      FUSION_HOLD_MINUTES: ${FUSION_HOLD_MINUTES:-15} # the same window the http monitor holds detections for
+      # mTLS: only clients with a cert signed by the TAK CA (and not on its CRL) get past the handshake.
+      # Remove GATEWAY_TLS_CERT to fall back to plain HTTP. Files are re-read when they change.
+      GATEWAY_TLS_CERT: /certs/gateway-server.pem
+      GATEWAY_TLS_KEY: /certs/gateway-server.key
+      GATEWAY_TLS_KEY_PASSWORD: ${TLS_PASSWORD:-atakatak}
+      GATEWAY_TLS_CA: /certs/ca-bundle.pem
+      GATEWAY_TLS_CRL: /certs/intermediate.crl
+
+    healthcheck:
+      test: ["CMD-SHELL", "nc -w 2 127.0.0.1 8000 </dev/null"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+  
+  gateway-http-monitor:
+    <<: *gateway
+    profiles: [fusion]
+    command: pytak-gw http-monitor
+    volumes:
+      - gateway-certs:/certs:ro
+      - gateway-data:/data # the same registry gateway-http writes
+    environment:
+      <<: *gateway-env
+      FUSION_URL: ${FUSION_URL:-}
+      FUSION_TOKEN: ${FUSION_TOKEN:-}
+      FUSION_CAFILE: ${FUSION_CAFILE:-}
+      FUSION_POLL_INTERVAL: ${FUSION_POLL_INTERVAL:-10}
+      FUSION_ALLOW_HTTP: ${FUSION_ALLOW_HTTP:-}
+      FUSION_PHYSICAL_TRIP_TYPES: ${FUSION_PHYSICAL_TRIP_TYPES:-tamper}
+      FUSION_PHYSICAL_TRIP_KINDS: ${FUSION_PHYSICAL_TRIP_KINDS:-contact,motion,glass_break}
+      FUSION_HOLD_MINUTES: ${FUSION_HOLD_MINUTES:-15}
+
+  # # Dev only: a stand-in for Fusion while the real one is down (fake-fusion/fake_fusion.py). Its page is at
+  # # http://<BIND_ADDR>:8090. Point the monitor at it with FUSION_URL=http://fake-fusion:8090 in .env.
+  # fake-fusion:
+  #   build: ./gateway
+  #   profiles: [fake-fusion]
+  #   restart: unless-stopped
+  #   networks: [takserver]
+  #   user: "0" # writes its state into the root-owned volume
+  #   command: python /fake/fake_fusion.py
+  #   ports:
+  #     - "${BIND_ADDR:?set BIND_ADDR in .env}:8090:8090"
+  #   volumes:
+  #     - ./fake-fusion:/fake:ro
+  #     - fake-fusion-state:/state
+  #   environment:
+  #     FUSION_TOKEN: ${FUSION_TOKEN:-}
+
+  # # Dev only: fake camera feeds for fake-fusion's camera nodes. RTSP test patterns at
+  # # rtsp://<BIND_ADDR>:8554/cam1 and /cam2 (ffmpeg publishes into MediaMTX inside the one container).
+  # fake-camera:
+  #   image: bluenviron/mediamtx:1.9.3-ffmpeg
+  #   profiles: [fake-fusion]
+  #   restart: unless-stopped
+  #   networks: [takserver]
+  #   ports:
+  #     - "${BIND_ADDR:?set BIND_ADDR in .env}:8554:8554"
+  #   environment:
+  #     MTX_PROTOCOLS: tcp
+  #     MTX_PATHS_CAM1_RUNONINIT: >-
+  #       ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=15
+  #       -c:v libx264 -preset ultrafast -tune zerolatency -g 30 -pix_fmt yuv420p -f rtsp rtsp://localhost:8554/cam1
+  #     MTX_PATHS_CAM1_RUNONINITRESTART: "yes"
+  #     MTX_PATHS_CAM2_RUNONINIT: >-
+  #       ffmpeg -re -f lavfi -i smptebars=size=1280x720:rate=15
+  #       -c:v libx264 -preset ultrafast -tune zerolatency -g 30 -pix_fmt yuv420p -f rtsp rtsp://localhost:8554/cam2
+  #     MTX_PATHS_CAM2_RUNONINITRESTART: "yes"
+
+networks:
+  takserver:
+    name: takserver
+    ipam:
+      config:
+        - subnet: 172.16.16.0/24
+
+volumes:
+  tak-db:
+  tak-pki:
+  gateway-certs:
+  gateway-data:
+  fake-fusion-state:

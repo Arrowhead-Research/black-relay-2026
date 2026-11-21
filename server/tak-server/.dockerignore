@@ -1,0 +1,11 @@
+# Keep the build context lean. Schemas (*.xsd) and oas/ are kept on purpose:
+# TAK Server validates CoreConfig.xml against CoreConfig.xsd at startup.
+tak/docs
+tak/logs
+tak/TAKServer.bat
+tak/apply-selinux.sh
+tak/takserver-policy.te
+tak/certs/files
+tak/certs/shared
+shared
+plugins

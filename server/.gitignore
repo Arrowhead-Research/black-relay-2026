@@ -1,0 +1,38 @@
+# Local configuration and secrets
+.env
+certs/
+*.p12
+*.pem
+*.jks
+*.key
+
+# Make sure no one commits the zip
+*.zip
+
+# TAK Server release (licensed, ~650 MB): download from tak.gov, unzip here
+tak-server/tak/
+/shared/
+/plugins/
+
+# A local gateway registry (houses, hashed keys, sensors)
+*.db
+*.db-shm
+*.db-wal
+
+# The broker's certificates and password file (README, "MQTT")
+/mqtt/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Misc
+.DS_Store
+*.log
+
+/.idea/.gitignore
+/.idea/misc.xml
+/.idea/modules.xml
+/.idea/server.iml
+/.idea/vcs.xml

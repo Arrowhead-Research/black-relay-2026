@@ -1,0 +1,13 @@
+# Who may do what on the broker. A node's login is its address, `<site>/<subsystem>/<node>`
+# (e.g. `sh1/rf/rf-north`), and it may write only under nodes/<its own login>/. Nobody but the
+# gateway reads.
+#
+# The gateway's login (MQTT_USERNAME in .env; "gateway" here) reads everything under nodes/.
+user gateway
+topic read nodes/#
+
+# Every login: write under nodes/<login>/ and nowhere else. %u is the login's name, so the topic's
+# three levels under nodes/ (site, subsystem, node) are the login itself: the gateway takes the
+# site from them. A node id may be `*` (the subsystem's node-less events), which is a plain
+# character in a topic and in a login, not a wildcard.
+pattern write nodes/%u/#
