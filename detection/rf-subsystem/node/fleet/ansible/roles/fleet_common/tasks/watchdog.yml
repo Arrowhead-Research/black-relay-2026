@@ -1,0 +1,14 @@
+# Rescue hotspot watchdog (acts only on nodes flashed with a setup network). Used by rf_node and
+# camera_node; the caller defines the "Reload systemd" handler and runs flush_handlers before the timer.
+- name: Rescue hotspot watchdog (acts only on nodes flashed with a setup network)
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../files/{{ item.name }}"
+    dest: "{{ item.dest }}/{{ item.name }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { name: rf-wifi-fallback, dest: /usr/local/sbin, mode: "0755" }
+    - { name: rf-wifi-fallback.service, dest: /etc/systemd/system, mode: "0644" }
+    - { name: rf-wifi-fallback.timer, dest: /etc/systemd/system, mode: "0644" }
+  loop_control:
+    label: "{{ item.name }}"
+  notify: Reload systemd

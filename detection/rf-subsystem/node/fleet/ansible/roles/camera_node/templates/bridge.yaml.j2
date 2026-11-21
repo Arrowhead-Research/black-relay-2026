@@ -1,0 +1,36 @@
+# Written by Ansible (fleet.sh provision). Same keys as camera-subsystem/bridge/config/bridge.example.yaml.
+# Values are JSON strings, which YAML reads as they are.
+node_id: {{ inventory_hostname | to_json }}
+
+broker:
+  host: {{ broker_host | to_json }}
+  port: {{ broker_port }}
+  username: {{ ('cam-node-' ~ inventory_hostname) | to_json }}
+  password: {{ broker_password | to_json }}
+  tls: {{ broker_tls | bool | to_json }}
+
+# The shared kit login: what MediaMTX pulls RTSP with. camera-link uses it for go2rtc's RTSP login.
+relay:
+  username: {{ relay_user | to_json }}
+  password: {{ relay_password | to_json }}
+
+covered_zones:
+{% for zone in camera_zones %}
+  - {{ zone | to_json }}
+{% endfor %}
+
+cue_window_s: 5.0
+
+outbox:
+  path: /var/lib/camerabridge/outbox.jsonl
+  max_bytes: 67108864
+  max_age_s: 604800
+
+status_interval_s: 30
+
+frigate:
+  topic: frigate/events
+  base_url: {{ ('https://' ~ inventory_hostname ~ '.local:8971') | to_json }}
+  camera: {{ inventory_hostname | to_json }}
+  mqtt_host: 127.0.0.1
+  mqtt_port: 1883

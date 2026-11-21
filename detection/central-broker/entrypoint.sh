@@ -16,9 +16,17 @@ if [ -n "$BROKER_RF_ANALYTICS_USER" ] && [ -z "$BROKER_RF_ANALYTICS_PASSWORD" ];
     echo "BROKER_RF_ANALYTICS_USER is set without BROKER_RF_ANALYTICS_PASSWORD" >&2
     exit 1
 fi
+# The camera relay's API has its own login when the camera relay runs here (root compose).
+BROKER_RELAY_API_USER="${BROKER_RELAY_API_USER:-}"
+BROKER_RELAY_API_PASSWORD="${BROKER_RELAY_API_PASSWORD:-}"
+if [ -n "$BROKER_RELAY_API_USER" ] && [ -z "$BROKER_RELAY_API_PASSWORD" ]; then
+    echo "BROKER_RELAY_API_USER is set without BROKER_RELAY_API_PASSWORD" >&2
+    exit 1
+fi
 
 for user in "$BROKER_FUSION_USER" "$BROKER_PHYSICAL_USER" "$BROKER_RF_USER" \
-    "$BROKER_CAMERA_USER" ${BROKER_RF_ANALYTICS_USER:+"$BROKER_RF_ANALYTICS_USER"}; do
+    "$BROKER_CAMERA_USER" ${BROKER_RF_ANALYTICS_USER:+"$BROKER_RF_ANALYTICS_USER"} \
+    ${BROKER_RELAY_API_USER:+"$BROKER_RELAY_API_USER"}; do
     case "$user" in
     *:* | *\&* | *\|* | *\\* | *[[:space:]]*)
         echo "a broker user cannot hold a colon, &, |, backslash or space" >&2
@@ -35,36 +43,64 @@ printf '%s\n%s\n' "$BROKER_RF_PASSWORD" "$BROKER_RF_PASSWORD" |
     mosquitto_passwd "$auth/passwd" "$BROKER_RF_USER" >/dev/null
 printf '%s\n%s\n' "$BROKER_CAMERA_PASSWORD" "$BROKER_CAMERA_PASSWORD" |
     mosquitto_passwd "$auth/passwd" "$BROKER_CAMERA_USER" >/dev/null
+# Optional logins: a block whose user is unset is dropped from the ACL (its user line up to the next
+# blank line).
+drop=""
 if [ -n "$BROKER_RF_ANALYTICS_USER" ]; then
     printf '%s\n%s\n' "$BROKER_RF_ANALYTICS_PASSWORD" "$BROKER_RF_ANALYTICS_PASSWORD" |
         mosquitto_passwd "$auth/passwd" "$BROKER_RF_ANALYTICS_USER" >/dev/null
-    acl_src=/broker/aclfile
-else # drop the rf-analytics block (its user line up to the next blank line)
-    acl_src="$auth/aclfile.in"
-    awk '/^user @RF_ANALYTICS_USER@/ { skip = 1 } skip && /^$/ { skip = 0 } !skip' /broker/aclfile >"$acl_src"
+else
+    drop="$drop RF_ANALYTICS_USER"
 fi
+if [ -n "$BROKER_RELAY_API_USER" ]; then
+    printf '%s\n%s\n' "$BROKER_RELAY_API_PASSWORD" "$BROKER_RELAY_API_PASSWORD" |
+        mosquitto_passwd "$auth/passwd" "$BROKER_RELAY_API_USER" >/dev/null
+else
+    drop="$drop RELAY_API_USER"
+fi
+acl_src="$auth/aclfile.in"
+awk -v drop="$drop" '
+    BEGIN { n = split(drop, d, " "); for (i = 1; i <= n; i++) want["user @" d[i] "@"] = 1 }
+    want[$0] { skip = 1 }
+    skip && /^$/ { skip = 0 }
+    !skip' /broker/aclfile >"$acl_src"
 sed -e "s|@FUSION_USER@|$BROKER_FUSION_USER|" \
     -e "s|@PHYSICAL_USER@|$BROKER_PHYSICAL_USER|" \
     -e "s|@RF_USER@|$BROKER_RF_USER|" \
     -e "s|@CAMERA_USER@|$BROKER_CAMERA_USER|" \
     -e "s|@RF_ANALYTICS_USER@|$BROKER_RF_ANALYTICS_USER|" \
+    -e "s|@RELAY_API_USER@|$BROKER_RELAY_API_USER|" \
     "$acl_src" >"$auth/aclfile"
 rm -f "$auth/aclfile.in"
-# RF nodes: one login each, from BROKER_RF_NODE_LOGINS ("node:password ...", kept by
-# detection/central/rf-node-logins.sh). Login rf-node-<node> may only write detection/rf/nodes/<node>/#.
-for pair in ${BROKER_RF_NODE_LOGINS:-}; do
-    node="${pair%%:*}" pw="${pair#*:}"
-    case "$node" in
-    '' | -* | *[!a-z0-9-]*)
-        echo "BROKER_RF_NODE_LOGINS: bad node name '$node'" >&2
-        exit 1
-        ;;
-    esac
-    [ "$pw" != "$pair" ] && [ -n "$pw" ] || { echo "BROKER_RF_NODE_LOGINS: $node has no password" >&2; exit 1; }
-    printf '%s\n%s\n' "$pw" "$pw" | mosquitto_passwd "$auth/passwd" "rf-node-$node" >/dev/null
-    printf '\nuser rf-node-%s\ntopic write detection/rf/nodes/%s/#\n' "$node" "$node" >>"$auth/aclfile"
-done
-unset pair node pw
+# Per-node logins, one per "node:password" entry, kept in .env by detection/central/node-logins.sh.
+# The ACL lines of a login come from the function named in the call (it gets the node name).
+rf_node_acl() { printf 'topic write detection/rf/nodes/%s/#\n' "$1"; }
+camera_node_acl() {
+    printf 'topic write detection/camera/#\n'
+    printf 'topic read detection/rf/cues/camera\n'
+}
+# node_logins <env var name> <value> <login prefix> <ACL function>
+node_logins() {
+    name="$1" entries="$2" prefix="$3" acl="$4"
+    for pair in $entries; do
+        node="${pair%%:*}" pw="${pair#*:}"
+        case "$node" in
+        '' | -* | *[!a-z0-9-]*)
+            echo "$name: bad node name '$node'" >&2
+            exit 1
+            ;;
+        esac
+        [ "$pw" != "$pair" ] && [ -n "$pw" ] || { echo "$name: $node has no password" >&2; exit 1; }
+        printf '%s\n%s\n' "$pw" "$pw" | mosquitto_passwd "$auth/passwd" "$prefix$node" >/dev/null
+        printf '\nuser %s%s\n' "$prefix" "$node" >>"$auth/aclfile"
+        "$acl" "$node" >>"$auth/aclfile"
+    done
+    unset pair node pw name entries prefix acl
+}
+# RF nodes: login rf-node-<node>, BROKER_RF_NODE_LOGINS. Camera nodes: login cam-node-<node>,
+# BROKER_CAMERA_NODE_LOGINS.
+node_logins BROKER_RF_NODE_LOGINS "${BROKER_RF_NODE_LOGINS:-}" rf-node- rf_node_acl
+node_logins BROKER_CAMERA_NODE_LOGINS "${BROKER_CAMERA_NODE_LOGINS:-}" cam-node- camera_node_acl
 mkdir -p "$auth/conf.d"
 # TLS listener on 8883 when a certificate is mounted (read-only) at /tls. Copied so that only the
 # mosquitto user can read the key; the source can stay private to the store's owner.
@@ -76,7 +112,8 @@ if [ -r /tls/server.crt ] && [ -r /tls/server.key ]; then
 fi
 chown -R mosquitto:mosquitto "$auth" /mosquitto/data
 unset BROKER_FUSION_USER BROKER_FUSION_PASSWORD BROKER_PHYSICAL_USER BROKER_PHYSICAL_PASSWORD \
-    BROKER_RF_USER BROKER_RF_PASSWORD BROKER_CAMERA_USER BROKER_CAMERA_PASSWORD BROKER_RF_NODE_LOGINS \
-    BROKER_RF_ANALYTICS_USER BROKER_RF_ANALYTICS_PASSWORD
+    BROKER_RF_USER BROKER_RF_PASSWORD BROKER_CAMERA_USER BROKER_CAMERA_PASSWORD \
+    BROKER_RF_NODE_LOGINS BROKER_CAMERA_NODE_LOGINS \
+    BROKER_RF_ANALYTICS_USER BROKER_RF_ANALYTICS_PASSWORD BROKER_RELAY_API_USER BROKER_RELAY_API_PASSWORD
 
 exec mosquitto -c /broker/mosquitto.conf

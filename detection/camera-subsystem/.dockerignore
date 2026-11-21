@@ -1,0 +1,12 @@
+# Only bridge/ and cameralink/ sources and lock files are used.
+relay/
+provision/
+*.md
+DESIGN.md
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/tests
+**/.env*
+.git

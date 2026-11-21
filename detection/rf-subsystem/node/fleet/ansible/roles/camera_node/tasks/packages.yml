@@ -1,0 +1,28 @@
+# docker-compose is Debian's package for Compose v2 (provides `docker compose`); verify on the first node.
+- name: Packages
+  ansible.builtin.apt:
+    name:
+      - network-manager
+      - dnsmasq-base
+      - nftables
+      - avahi-daemon
+      - iw
+      - rsync
+      - curl
+      - libnss-myhostname
+      - docker.io
+      - docker-compose
+      - python3
+    update_cache: true
+    cache_valid_time: 3600
+
+# The broker runs in a container (127.0.0.1:1883); a host mosquitto would hold the port.
+- name: Which services exist
+  ansible.builtin.service_facts:
+
+- name: The host mosquitto package is not running
+  ansible.builtin.systemd_service:
+    name: mosquitto
+    state: stopped
+    enabled: false
+  when: "'mosquitto.service' in ansible_facts.services"

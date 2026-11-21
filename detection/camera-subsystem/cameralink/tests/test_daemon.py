@@ -3237,3 +3237,34 @@ def test_firewall_accepts_dhcp_on_the_camera_link_ahead_of_the_drop():
     drop = lines.index("iifname $CAMERA_IF counter drop")
     assert accept < drop
     assert sum("$CAMERA_IF" in line and "accept" in line for line in lines) == 1
+
+
+def test_a_relay_section_wins_over_the_broker_login(live):
+    live.provision(relay={"username": "relay", "password": "shared-relay-pw"})
+    provisioning = daemon_module._read_provisioning(live.paths)
+    assert (provisioning.relay_user, provisioning.relay_password) == ("relay", "shared-relay-pw")
+
+
+def test_without_a_relay_section_the_broker_login_is_the_relay_login(live):
+    live.provision()
+    provisioning = daemon_module._read_provisioning(live.paths)
+    assert (provisioning.relay_user, provisioning.relay_password) == ("kit1", RELAY_PASSWORD)
+
+
+@pytest.mark.parametrize(
+    "relay",
+    [
+        "relay-S3cret",
+        {"username": "relay"},
+        {"password": "relay-S3cret"},
+        {"username": "relay", "password": 1234},
+        {"username": 7, "password": "relay-S3cret"},
+        None,
+    ],
+)
+def test_a_malformed_relay_section_is_refused_without_its_secret(live, relay):
+    live.provision(relay=relay)
+    with pytest.raises(daemon_module.ProvisioningError) as raised:
+        daemon_module._read_provisioning(live.paths)
+    assert "relay-S3cret" not in str(raised.value)
+    assert RELAY_PASSWORD not in str(raised.value)

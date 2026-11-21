@@ -1,0 +1,10 @@
+# See group_vars/camera_nodes.yml for the settings meant to be changed.
+camera_src: "{{ playbook_dir }}/../../../../camera-subsystem"     # detection/camera-subsystem
+camera_ops: "{{ camera_src }}/cameralink/ops"
+camera_provision_ops: "{{ camera_src }}/provision/ops"
+camera_upside_down: false
+camera_ntp_server: "{{ central_host }}"
+fleet_admin_nets: ['10.42.0.0/24']
+hailo_driver_version: 4.21.0
+camera_hef_sha256: 6a20a3952732c7ea5f3f94a586f004015d3ae7d8f6ec5f7b2fcaa4126237124e
+camera_install_dir: /opt/black-relay/src

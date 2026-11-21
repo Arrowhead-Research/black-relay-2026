@@ -77,6 +77,24 @@ login nodes hold there, and `RELAY_API_BROKER_USER` and `RELAY_API_BROKER_PASSWO
 own. That login needs read access to the three `detection/camera/` topics at QoS 1, and a broker that keeps
 a persistent session, or events published during an API restart are not replayed to it.
 
+### On the BlackRelay central server
+
+There the relay is part of the root project: the repo-root `compose.yaml` includes this file, and
+`./setup-central.sh <address>` (or `detection/central/make-env.sh` then `docker compose up -d` at the
+repo root) starts it with everything else. Nothing in this directory is set up by hand, and its own
+`.env` is not read:
+
+- `make-env.sh` writes the `RELAY_*` settings into the root `.env`. The kit login is the central broker's
+  `BROKER_CAMERA_USER` / `BROKER_CAMERA_PASSWORD` (`RELAY_BROKER_USER` and `RELAY_BROKER_PASSWORD` refer to
+  them), and the API reads the camera topics as its own broker login, `relay-api`. Addresses follow
+  `BIND_ADDRESS`, `RELAY_SITE_SUBNET` defaults to its `/24`, the viewer login is `viewer` with a random
+  `RELAY_READ_PASSWORD`, and the API is on **8091** (the WBT Console has 8080). Edit the root `.env` to
+  change any of them.
+- The `broker` profile stays off: nodes and the API use the central broker on 1883.
+- Fleet camera nodes (`detection/rf-subsystem/node/fleet`) each log in as `cam-node-<node>` and hold the
+  kit login for video. `./change-passwords.sh` is for this directory's own `.env` only; on the central
+  server, change `BROKER_CAMERA_PASSWORD` in the root `.env` and re-provision the camera nodes.
+
 **In v0 the relay must run on the broker's host for video and the Frigate proxy to work.** The node's firewall admits
 only the broker address, and has no other setting for it. With an external broker on another host, events and heartbeats
 still flow, but the node refuses live view (RTSP 8554), snapshots and the Frigate proxy (8971) and SSH from this relay

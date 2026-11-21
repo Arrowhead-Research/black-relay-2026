@@ -1,0 +1,2 @@
+# Written by Ansible: the networks and the controller address allowed to SSH to this node.
+add element inet black_relay admin_hosts { {{ admin_entries | join(', ') }} }

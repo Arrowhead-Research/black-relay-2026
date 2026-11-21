@@ -34,6 +34,7 @@ jobs:
           - {name: black-relay/rf-analytics,   context: detection/rf-subsystem/analytics, file: Dockerfile}
           - {name: black-relay/rf-console,     context: detection/rf-subsystem, file: console/Dockerfile}
           - {name: black-relay/rf-kismet-server, context: detection/rf-subsystem/central/kismet, file: Dockerfile}
+          - {name: black-relay/camera-node,    context: detection/camera-subsystem, file: Dockerfile}
     steps:
       - uses: actions/checkout@v4
         with: {persist-credentials: false}

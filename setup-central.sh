@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One command to set up (or update) the BlackRelay central server: image registry, secrets store,
-# central MQTT broker, fusion and the RF services (Kismet, WBT Console, rf-analytics). Run on the
+# central MQTT broker, fusion, the RF services (Kismet, WBT Console, rf-analytics) and the camera relay
+# (relay API, MediaMTX, NTP for the camera kits), with a broker login for every fleet node. Run on the
 # central server from a checkout of this repo:
 #
 #   ./setup-central.sh <address>                                       own CA (hosts must trust it)
@@ -70,7 +71,7 @@ if [ -n "$domain" ]; then
   fi
 fi
 
-step "Broker logins and fusion token"
+step "Broker logins (fleet nodes too), fusion token and camera relay settings"
 "$root/detection/central/make-env.sh" "$address" | sed 's/^/   /'
 # The broker answers as its certificate name on the shared network black-relay-local (compose.yaml), so a
 # publisher on this machine (--with-bridge) can use TLS without leaving Docker.
@@ -92,7 +93,15 @@ if [ -n "$(docker ps -aq --filter label=com.docker.compose.project=rf-central)" 
   docker compose -p rf-central down --remove-orphans
 fi
 
-step "Starting registry, secrets store, broker, fusion and the RF services"
+# The camera relay may have run on its own (project camera-relay, from its directory). The root
+# project runs it now with the central broker; stop the old one so its ports are free. Its volumes
+# are left alone (the root project starts with fresh relay state; nodes re-register within 30 s).
+if [ -n "$(docker ps -aq --filter label=com.docker.compose.project=camera-relay)" ]; then
+  step "Stopping the standalone camera relay (it runs in the central project now)"
+  docker compose -p camera-relay down --remove-orphans
+fi
+
+step "Starting registry, secrets store, broker, fusion, the RF services and the camera relay"
 docker compose up -d --wait --build
 docker compose ps --format '   {{.Service}}: {{.Status}}'
 
@@ -172,7 +181,9 @@ cat <<EOF
    Images      pull  $name:5000      push  $name:5001 (user publisher)
    Secrets     pull  $name:5002      push  $name:5003 (user keeper)
    Broker      $name:8883 (TLS)  and  $address:1883      Fusion API  http://$address:8090
-   Logins      detection/central-store/state/credentials/  (registry)    .env  (broker, fusion token)
+   Camera relay  API http://$address:8091   video rtsp://$address:8554 (user viewer)   NTP $address:123
+   Logins      detection/central-store/state/credentials/  (registry)    .env  (broker, fusion token,
+               camera relay: RELAY_API_TOKEN, RELAY_READ_PASSWORD; kit login BROKER_CAMERA_USER/PASSWORD)
 $( [ -z "$domain" ] && echo "   Hosts must trust detection/central-store/state/ca-public.crt (or use --domain)." )
 
    Add a host:        detection/central-store/server.sh add-client <name> [--secrets]

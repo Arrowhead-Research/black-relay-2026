@@ -1,0 +1,72 @@
+# The code is copied to /opt/black-relay/src; the images are built there (or pulled, with camera_node_image).
+- name: Pack the source tree here
+  ansible.builtin.command: python3 {{ role_path }}/files/pack-source.py {{ camera_src }} /tmp/black-relay-camera-source-{{ inventory_hostname }}.tar.gz
+  delegate_to: localhost
+  become: false
+  register: source_pack
+  changed_when: false
+  check_mode: false
+
+- name: What is on the node?
+  ansible.builtin.slurp:
+    src: /opt/black-relay/src/.source-sha256
+  register: source_stamp
+  failed_when: false
+
+- name: Replace the source tree when it changed
+  when: (source_stamp.content | default('') | b64decode | trim) != source_pack.stdout | trim
+  block:
+    - name: Clear the old tree
+      ansible.builtin.file:
+        path: /opt/black-relay/src
+        state: absent
+
+    - name: Directory
+      ansible.builtin.file:
+        path: /opt/black-relay/src
+        state: directory
+        mode: "0755"
+
+    - name: Unpack
+      ansible.builtin.unarchive:
+        src: "/tmp/black-relay-camera-source-{{ inventory_hostname }}.tar.gz"
+        dest: /opt/black-relay/src
+        owner: root
+        group: root
+
+    - name: Remember it
+      ansible.builtin.copy:
+        content: "{{ source_pack.stdout | trim }}\n"
+        dest: /opt/black-relay/src/.source-sha256
+        mode: "0644"
+
+- name: Remove the packed copy
+  ansible.builtin.file:
+    path: "/tmp/black-relay-camera-source-{{ inventory_hostname }}.tar.gz"
+    state: absent
+  delegate_to: localhost
+  become: false
+  changed_when: false
+
+- name: The stack's settings (no secrets)
+  ansible.builtin.copy:
+    dest: /opt/black-relay/src/node/.env
+    content: |
+      CAMERABRIDGE_UID={{ bridge_user.uid }}
+      CAMERABRIDGE_GID={{ bridge_user.group }}
+      {% if camera_node_image | default('') | length > 0 %}
+      CAMERA_NODE_IMAGE={{ camera_node_image }}
+      {% endif %}
+    mode: "0644"
+
+- name: Pull the image
+  ansible.builtin.command: docker compose -f /opt/black-relay/src/node/compose.yaml pull
+  when: camera_node_image | default('') | length > 0
+  changed_when: false
+
+- name: Build and start the stack (MQTT broker, bridge, camera-link)
+  ansible.builtin.command: >-
+    docker compose -f /opt/black-relay/src/node/compose.yaml up -d
+    {{ '' if camera_node_image | default('') | length > 0 else '--build' }}
+  register: stack_up
+  changed_when: "(stack_up.stdout ~ stack_up.stderr) is search('Created|Recreated|Started')"

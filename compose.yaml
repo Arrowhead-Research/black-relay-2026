@@ -6,17 +6,24 @@
 #   RF                         detection/rf-subsystem/central: Kismet (2501, 3501 for the nodes), the WBT
 #                              Console (8080) and rf-analytics, publishing to the broker; passwords are
 #                              generated on first start by its rf-bootstrap service
+#   camera relay               detection/camera-relay-service: the relay API (8091), MediaMTX behind
+#                              netguard (RTSP 8554, WebRTC 8889 and UDP 8189) and chrony (NTP, UDP 123)
+#                              for the camera kits; its settings are in ./.env (RELAY_*)
 #
 # First time, on the central server, from the repo root:
 #   detection/central-store/server.sh init <address> [names]   # registry TLS, logins (and letsencrypt, see its README)
-#   detection/central/make-env.sh                               # writes ./.env: broker logins, fusion token
+#   detection/central/make-env.sh                               # writes ./.env: broker logins (one per fleet
+#                                                               # node too), fusion token, camera relay settings
 #   docker compose up -d --wait
 #
+# (./setup-central.sh <address> runs these steps.)
+#
 # Publishers connect to <address or reg.bulexa.com>:8883 with TLS and their own login (physical: user
-# physical-subsystem, password BROKER_PHYSICAL_PASSWORD in ./.env). Camera kits use 1883 until
-# they support TLS. The RF console and rf-analytics run here and reach the broker inside Docker.
-# A publisher on this same machine joins the network black-relay-local, where the broker is
-# `central-broker` and also BROKER_DOMAIN (set in ./.env by setup-central.sh --domain).
+# physical-subsystem, password BROKER_PHYSICAL_PASSWORD in ./.env). Camera kits log in as cam-node-<node>
+# and hold the shared kit login (BROKER_CAMERA_USER) for video; see detection/rf-subsystem/node/fleet.
+# The RF console and rf-analytics run here and reach the broker inside Docker. A publisher on this
+# same machine joins the network black-relay-local, where the broker is `central-broker` and also
+# BROKER_DOMAIN (set in ./.env by setup-central.sh --domain).
 # Nothing here listens anywhere but BIND_ADDRESS.
 
 name: black-relay-central
@@ -26,6 +33,11 @@ include:
     env_file: detection/central-store/.env
   # Each subsystem keeps its own compose file; this one includes them.
   - path: detection/rf-subsystem/central/docker-compose.yml
+  # The camera relay takes its settings from this project's .env (make-env.sh writes RELAY_*), not
+  # from its own directory's .env, which is only for running it on its own. Its broker profile stays
+  # off: it uses the broker below.
+  - path: detection/camera-relay-service/compose.yaml
+    env_file: .env
 
 x-hardening: &hardening
   restart: unless-stopped
@@ -56,7 +68,11 @@ services:
       # rf-analytics' login: generated with the RF passwords by rf-bootstrap (nothing in .env).
       BROKER_RF_ANALYTICS_USER: rf-analytics
       BROKER_RF_ANALYTICS_PASSWORD_FILE: /run/rf-secrets/analytics-broker-password
-      BROKER_RF_NODE_LOGINS: ${BROKER_RF_NODE_LOGINS:-}   # one login per RF node: detection/central/rf-node-logins.sh
+      BROKER_RF_NODE_LOGINS: ${BROKER_RF_NODE_LOGINS:-}   # one login per RF node: detection/central/node-logins.sh rf
+      BROKER_CAMERA_NODE_LOGINS: ${BROKER_CAMERA_NODE_LOGINS:-}   # one login per camera node: detection/central/node-logins.sh camera
+      # The camera relay API's own login (reads the camera topics it stores). Optional: unset drops it.
+      BROKER_RELAY_API_USER: ${BROKER_RELAY_API_USER:-}
+      BROKER_RELAY_API_PASSWORD: ${BROKER_RELAY_API_PASSWORD:-}
     depends_on:
       rf-bootstrap: {condition: service_completed_successfully}
     mem_limit: 256m
