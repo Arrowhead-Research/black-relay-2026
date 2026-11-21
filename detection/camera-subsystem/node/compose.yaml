@@ -51,6 +51,10 @@ services:
   camera-link:
     <<: *node
     command: ["camera-link", "run"]
+    # systemctl as root uses systemd's private socket, which refuses a peer in another PID namespace
+    # ("Failed to connect to system scope bus ... No data available"). D-Bus works from a container.
+    environment:
+      SYSTEMCTL_FORCE_BUS: "1"
     # Root: it holds the camera password and writes the root-only frigate.env. It starts and
     # stops host units (frigate, DHCP) by asking host systemd over the mounted sockets.
     read_only: true

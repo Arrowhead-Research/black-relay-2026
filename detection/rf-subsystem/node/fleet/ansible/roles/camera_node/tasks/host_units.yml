@@ -52,11 +52,20 @@
   loop: "{{ eth0_files.stdout_lines | reject('match', 'MIXED ') | list }}"
   register: eth0_removed
 
+# The file alone is not enough: NetworkManager reads it at boot. A run that wrote it but failed before
+# the reboot would otherwise leave it unloaded for good, and eth0 never becomes the camera link.
+- name: Has NetworkManager loaded the camera link profile?
+  ansible.builtin.command: nmcli -t -f NAME connection show
+  register: nm_profiles
+  changed_when: false
+  check_mode: false
+
 - name: Reboot needed for eth0, the driver option or Docker
   ansible.builtin.set_fact:
     reboot_reasons: >-
       {{ reboot_reasons
-         + (['eth0 profile'] if camera_profile is changed or eth0_removed is changed else [])
+         + (['eth0 profile'] if camera_profile is changed or eth0_removed is changed
+            or 'black-relay-camera' not in nm_profiles.stdout_lines else [])
          + (['daemon.json'] if daemon_json is changed else [])
          + (['hailo_pci.conf'] if hailo_conf is changed else []) }}
 
