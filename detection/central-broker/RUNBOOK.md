@@ -89,8 +89,10 @@ topic read detection/rf/cues/camera
 Mosquitto's ACL denies by default: a client with the physical credential cannot publish under
 `detection/rf/`, and no publisher can read. The RF console does not subscribe to anything, and
 the physical bridge "subscribes to nothing and never reads from the broker" by contract, so
-write-only is exact. Camera nodes get their own lines when they move (they also read
-`detection/rf/cues/camera`).
+write-only is exact. Each camera node has its own login, `cam-node-<node>`, with the same two lines
+as the shared login above (`detection/camera/#` write, `detection/rf/cues/camera` read). Its password
+is in `.env` as `BROKER_CAMERA_NODE_LOGINS`, kept by `detection/central/node-logins.sh camera <node>`;
+the shared login stays for the relay's RTSP pull and the Frigate proxy secret.
 
 ### 1.3 `entrypoint.sh`
 

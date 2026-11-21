@@ -1,0 +1,11 @@
+# Needs the node to come back on Wi-Fi: if Ansible was connected over eth0, the node will not answer
+# here again, because eth0 is now the camera link.
+- name: Reboot ({{ reboot_reasons | join(', ') }})
+  ansible.builtin.reboot:
+    reboot_timeout: 900
+    msg: "fleet provision: {{ reboot_reasons | join(', ') }}"
+
+- name: The stack is up again
+  ansible.builtin.command: docker compose -f /opt/black-relay/src/node/compose.yaml up -d
+  register: stack_after
+  changed_when: "(stack_after.stdout ~ stack_after.stderr) is search('Created|Recreated|Started')"

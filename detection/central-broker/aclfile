@@ -22,5 +22,6 @@ user @CAMERA_USER@
 topic write detection/camera/#
 topic read detection/rf/cues/camera
 
-# RF nodes (rf-node-<node>, from BROKER_RF_NODE_LOGINS) are appended by entrypoint.sh, each with
-# `topic write detection/rf/nodes/<node>/#` only.
+# Per-node logins are appended by entrypoint.sh from BROKER_RF_NODE_LOGINS and BROKER_CAMERA_NODE_LOGINS
+# (kept by detection/central/node-logins.sh). rf-node-<node> gets `topic write detection/rf/nodes/<node>/#`
+# only; cam-node-<node> gets the two camera lines above, for its own login.

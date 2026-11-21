@@ -1,15 +1,25 @@
-# The RF fleet. The node name is the hostname, the Kismet source prefix (wbt-4:wifi ...) and the
-# analytics node_id. Per-node settings (address, adapters) go in host_vars/<node>.yml; see
-# host_vars/wbt-1.yml.example.
+# The fleet. Node names are hostnames: wbt-N are the RF nodes (the name is also the Kismet source
+# prefix and the analytics node_id), cam-N are the camera kits (the name is also the bridge node_id
+# and the Frigate camera name). Per-node settings (address, adapters, camera zones) go in
+# host_vars/<node>.yml; see host_vars/*.yml.example.
 all:
   children:
-    rf_nodes:
-      hosts:
-        wbt-1:
-        wbt-2:
-        wbt-3:
-        wbt-4:
-    # The central server: the playbook reads (or creates) the console's node heartbeat token there.
+    fleet_nodes:
+      children:
+        rf_nodes:
+          hosts:
+            wbt-1:
+            wbt-2:
+            wbt-3:
+            wbt-4:
+        camera_nodes:
+          hosts:
+            cam-1:
+            cam-2:
+            cam-3:
+            cam-4:
+    # The central server: the playbook reads (or creates) the console's node heartbeat token there
+    # and makes the nodes' broker logins.
     central:
       hosts:
         rf-central:

@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
-# Flash and provision the RF (WBT) Raspberry Pi nodes. Run from an admin Mac or Linux machine.
+# Flash and provision the Raspberry Pi nodes: RF (wbt-N) and camera (cam-N). Run from an admin Mac or Linux machine.
 #
 #   ./fleet.sh flash <node> <device>    write Raspberry Pi OS Lite to an SD card / USB disk and seed its
 #                                       first boot (hostname, SSH key, Wi-Fi). Asks before erasing.
 #   ./fleet.sh seed <node> <boot dir>   only seed a card that is already flashed (e.g. with Raspberry Pi
 #                                       Imager, customisation off): <boot dir> is its mounted bootfs
-#   ./fleet.sh provision [node|all]     install the node stack and point it at the central server (Ansible)
-#   ./fleet.sh ping [node|all]          check Ansible can reach the nodes
-#   ./fleet.sh wifi <node|all> <ssid>   set (or change) running nodes' backhaul Wi-Fi with Ansible; each
+#   ./fleet.sh provision [target]       install the node stack and point it at the central server (Ansible)
+#   ./fleet.sh ping [target]            check Ansible can reach the nodes
+#   ./fleet.sh wifi <target> <ssid>     set (or change) running nodes' backhaul Wi-Fi with Ansible; each
 #                                       joins now if in range, else whenever the network appears
+#   target: a node (wbt-1, cam-2), rf (the RF nodes), camera (the camera nodes) or all (every node)
+#   Camera nodes (names starting cam-) use eth0 for the camera, so their card needs Wi-Fi:
+#   set SETUP_SSID or WIFI_SSID before seeding one.
 #
 # Settings come from fleet.env next to this script (copy fleet.env.example; it is gitignored). The SSH
 # key pair named by SSH_KEY is created on first use; only its public half goes on the cards.
-# Node names are wbt-1 ... wbt-4 (the Kismet source prefix and the hostname; see ansible/inventory.yml).
+# Node names are wbt-1 ... wbt-4 (the Kismet source prefix and the hostname) and cam-1 ... cam-4
+# (the hostname, bridge node_id and Frigate camera name); see ansible/inventory.yml.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 die() { echo "error: $*" >&2; exit 1; }
-usage() { sed -n '2,15p' "$0"; exit 2; }
+usage() { sed -n '2,14p' "$0"; exit 2; }
 
 FLEET_ENV="${FLEET_ENV:-$here/fleet.env}"
 # shellcheck source=/dev/null
@@ -34,6 +38,7 @@ CACHE_DIR="${CACHE_DIR:-$HOME/.cache/blackrelay-fleet}"
 KNOWN_HOSTS="${KNOWN_HOSTS:-$HOME/.ssh/blackrelay_fleet_known_hosts}"   # node host keys, by node name
 
 valid_node() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || die "node names are lowercase letters, digits and dashes: $1"; }
+is_camera() { [[ "$1" == cam-* ]]; }
 json() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"; }
 
 ensure_key() {
@@ -84,6 +89,8 @@ cmd_seed() {
   valid_node "$node"
   [ -d "$dir" ] || die "not a directory: $dir"
   [ -f "$dir/config.txt" ] || [ -n "${FLEET_SEED_ANY_DIR:-}" ] || die "$dir does not look like a Raspberry Pi boot partition (no config.txt)"
+  # A camera node's eth0 is the camera link: the card must not configure it, so it needs Wi-Fi.
+  ! is_camera "$node" || [ -n "$SETUP_SSID" ] || [ -n "$WIFI_SSID" ] || die "$node is a camera node: eth0 is the camera link, so set SETUP_SSID or WIFI_SSID (fleet.env) to give it Wi-Fi"
   ensure_key
   pubkey="$(cat "$SSH_KEY.pub")"
   local psk="" setup_files="" setup_cmds="" diag_files="" diag_cmds=""
@@ -107,6 +114,11 @@ $(write_file "$dest/$name" "$mode" "$(cat "$here/files/$name")")"
   - [systemctl, enable, --now, rf-wifi-fallback.timer]'
     [ "$node" != "$SETUP_HUB" ] || setup_cmds="$setup_cmds
   - [nmcli, connection, up, setup-ap]"
+  fi
+  if is_camera "$node"; then
+    # NetworkManager must not make a DHCP profile for eth0 (the camera link, set up by provision).
+    setup_files="$setup_files${setup_files:+
+}$(write_file /etc/NetworkManager/conf.d/10-black-relay-camera.conf 0644 $'[main]\nno-auto-default=eth0\n')"
   fi
   if [ -n "${FLEET_DIAG:-}" ]; then
     # Wi-Fi snapshots to rf-diag.txt on the boot partition for 6 minutes (read it on the admin machine).
@@ -144,15 +156,17 @@ EOF
 }}$diag_files"
   [ -z "$setup_files" ] || printf 'write_files:\n%s\n' "$setup_files" >>"$dir/user-data"
 
+  local eth_cfg='  ethernets:
+    eth0:
+      dhcp4: true
+      optional: true
+'
+  is_camera "$node" && eth_cfg=""    # eth0 is the camera link: not configured here
   if [ -n "$WIFI_SSID" ]; then
     cat >"$dir/network-config" <<EOF
 network:
   version: 2
-  ethernets:
-    eth0:
-      dhcp4: true
-      optional: true
-  wifis:
+${eth_cfg}  wifis:
     wlan0:
       dhcp4: true
       optional: true
@@ -162,7 +176,7 @@ network:
           password: $(json "$psk")
 EOF
   else
-    printf 'network:\n  version: 2\n  ethernets:\n    eth0:\n      dhcp4: true\n      optional: true\n' >"$dir/network-config"
+    printf 'network:\n  version: 2\n%s' "$eth_cfg" >"$dir/network-config"
   fi
   : >"$dir/ssh"   # older images: enable sshd on first boot
   local role=""
@@ -170,7 +184,7 @@ EOF
     if [ "$node" = "$SETUP_HUB" ]; then role="hosts setup network \"$SETUP_SSID\" (10.42.0.1), "
     else role="joins setup network \"$SETUP_SSID\", rescue hotspot \"$node-setup\", "; fi
   fi
-  echo "Seeded $dir for $node: user $ADMIN_USER, key $(ssh-keygen -lf "$SSH_KEY.pub" | awk '{print $2}'), ${role}${WIFI_SSID:+Wi-Fi \"$WIFI_SSID\", }Ethernet DHCP."
+  echo "Seeded $dir for $node: user $ADMIN_USER, key $(ssh-keygen -lf "$SSH_KEY.pub" | awk '{print $2}'), ${role}${WIFI_SSID:+Wi-Fi \"$WIFI_SSID\", }$(is_camera "$node" && echo "eth0 left for the camera" || echo "Ethernet DHCP")."
 }
 
 # fetch_image -> path of the verified, cached .img.xz
@@ -252,25 +266,34 @@ cmd_flash() {
   echo "Done. Put the card in $node and power it on, then: $0 provision $node"
 }
 
-ansible_run() { # ansible_run <site.yml|wifi.yml|ping> [limit] [ansible args...]
+# target_pattern <node|all|rf|camera>: the Ansible pattern for a target (all is every node, not central).
+target_pattern() {
+  case "$1" in
+    all) echo fleet_nodes ;;
+    rf) echo rf_nodes ;;
+    camera) echo camera_nodes ;;
+    *) valid_node "$1"; echo "$1" ;;
+  esac
+}
+
+ansible_run() { # ansible_run <site.yml|wifi.yml|ping> [target] [ansible args...]
   command -v ansible-playbook >/dev/null || die "Ansible is not installed (pipx install ansible-core, or brew install ansible)"
   ensure_key
-  local limit="${2:-all}"
-  [ "$limit" = all ] || valid_node "$limit"
+  local pattern; pattern="$(target_pattern "${2:-all}")"
   case "${CENTRAL_SECRETS:-}" in ""|/*) ;; *) CENTRAL_SECRETS="$PWD/$CENTRAL_SECRETS" ;; esac
   cd "$here/ansible"
   export FLEET_SSH_KEY="$SSH_KEY" FLEET_ADMIN_USER="$ADMIN_USER" FLEET_KNOWN_HOSTS="$KNOWN_HOSTS"
+  export FLEET_CAMERA_HEF="${CAMERA_HEF:-}"
   if [ "$1" = ping ]; then
-    ansible rf_nodes -m ansible.builtin.ping ${limit:+--limit "$limit"}
+    ansible fleet_nodes -m ansible.builtin.ping --limit "$pattern"
   else
-    local nodes; nodes="$( [ "$limit" = all ] && echo rf_nodes || echo "$limit")"
     if [ "$1" = site.yml ] && [ -n "${CENTRAL_SECRETS:-}" ]; then
-      # No SSH to the central server: the values come from rf-node-secrets.sh's output, run there by hand.
+      # No SSH to the central server: the values come from node-secrets.sh's output, run there by hand.
       [ -r "$CENTRAL_SECRETS" ] || die "CENTRAL_SECRETS: cannot read $CENTRAL_SECRETS"
-      ansible-playbook "$1" --limit "$nodes" -e "central_secrets_file=$CENTRAL_SECRETS" "${@:3}"
+      ansible-playbook "$1" --limit "$pattern" -e "central_secrets_file=$CENTRAL_SECRETS" "${@:3}"
     else
-      # The central host is in the play: it holds the console's heartbeat token and the broker logins.
-      ansible-playbook "$1" --limit "central,$nodes" "${@:3}"
+      # The central host is in the play: it makes the broker logins and holds the console's token.
+      ansible-playbook "$1" --limit "central,$pattern" "${@:3}"
     fi
   fi
 }

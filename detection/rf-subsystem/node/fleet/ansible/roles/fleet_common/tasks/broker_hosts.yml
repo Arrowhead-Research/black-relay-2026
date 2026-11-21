@@ -1,0 +1,9 @@
+# Pin the broker's name to the central server's LAN address. The caller sets broker_hosts_handler to the
+# handler that restarts its services.
+- name: Broker name resolves to the central server on the LAN
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: "\\s{{ broker_host | regex_escape }}$"
+    line: "{{ broker_address }} {{ broker_host }}"
+  when: broker_address | default('') | length > 0
+  notify: "{{ broker_hosts_handler }}"

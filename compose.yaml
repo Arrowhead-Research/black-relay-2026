@@ -54,7 +54,8 @@ services:
       # rf-analytics' login: generated with the RF passwords by rf-bootstrap (nothing in .env).
       BROKER_RF_ANALYTICS_USER: rf-analytics
       BROKER_RF_ANALYTICS_PASSWORD_FILE: /run/rf-secrets/analytics-broker-password
-      BROKER_RF_NODE_LOGINS: ${BROKER_RF_NODE_LOGINS:-}   # one login per RF node: detection/central/rf-node-logins.sh
+      BROKER_RF_NODE_LOGINS: ${BROKER_RF_NODE_LOGINS:-}   # one login per RF node: detection/central/node-logins.sh rf
+      BROKER_CAMERA_NODE_LOGINS: ${BROKER_CAMERA_NODE_LOGINS:-}   # one login per camera node: detection/central/node-logins.sh camera
     depends_on:
       rf-bootstrap: {condition: service_completed_successfully}
     mem_limit: 256m
