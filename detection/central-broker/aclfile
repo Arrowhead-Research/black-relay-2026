@@ -22,6 +22,13 @@ user @CAMERA_USER@
 topic write detection/camera/#
 topic read detection/rf/cues/camera
 
+# The camera relay's API (camera-relay-service in the root compose): reads only the camera topics it
+# stores. Optional: entrypoint.sh drops this block when BROKER_RELAY_API_USER is unset.
+user @RELAY_API_USER@
+topic read detection/camera/detections
+topic read detection/camera/cue-acks
+topic read detection/camera/status/nodes
+
 # Per-node logins are appended by entrypoint.sh from BROKER_RF_NODE_LOGINS and BROKER_CAMERA_NODE_LOGINS
 # (kept by detection/central/node-logins.sh). rf-node-<node> gets `topic write detection/rf/nodes/<node>/#`
 # only; cam-node-<node> gets the two camera lines above, for its own login.

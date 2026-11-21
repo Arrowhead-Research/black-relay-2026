@@ -16,9 +16,17 @@ if [ -n "$BROKER_RF_ANALYTICS_USER" ] && [ -z "$BROKER_RF_ANALYTICS_PASSWORD" ];
     echo "BROKER_RF_ANALYTICS_USER is set without BROKER_RF_ANALYTICS_PASSWORD" >&2
     exit 1
 fi
+# The camera relay's API has its own login when the camera relay runs here (root compose).
+BROKER_RELAY_API_USER="${BROKER_RELAY_API_USER:-}"
+BROKER_RELAY_API_PASSWORD="${BROKER_RELAY_API_PASSWORD:-}"
+if [ -n "$BROKER_RELAY_API_USER" ] && [ -z "$BROKER_RELAY_API_PASSWORD" ]; then
+    echo "BROKER_RELAY_API_USER is set without BROKER_RELAY_API_PASSWORD" >&2
+    exit 1
+fi
 
 for user in "$BROKER_FUSION_USER" "$BROKER_PHYSICAL_USER" "$BROKER_RF_USER" \
-    "$BROKER_CAMERA_USER" ${BROKER_RF_ANALYTICS_USER:+"$BROKER_RF_ANALYTICS_USER"}; do
+    "$BROKER_CAMERA_USER" ${BROKER_RF_ANALYTICS_USER:+"$BROKER_RF_ANALYTICS_USER"} \
+    ${BROKER_RELAY_API_USER:+"$BROKER_RELAY_API_USER"}; do
     case "$user" in
     *:* | *\&* | *\|* | *\\* | *[[:space:]]*)
         echo "a broker user cannot hold a colon, &, |, backslash or space" >&2
@@ -35,19 +43,33 @@ printf '%s\n%s\n' "$BROKER_RF_PASSWORD" "$BROKER_RF_PASSWORD" |
     mosquitto_passwd "$auth/passwd" "$BROKER_RF_USER" >/dev/null
 printf '%s\n%s\n' "$BROKER_CAMERA_PASSWORD" "$BROKER_CAMERA_PASSWORD" |
     mosquitto_passwd "$auth/passwd" "$BROKER_CAMERA_USER" >/dev/null
+# Optional logins: a block whose user is unset is dropped from the ACL (its user line up to the next
+# blank line).
+drop=""
 if [ -n "$BROKER_RF_ANALYTICS_USER" ]; then
     printf '%s\n%s\n' "$BROKER_RF_ANALYTICS_PASSWORD" "$BROKER_RF_ANALYTICS_PASSWORD" |
         mosquitto_passwd "$auth/passwd" "$BROKER_RF_ANALYTICS_USER" >/dev/null
-    acl_src=/broker/aclfile
-else # drop the rf-analytics block (its user line up to the next blank line)
-    acl_src="$auth/aclfile.in"
-    awk '/^user @RF_ANALYTICS_USER@/ { skip = 1 } skip && /^$/ { skip = 0 } !skip' /broker/aclfile >"$acl_src"
+else
+    drop="$drop RF_ANALYTICS_USER"
 fi
+if [ -n "$BROKER_RELAY_API_USER" ]; then
+    printf '%s\n%s\n' "$BROKER_RELAY_API_PASSWORD" "$BROKER_RELAY_API_PASSWORD" |
+        mosquitto_passwd "$auth/passwd" "$BROKER_RELAY_API_USER" >/dev/null
+else
+    drop="$drop RELAY_API_USER"
+fi
+acl_src="$auth/aclfile.in"
+awk -v drop="$drop" '
+    BEGIN { n = split(drop, d, " "); for (i = 1; i <= n; i++) want["user @" d[i] "@"] = 1 }
+    want[$0] { skip = 1 }
+    skip && /^$/ { skip = 0 }
+    !skip' /broker/aclfile >"$acl_src"
 sed -e "s|@FUSION_USER@|$BROKER_FUSION_USER|" \
     -e "s|@PHYSICAL_USER@|$BROKER_PHYSICAL_USER|" \
     -e "s|@RF_USER@|$BROKER_RF_USER|" \
     -e "s|@CAMERA_USER@|$BROKER_CAMERA_USER|" \
     -e "s|@RF_ANALYTICS_USER@|$BROKER_RF_ANALYTICS_USER|" \
+    -e "s|@RELAY_API_USER@|$BROKER_RELAY_API_USER|" \
     "$acl_src" >"$auth/aclfile"
 rm -f "$auth/aclfile.in"
 # Per-node logins, one per "node:password" entry, kept in .env by detection/central/node-logins.sh.
@@ -92,6 +114,6 @@ chown -R mosquitto:mosquitto "$auth" /mosquitto/data
 unset BROKER_FUSION_USER BROKER_FUSION_PASSWORD BROKER_PHYSICAL_USER BROKER_PHYSICAL_PASSWORD \
     BROKER_RF_USER BROKER_RF_PASSWORD BROKER_CAMERA_USER BROKER_CAMERA_PASSWORD \
     BROKER_RF_NODE_LOGINS BROKER_CAMERA_NODE_LOGINS \
-    BROKER_RF_ANALYTICS_USER BROKER_RF_ANALYTICS_PASSWORD
+    BROKER_RF_ANALYTICS_USER BROKER_RF_ANALYTICS_PASSWORD BROKER_RELAY_API_USER BROKER_RELAY_API_PASSWORD
 
 exec mosquitto -c /broker/mosquitto.conf

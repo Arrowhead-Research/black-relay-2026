@@ -93,6 +93,11 @@ write-only is exact. Each camera node has its own login, `cam-node-<node>`, with
 as the shared login above (`detection/camera/#` write, `detection/rf/cues/camera` read). Its password
 is in `.env` as `BROKER_CAMERA_NODE_LOGINS`, kept by `detection/central/node-logins.sh camera <node>`;
 the shared login stays for the relay's RTSP pull and the Frigate proxy secret.
+On the central server, `detection/central/make-env.sh` (run by `setup-central.sh`) makes these
+per-node logins, RF and camera, for every node in the fleet inventory, so they exist before any node
+is provisioned. The camera relay's API, which the root compose runs, has its own read-only login
+`relay-api` (`BROKER_RELAY_API_USER`, read on the three `detection/camera/` topics it stores);
+`entrypoint.sh` drops that block when the variable is unset, as it does for rf-analytics.
 
 ### 1.3 `entrypoint.sh`
 
