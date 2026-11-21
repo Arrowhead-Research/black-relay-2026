@@ -139,6 +139,12 @@ if [ "$bridge" = 1 ]; then
   [ -z "$panel_ip" ] || set_yaml iq_remote panel_ip "$panel_ip"
   set_yaml mqtt port 8884
   set_yaml fusion enabled true
+  # Same site as fusion files the camera and RF nodes under (its site_id), so /api/v1/nodes shows one site.
+  site_id="$(sed -n 's/^ *site_id: *\([^ #]*\).*/\1/p' "$root/detection/central/fusion.config.yaml" | head -1)"
+  if [ -n "$site_id" ]; then
+    set_yaml site id "$site_id"
+    grep -qE '^  name: default( |$)' <(awk '/^site:/{f=1;next} /^[a-z]/{f=0} f' "$dep/config/config.yaml") && set_yaml site name "$site_id"
+  fi
   if [ -n "$domain" ]; then  # the broker's alias on black-relay-local is its certificate name: TLS verifies
     set_yaml fusion host "$domain"; set_yaml fusion port 8883
     set_yaml fusion tls "{ca_file: /etc/ssl/certs/ca-certificates.crt}"

@@ -81,8 +81,8 @@ api:
   metrics_host: 127.0.0.1         # bind address of /metrics (default loopback; set the LAN IP for a remote Prometheus)
 
 site:                             # identifies this installation in every team message
-  id: default                     # short stable id, e.g. "home-1"
-  name: default                   # human-readable name
+  id: central                     # same as fusion's site_id (detection/central/fusion.config.yaml), so fusion lists
+  name: central                   #   the bridge under the same site as the camera and RF nodes
 
 # Team ("fusion") MQTT output, DRAFT v0: see MQTT-CONTRACT.md. Publish-only, no retained messages, at least once.
 # Off by default; the bridge starts and runs normally with it off. Enable it by also starting the `fusion` compose
