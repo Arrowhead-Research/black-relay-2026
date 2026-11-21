@@ -7,6 +7,9 @@ x-node: &node
   build:
     context: ..
     dockerfile: Dockerfile
+    # The node's Docker has no bridge network (daemon.json "bridge": "none"), so build steps
+    # (pip, apk) reach the internet only on the host network.
+    network: host
   network_mode: host
   restart: unless-stopped
 
