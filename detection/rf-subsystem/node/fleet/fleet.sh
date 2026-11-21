@@ -31,6 +31,7 @@ SETUP_SSID="${SETUP_SSID:-}"     # staging network the hub hosts; empty: no hub,
 SETUP_HUB="${SETUP_HUB:-wbt-1}"
 IMAGE_URL="${IMAGE_URL:-https://downloads.raspberrypi.com/raspios_lite_arm64_latest}"
 CACHE_DIR="${CACHE_DIR:-$HOME/.cache/blackrelay-fleet}"
+KNOWN_HOSTS="${KNOWN_HOSTS:-$HOME/.ssh/blackrelay_fleet_known_hosts}"   # node host keys, by node name
 
 valid_node() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || die "node names are lowercase letters, digits and dashes: $1"; }
 json() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"; }
@@ -60,10 +61,13 @@ psk_of() {
 wifi_psk() { ask_pass "Wi-Fi passphrase for $WIFI_SSID" WIFI_PASSWORD; psk_of "$WIFI_SSID" "$WIFI_PASSWORD"; }
 
 # nm_profile <id> <ssid> <psk> <ap|client> <autoconnect yes|no> <priority>: a NetworkManager keyfile.
+# Hotspots: WPA2-CCMP only and PMF off (pmf=1). The Pi's brcmfmac radio advertises PMF in AP mode but
+# does not complete it, so iPhones and Macs see the network and then fail to join.
 nm_profile() {
-  printf '[connection]\nid=%s\ntype=wifi\ninterface-name=wlan0\nautoconnect=%s\nautoconnect-priority=%s\n\n' "$1" "$5" "$6"
+  local auto=false; [ "$5" != yes ] || auto=true
+  printf '[connection]\nid=%s\ntype=wifi\ninterface-name=wlan0\nautoconnect=%s\nautoconnect-priority=%s\n\n' "$1" "$auto" "$6"
   if [ "$4" = ap ]; then
-    printf '[wifi]\nmode=ap\nband=bg\nssid=%s\n\n[wifi-security]\nkey-mgmt=wpa-psk\nproto=rsn\npairwise=ccmp\ngroup=ccmp\npsk=%s\n\n[ipv4]\nmethod=shared\naddress1=10.42.0.1/24\n\n[ipv6]\nmethod=disabled\n' "$2" "$3"
+    printf '[wifi]\nmode=ap\nband=bg\nssid=%s\n\n[wifi-security]\nkey-mgmt=wpa-psk\nproto=rsn\npairwise=ccmp\ngroup=ccmp\npmf=1\npsk=%s\n\n[ipv4]\nmethod=shared\naddress1=10.42.0.1/24\n\n[ipv6]\nmethod=disabled\n' "$2" "$3"
   else
     printf '[wifi]\nmode=infrastructure\nssid=%s\n\n[wifi-security]\nkey-mgmt=wpa-psk\npsk=%s\n\n[ipv4]\nmethod=auto\n\n[ipv6]\nmethod=auto\n' "$2" "$3"
   fi
@@ -82,7 +86,7 @@ cmd_seed() {
   [ -f "$dir/config.txt" ] || [ -n "${FLEET_SEED_ANY_DIR:-}" ] || die "$dir does not look like a Raspberry Pi boot partition (no config.txt)"
   ensure_key
   pubkey="$(cat "$SSH_KEY.pub")"
-  local psk="" setup_files="" setup_cmds=""
+  local psk="" setup_files="" setup_cmds="" diag_files="" diag_cmds=""
   [ -z "$WIFI_SSID" ] || psk="$(wifi_psk)"
   if [ -n "$SETUP_SSID" ]; then
     # Hub: hosts SETUP_SSID while staging. Others: join it, and keep <node>-setup as their rescue hotspot.
@@ -104,8 +108,16 @@ $(write_file "$dest/$name" "$mode" "$(cat "$here/files/$name")")"
     [ "$node" != "$SETUP_HUB" ] || setup_cmds="$setup_cmds
   - [nmcli, connection, up, setup-ap]"
   fi
+  if [ -n "${FLEET_DIAG:-}" ]; then
+    # Wi-Fi snapshots to rf-diag.txt on the boot partition for 6 minutes (read it on the admin machine).
+    diag_files="$(write_file /usr/local/sbin/rf-diag 0755 "$(cat "$here/files/rf-diag")")"
+    diag_cmds='  - [systemd-run, --collect, --unit=rf-diag, /usr/local/sbin/rf-diag]'
+  fi
 
-  printf 'instance-id: %s\nlocal-hostname: %s\n' "$node" "$node" >"$dir/meta-data"
+  # A new instance-id on every seed: cloud-init runs first boot again even on a card that has booted.
+  printf 'instance-id: %s\nlocal-hostname: %s\n' "$node-$(date -u +%Y%m%dT%H%M%SZ)" "$node" >"$dir/meta-data"
+  # That also gives the node new SSH host keys: forget its old one.
+  [ ! -f "$KNOWN_HOSTS" ] || ssh-keygen -R "$node" -f "$KNOWN_HOSTS" >/dev/null 2>&1 || true
 
   cat >"$dir/user-data" <<EOF
 #cloud-config
@@ -123,10 +135,13 @@ users:
 ssh_pwauth: false
 disable_root: true
 runcmd:
+${diag_cmds}
   - [raspi-config, nonint, do_wifi_country, $(json "$WIFI_COUNTRY")]
   - [systemctl, enable, --now, ssh]
 ${setup_cmds}
 EOF
+  setup_files="$setup_files${setup_files:+${diag_files:+
+}}$diag_files"
   [ -z "$setup_files" ] || printf 'write_files:\n%s\n' "$setup_files" >>"$dir/user-data"
 
   if [ -n "$WIFI_SSID" ]; then
@@ -243,7 +258,7 @@ ansible_run() { # ansible_run <site.yml|wifi.yml|ping> [limit] [ansible args...]
   local limit="${2:-all}"
   [ "$limit" = all ] || valid_node "$limit"
   cd "$here/ansible"
-  export FLEET_SSH_KEY="$SSH_KEY" FLEET_ADMIN_USER="$ADMIN_USER"
+  export FLEET_SSH_KEY="$SSH_KEY" FLEET_ADMIN_USER="$ADMIN_USER" FLEET_KNOWN_HOSTS="$KNOWN_HOSTS"
   if [ "$1" = ping ]; then
     ansible rf_nodes -m ansible.builtin.ping ${limit:+--limit "$limit"}
   else

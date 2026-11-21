@@ -13,7 +13,7 @@ cp fleet.env.example fleet.env            # once: user, SSH key path, timezone, 
 | Command | What it does |
 |---|---|
 | `fleet.sh flash <node> <disk>` | Downloads Raspberry Pi OS Lite (64-bit), checks its SHA-256, writes it to the card (refuses internal disks and asks you to type the node name), then seeds first boot. |
-| `fleet.sh seed <node> <bootfs>` | Seeds a card you already wrote (e.g. with Raspberry Pi Imager, OS customisation off). |
+| `fleet.sh seed <node> <bootfs>` | Seeds a card you already wrote (e.g. with Raspberry Pi Imager, OS customisation off), or re-seeds one: each seed has a new cloud-init instance-id, so first boot runs again even on a card that has booted (new SSH host keys; the node's old key is dropped from `~/.ssh/blackrelay_fleet_known_hosts`). `FLEET_DIAG=1` adds Wi-Fi diagnostics: for 6 minutes after boot the node writes `rf-diag.txt` to its boot partition. |
 | `fleet.sh provision [node\|all]` | Runs `ansible/site.yml`: installs and starts the node stack, points it at the central server and delivers the heartbeat token. Safe to re-run. Extra args go to Ansible: `fleet.sh provision all --check --diff`. |
 | `fleet.sh ping [node\|all]` | Checks Ansible can log in. |
 | `fleet.sh wifi <node\|all> "<SSID>"` | Ansible (`ansible/wifi.yml`): moves running nodes onto a Wi-Fi network (asks for the passphrase, or `WIFI_PASSWORD`). With a setup hub it hands over in order, hub last; see below. |
@@ -61,6 +61,8 @@ For when the site's Wi-Fi isn't known at flash time. With `SETUP_SSID=BlackRelay
 
   Every node saves it (ranked above the setup network), the other nodes switch first, and after 90 s the playbook checks none of them is still answering on the setup network. If any is (wrong passphrase, out of range) or was never reached, it stops and the hub keeps the hotspot up, so you can fix it and run again. Otherwise the hub switches last and turns its hotspot off; if it can't join after 60 s it turns the hotspot back on. Then join the site network yourself and `./fleet.sh ping`.
 - **Rescue hotspot.** Every node runs `rf-wifi-fallback` (a 1-minute timer). If it has had no network at all (no default route) for 3 minutes, it opens its own hotspot, `wbt-4-setup` for wbt-4 (the hub reuses `BlackRelay-Setup`), with the setup passphrase. Join it and run `./fleet.sh wifi wbt-4 "<SSID>" -e ansible_host=10.42.0.1` (or SSH to `pi@10.42.0.1` with the fleet key). While nobody is connected, it drops the hotspot every 10 minutes to retry the known networks.
+
+**Hotspot can't be joined?** The hotspots are WPA2-AES with PMF off (the Pi's radio advertises PMF in hotspot mode but doesn't complete it, which stops iPhones and Macs joining). Give a node 3–4 minutes after first power-on. With the card in your machine, `./check-setup-pass.sh [/Volumes/bootfs]` tells you whether a passphrase matches the card's setup keys (it prints neither). For the node's own view, re-seed with `FLEET_DIAG=1`, boot it, try to join, then read `rf-diag.txt` from the card.
 
 Wi-Fi is only the node's link back to central, on the onboard radio (`wlan0`); capture stays on the external adapter. Only the derived WPA keys are stored on cards and nodes. Anyone with a card can join the setup network while it's up, so keep it off when you aren't staging; SSH still only accepts the fleet key and the broker link is TLS. The site network must reach the central server (172.20.100.150) for capture and MQTT.
 

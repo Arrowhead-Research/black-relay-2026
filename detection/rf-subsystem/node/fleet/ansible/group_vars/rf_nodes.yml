@@ -3,6 +3,11 @@ ansible_host: "{{ inventory_hostname }}.local"
 # fleet.sh exports these from fleet.env (ADMIN_USER, SSH_KEY).
 ansible_user: "{{ lookup('ansible.builtin.env', 'FLEET_ADMIN_USER') | default('pi', true) }}"
 ansible_ssh_private_key_file: "{{ lookup('ansible.builtin.env', 'FLEET_SSH_KEY') | default('~/.ssh/blackrelay_fleet', true) }}"
+# Host keys are kept by node name, so a node reached at 10.42.0.1 (setup or rescue hotspot) or a new
+# DHCP address is still checked against its own key; fleet.sh seed forgets a node's key when it re-seeds.
+ansible_ssh_extra_args: >-
+  -o HostKeyAlias={{ inventory_hostname }}
+  -o UserKnownHostsFile={{ lookup('ansible.builtin.env', 'FLEET_KNOWN_HOSTS') | default('~/.ssh/blackrelay_fleet_known_hosts', true) }}
 
 # Where Kismet capture (TCP 3501) and console heartbeats (8080) go: the central server's LAN address. Nodes are not on
 # the tailnet; the RF stack must bind 3501/8080 on this address (BIND_ADDR in its .env).

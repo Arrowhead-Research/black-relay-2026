@@ -29,7 +29,7 @@ ap = nc["network"]["wifis"]["wlan0"]["access-points"]
 psk = hashlib.pbkdf2_hmac("sha1", b"correct horse battery", b'Lab "5G"', 4096, 32).hex()
 assert ap == {'Lab "5G"': {"password": psk}}, ap
 md = yaml.safe_load(open(f"{boot}/meta-data"))
-assert md == {"instance-id": "wbt-5", "local-hostname": "wbt-5"}
+assert md["local-hostname"] == "wbt-5" and md["instance-id"].startswith("wbt-5-"), md
 PY
 
 rm -f "$work/boot"/*
@@ -52,16 +52,35 @@ def psk(ssid):
     return hashlib.pbkdf2_hmac("sha1", b"setup pass 99", ssid.encode(), 4096, 32).hex()
 ud, f = files("hub")
 ap = kv(f["setup-ap.nmconnection"])
-assert ap["mode"] == "ap" and ap["ssid"] == "BlackRelay-Setup" and ap["autoconnect"] == "yes" and ap["method"] in ("shared", "disabled")
+assert ap["mode"] == "ap" and ap["ssid"] == "BlackRelay-Setup" and ap["autoconnect"] == "true" and ap["method"] in ("shared", "disabled")
+assert ap["pmf"] == "1" and ap["key-mgmt"] == "wpa-psk" and ap["pairwise"] == ap["group"] == "ccmp"
 assert ap["psk"] == psk("BlackRelay-Setup") and "setup-wifi.nmconnection" not in f
 assert ["nmcli", "connection", "up", "setup-ap"] in ud["runcmd"]
 ud, f = files("spoke")
 cl, ap = kv(f["setup-wifi.nmconnection"]), kv(f["setup-ap.nmconnection"])
 assert cl["mode"] == "infrastructure" and cl["ssid"] == "BlackRelay-Setup" and cl["psk"] == psk("BlackRelay-Setup")
-assert ap["ssid"] == "wbt-4-setup" and ap["autoconnect"] == "no" and ap["psk"] == psk("wbt-4-setup")
+assert ap["ssid"] == "wbt-4-setup" and ap["autoconnect"] == "false" and ap["pmf"] == "1" and ap["psk"] == psk("wbt-4-setup")
+assert cl["autoconnect"] == "true" and "pmf" not in cl
+assert not any(r and r[0] == "systemd-run" for r in ud["runcmd"] if r) and "rf-diag" not in f
 assert ["nmcli", "connection", "up", "setup-ap"] not in ud["runcmd"]
 assert ["systemctl", "enable", "--now", "rf-wifi-fallback.timer"] in ud["runcmd"] and "rf-wifi-fallback" in f
 PY
+
+# Re-seeding gives a new instance-id (first boot runs again) and forgets the node's old host key;
+# FLEET_DIAG adds the Wi-Fi diagnostics, started first.
+before="$(grep instance-id "$work/hub/meta-data")"; sleep 1
+printf 'wbt-1 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOld1111111111111111111111111111111111111111\nwbt-2 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeep222222222222222222222222222222222222222\n' >"$work/known_hosts"
+KNOWN_HOSTS="$work/known_hosts" FLEET_DIAG=1 SETUP_SSID=BlackRelay-Setup SETUP_HUB=wbt-1 SETUP_PASSWORD='setup pass 99' "$here/fleet.sh" seed wbt-1 "$work/hub" >/dev/null
+[ "$(grep instance-id "$work/hub/meta-data")" != "$before" ] || fail "re-seed kept the instance-id"
+{ ! grep -q '^wbt-1 ' "$work/known_hosts" && grep -q '^wbt-2 ' "$work/known_hosts"; } || fail "known_hosts not updated"
+python3 - "$work/hub/user-data" <<'PY'
+import sys, yaml
+ud = yaml.safe_load(open(sys.argv[1]))
+assert [r for r in ud["runcmd"] if r][0] == ["systemd-run", "--collect", "--unit=rf-diag", "/usr/local/sbin/rf-diag"], ud["runcmd"]
+paths = [f["path"] for f in ud["write_files"]]
+assert "/usr/local/sbin/rf-diag" in paths and any(p.endswith("setup-ap.nmconnection") for p in paths), paths
+PY
+sh -n "$here/files/rf-diag" || fail "rf-diag syntax"
 
 if "$here/fleet.sh" seed 'Bad_Name' "$work/boot" 2>/dev/null; then fail "accepted a bad node name"; fi
 mkdir "$work/notboot"
