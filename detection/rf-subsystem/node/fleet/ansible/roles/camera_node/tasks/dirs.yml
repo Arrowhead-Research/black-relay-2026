@@ -28,5 +28,6 @@
     - { path: /etc/systemd/journald.conf.d, mode: "0755" }
     - { path: /etc/systemd/timesyncd.conf.d, mode: "0755" }
     - { path: /etc/docker, mode: "0755" }
+    - { path: /etc/systemd/system/docker.service.d, mode: "0755" }
   loop_control:
     label: "{{ item.path }}"

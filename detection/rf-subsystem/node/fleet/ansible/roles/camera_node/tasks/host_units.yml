@@ -71,6 +71,19 @@
     - 'run-frigate\x2dcache.mount'
   notify: Reload systemd
 
+# camera-link runs in the Docker stack here, not as the host unit that pulls the cache mount in at
+# boot. The stack bind-mounts /run/frigate-cache, so Docker must start after the mount, or no
+# container starts after a reboot ("bind source path does not exist").
+- name: Docker starts after the segment cache mount
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/docker.service.d/10-frigate-cache.conf
+    content: |
+      [Unit]
+      Wants=run-frigate\x2dcache.mount
+      After=run-frigate\x2dcache.mount
+    mode: "0644"
+  notify: Reload systemd
+
 - name: Docker enabled
   ansible.builtin.systemd_service:
     name: docker
