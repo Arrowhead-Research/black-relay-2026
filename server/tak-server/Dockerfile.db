@@ -1,0 +1,9 @@
+FROM postgres:15
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends postgresql-15-postgis-3 default-jdk && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY tak/ /opt/tak
+COPY CoreConfig.xml /opt/tak
+
+ENTRYPOINT ["/opt/tak/db-utils/configureInDocker.sh"]
