@@ -21,6 +21,15 @@
     fail_msg: "fleet_admin_nets and central_host must be IPv4 addresses or networks (got {{ admin_entries }}, {{ central_host }})"
     quiet: true
 
+# Never load rules that would shut out the machine running this: it must be admitted by its own address.
+- name: The controller's IPv4 address is known
+  ansible.builtin.assert:
+    that: (controller_ip.stdout | trim) is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
+    fail_msg: >-
+      Ansible is connected to {{ inventory_hostname }} from '{{ controller_ip.stdout | trim }}', not an IPv4
+      address, so the firewall would lock this machine out. Connect over IPv4 (ansible_host: <its IPv4>).
+    quiet: true
+
 - name: Is the table loaded?
   ansible.builtin.command: nft list table inet black_relay
   register: table_loaded
