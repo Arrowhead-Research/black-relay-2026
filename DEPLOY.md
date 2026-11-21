@@ -23,11 +23,12 @@ The server needs one branch that holds everything. That is `detection/develop` o
 |---|---|---|
 | RF node fleet, no-SSH provisioning | `detection/rf-node-fleet` (PR #14) | pushed, tested on wbt-1 to wbt-4, not merged |
 | Camera kits in the fleet, camera relay in the root compose | `detection/camera-node-fleet` | pushed at ce4eac8, not merged, lacks the two RF provisioning fixes |
-| Physical bridge on the same host, `site_id=central` | physical branch | not pushed yet |
+| Physical bridge on the same host, `site_id=central` | `claude/project-thread-rwwcms` (PR into `detection/rf-node-fleet`) | pushed at c576fec, not merged |
 
-Order: merge PR #14, then merge `detection/rf-node-fleet` into the camera branch (it was branched
-before the `python3-debian` and package-lock fixes; the merge is clean), then merge camera and physical
-into `detection/develop`. Deploy `<BRANCH>` = `detection/develop`.
+Order: merge the physical PR into `detection/rf-node-fleet`, merge PR #14 into `detection/develop`,
+then merge `detection/develop` into the camera branch (it was branched before the `python3-debian` and
+package-lock fixes; the merge is clean) and merge the camera branch. Deploy `<BRANCH>` =
+`detection/develop`.
 
 If you deploy before the merges, use `detection/camera-node-fleet` for RF plus cameras (after the
 RF fixes are merged into it, or a fresh Pi fails at the Kismet repository step), or
@@ -87,19 +88,38 @@ registry and secrets store, the broker (1883 and 8883 with TLS), fusion, the RF 
 Console, rf-analytics) and, with the camera commits, the camera relay. It is safe to run again. After
 the first run, `docker compose up -d` from `<REPO>` is enough.
 
-If the IQ panel is cabled to this server, add the bridge:
+### Physical bridge, if the IQ panel is cabled to this server
 
-```
-./setup-central.sh <SERVER_IP> --domain reg.bulexa.com --email <EMAIL> --with-bridge --panel-ip <PANEL_IP>
-```
+Needs the physical commits (step 0). Full notes: the physical thread's
+`central-server-physical-bridge.md`.
 
-It asks for sudo once, and the panel still has to be paired (see `detection/physical-subsystem/README.md`,
-"Pairing"). The panel tools run from the bridge's own folder, not the repo root:
-
-```
-cd detection/physical-subsystem/deploy
-docker compose run --rm iq-tools watch --minutes 10 --config /config/config.yaml
-```
+1. The server needs an address on the panel link, for example `192.168.2.1/24` on the interface cabled
+   to the panel. The panel does not answer ping; check with `nc -z <PANEL_IP> 8883`.
+2. Put the panel pairing in place, owned by the bridge's user. From the pairing backup
+   (`pki-eth` is the Ethernet pairing):
+   ```
+   cd <REPO>/detection/physical-subsystem/deploy
+   sudo mkdir -p data/pki
+   sudo cp -Rp <backup>/pki-eth/. data/pki/
+   sudo chown -R 10001:10000 data/pki && sudo chmod -R go-rwx data/pki
+   ```
+   Moving a pairing to another machine has not been tried on the real panel. If the panel refuses it,
+   pair again (`detection/physical-subsystem/README.md`, "Pairing").
+3. From `<REPO>`, the same setup command with the bridge added. It asks for sudo once:
+   ```
+   ./setup-central.sh <SERVER_IP> --domain reg.bulexa.com --email <EMAIL> --with-bridge --panel-ip <PANEL_IP>
+   ```
+   It makes the broker answer as reg.bulexa.com inside Docker, points the bridge at it on 8883 with TLS,
+   sets the bridge's site id to fusion's (`central`), writes the bridge's broker password and starts the
+   bridge. No `CENTRAL_BROKER_NAME`/`CENTRAL_BROKER_IP` settings and no compose override are needed.
+   Re-run this command whenever something drifts.
+4. Start or stop the bridge with `--profile fusion`, or its sender to fusion does not run. The panel
+   tools run from the bridge's folder, not the repo root:
+   ```
+   cd <REPO>/detection/physical-subsystem/deploy
+   docker compose --profile fusion ps
+   docker compose run --rm iq-tools watch --minutes 10 --config /config/config.yaml
+   ```
 
 *(camera)* Check `RELAY_SITE_SUBNET` in `<REPO>/.env`. It defaults to the /24 of the server's address.
 The relay only registers kits whose heartbeats come from inside it.
@@ -201,6 +221,21 @@ openssl s_client -connect <SERVER_IP>:8883 -servername reg.bulexa.com </dev/null
 
 Expect `CN=reg.bulexa.com`, a Let's Encrypt issuer and the same expiry as before.
 
+Physical bridge, on the server:
+
+```
+cd <REPO>/detection/physical-subsystem/deploy
+docker compose --profile fusion logs fusion | grep -E 'publisher up|connected|refused|cannot' | tail
+```
+
+Expect `fusion publisher up: reg.bulexa.com:8883 prefix=detection/physical site=central` and
+`connected`. The `/api/v1/nodes` call above should list `physical-bridge-01` with site `central` within
+about a minute. Open and close a door, then:
+
+```
+curl -s -H "Authorization: Bearer $FUSION_API_TOKEN" 'http://<SERVER_IP>:8090/api/v1/events?subsystem=physical'
+```
+
 WBT Console: `http://<SERVER_IP>:8080`, Nodes should show four online. The password is generated on the
 server: `docker compose exec rf-console cat /run/rf-secrets/console-admin-password`. Device positions
 on `detection/rf/positions` start once a site is set up in the console with the nodes placed. The site
@@ -211,6 +246,8 @@ offline alert follows after five minutes of silence.
 
 ## 9. Afterwards
 
+- On the old central machine, remove the test workarounds if the bridge ran there: delete
+  `detection/physical-subsystem/deploy/docker-compose.override.yml` and the `brlink` Docker network.
 - Stop the stack on the old central machine (`docker compose down` there) so no node or client keeps
   talking to it.
 - Delete every copy of `node-secrets` and of the old `rf-node-secrets`.
