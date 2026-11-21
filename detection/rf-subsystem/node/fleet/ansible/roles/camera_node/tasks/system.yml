@@ -24,6 +24,18 @@
     mode: "0644"
   notify: Restart timesyncd
 
+# timesyncd starts before Wi-Fi is up, fails its first try and backs off for up to ~34 min; it does
+# not follow NetworkManager. The bridge holds every event until NTP is synced, so ask again as soon
+# as the node has a network.
+- name: Retry time sync when the network comes up
+  ansible.builtin.copy:
+    dest: /etc/NetworkManager/dispatcher.d/50-black-relay-timesync
+    content: |
+      #!/bin/sh
+      # Written by Ansible: restart timesyncd when a connection comes up (see the camera_node role).
+      case "$2" in up|connectivity-change) systemctl restart systemd-timesyncd.service ;; esac
+    mode: "0755"
+
 - name: Broker name resolves to the central server on the LAN
   ansible.builtin.include_role:
     name: fleet_common

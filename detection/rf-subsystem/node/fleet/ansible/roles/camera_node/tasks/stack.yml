@@ -13,8 +13,16 @@
   register: source_stamp
   failed_when: false
 
-- name: Replace the source tree when it changed
-  when: (source_stamp.content | default('') | b64decode | trim) != source_pack.stdout | trim
+# The stamp alone is not proof: an interrupted run can leave it next to an empty tree.
+- name: Is the tree there?
+  ansible.builtin.stat:
+    path: /opt/black-relay/src/node/compose.yaml
+  register: source_compose
+
+- name: Replace the source tree when it changed (or is missing)
+  when: >-
+    not source_compose.stat.exists
+    or (source_stamp.content | default('') | b64decode | trim) != source_pack.stdout | trim
   block:
     - name: Clear the old tree
       ansible.builtin.file:
