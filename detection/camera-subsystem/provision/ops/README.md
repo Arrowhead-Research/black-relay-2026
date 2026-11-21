@@ -534,7 +534,7 @@ The number names the kit's console user: `kit-1`, `kit-2`, and so on, up to 99. 
 
 **Every kit starts with one default password, `BlackRelay2026`,** so that nobody handed a kit has to guess one. It is
 the password of the kit's console user and the passphrase of its setup WiFi. The central node gives the broker and
-viewer logins the same default: see `relay/README.md`. Whoever owns a kit changes them with `change-passwords.sh`,
+viewer logins the same default: see `detection/camera-relay-service/README.md`. Whoever owns a kit changes them with `change-passwords.sh`,
 below. The default is in this repository, so treat a kit that still has it as open to anyone who has read this page
 and can reach its console or its setup WiFi.
 
@@ -562,7 +562,7 @@ sudo /opt/black-relay/ops/change-passwords.sh broker       # the broker password
 Each asks for the new password twice, never shows it, and changes nothing until the two match. A password is 8 to 63
 characters with no space, quote, backtick, backslash or dollar sign, which is what all three places can take. After
 `setup-wifi`, replace the label on the kit. After `broker`, give the central node the same password, with
-`./change-passwords.sh broker` in its `relay` directory: until the two match, this kit's events queue on the kit and
+`./change-passwords.sh broker` in its `camera-relay-service` directory: until the two match, this kit's events queue on the kit and
 its video cannot be pulled.
 
 **Print the label:** the image has no printing stack, so enter the four printed lines into your

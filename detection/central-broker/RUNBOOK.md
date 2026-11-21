@@ -41,7 +41,7 @@ Before starting:
 
 ## 1. Stand up the broker
 
-All of this is the camera relay's broker setup (`camera-subsystem/relay`) with three users
+All of this is the camera relay's broker setup (`camera-relay-service`) with three users
 instead of two. Create these files in `detection/central-broker/`.
 
 ### 1.1 `mosquitto.conf`

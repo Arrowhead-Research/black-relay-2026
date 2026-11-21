@@ -1,4 +1,4 @@
-# Fusion on sf-dev: one broker, the central broker in this compose project.
+# Fusion for the simulator stack: one broker, the one in this compose project.
 database: /data/fusion.sqlite3
 camera_schemas: /contracts/camera
 rf_schemas: /contracts/rf

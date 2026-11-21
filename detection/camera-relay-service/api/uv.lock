@@ -243,7 +243,7 @@ wheels = [
 [[package]]
 name = "cameralink"
 version = "0.0.0"
-source = { editable = "../../cameralink" }
+source = { editable = "../../camera-subsystem/cameralink" }
 dependencies = [
     { name = "pyyaml" },
     { name = "reolink-aio" },
@@ -257,7 +257,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "cameraprovision", editable = "../../provision" },
+    { name = "cameraprovision", editable = "../../camera-subsystem/provision" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "ruamel-yaml", specifier = ">=0.18,<0.19" },
 ]
@@ -265,7 +265,7 @@ dev = [
 [[package]]
 name = "cameraprovision"
 version = "0.0.0"
-source = { editable = "../../provision" }
+source = { editable = "../../camera-subsystem/provision" }
 dependencies = [
     { name = "pyyaml" },
 ]
@@ -275,7 +275,7 @@ requires-dist = [{ name = "pyyaml", specifier = ">=6.0" }]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "camerabridge", editable = "../../bridge" },
+    { name = "camerabridge", editable = "../../camera-subsystem/bridge" },
     { name = "pytest", specifier = ">=8.0" },
 ]
 
@@ -1260,8 +1260,8 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "cameralink", editable = "../../cameralink" },
-    { name = "cameraprovision", editable = "../../provision" },
+    { name = "cameralink", editable = "../../camera-subsystem/cameralink" },
+    { name = "cameraprovision", editable = "../../camera-subsystem/provision" },
     { name = "httpx2", specifier = ">=2.16.0" },
     { name = "pytest", specifier = ">=8.0" },
 ]
