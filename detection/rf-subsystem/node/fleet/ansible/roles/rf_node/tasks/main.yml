@@ -1,14 +1,14 @@
-- name: Base packages (rtl-433 decodes TPMS for Kismet's helper; bluez gives btmgmt)
+- name: Base packages (rtl-433 decodes TPMS for Kismet's helper; bluez gives btmgmt; python3-debian for the deb822 repository below)
   ansible.builtin.apt:
-    name: [ca-certificates, curl, python3, python3-paho-mqtt, bluez, rfkill, usbutils, iw, rtl-433]
+    name: [ca-certificates, curl, python3, python3-debian, python3-paho-mqtt, bluez, rfkill, usbutils, iw, rtl-433]
     update_cache: true
     cache_valid_time: 3600
 
 - name: Kismet apt repository
   ansible.builtin.deb822_repository:
     name: kismet
-    uris: "https://www.kismetwireless.net/repos/apt/release/{{ ansible_distribution_release }}"
-    suites: "{{ ansible_distribution_release }}"
+    uris: "https://www.kismetwireless.net/repos/apt/release/{{ ansible_facts['distribution_release'] }}"
+    suites: "{{ ansible_facts['distribution_release'] }}"
     components: [main]
     signed_by: https://www.kismetwireless.net/repos/kismet-release.gpg.key
   register: kismet_repo
@@ -25,6 +25,11 @@
     name: "{{ item }}"
     selection: hold
   loop: "{{ capture_units | map('extract', kismet_packages) | list }}"
+  # dpkg --set-selections doesn't wait for the dpkg lock (apt does): retry while another apt run holds it.
+  register: kismet_hold
+  retries: 20
+  delay: 6
+  until: kismet_hold is succeeded
 
 - name: Not on the tailnet
   ansible.builtin.include_tasks: tailscale.yml
