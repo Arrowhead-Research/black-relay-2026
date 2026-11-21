@@ -10,29 +10,14 @@ at it: the RF nodes (wbt-1 to wbt-4) and the camera kits (cam-1 to cam-4). Writt
 | `<USER>` | your login on the server |
 | `<REPO>` | the checkout on the server, for example `/srv/black-relay-2026` |
 | `<EMAIL>` | the Let's Encrypt account email used before |
-| `<BRANCH>` | the branch to deploy, see step 0 |
 
 Secrets (the certificate folder, `node-secrets`, console passwords) only travel over `scp` or AirDrop.
 Never paste them in chat or commit them.
 
 ## 0. Before you start: which branch
 
-The server needs one branch that holds everything. That is `detection/develop` once these are merged:
-
-| Work | Branch | State when this was written |
-|---|---|---|
-| RF node fleet, no-SSH provisioning | `detection/rf-node-fleet` (PR #14) | pushed, tested on wbt-1 to wbt-4, not merged |
-| Camera kits in the fleet, camera relay in the root compose | `detection/camera-node-fleet` | pushed at ce4eac8, not merged, lacks the two RF provisioning fixes |
-| Physical bridge on the same host, `site_id=central` | `claude/project-thread-rwwcms` (PR into `detection/rf-node-fleet`) | pushed at c576fec, not merged |
-
-Order: merge the physical PR into `detection/rf-node-fleet`, merge PR #14 into `detection/develop`,
-then merge `detection/develop` into the camera branch (it was branched before the `python3-debian` and
-package-lock fixes; the merge is clean) and merge the camera branch. Deploy `<BRANCH>` =
-`detection/develop`.
-
-If you deploy before the merges, use `detection/camera-node-fleet` for RF plus cameras (after the
-RF fixes are merged into it, or a fresh Pi fails at the Kismet repository step), or
-`detection/rf-node-fleet` for RF only, and skip the steps marked *(camera)*.
+Deploy `detection/develop`. It holds the RF node fleet (PR #14), the camera kits and the camera relay
+in the central project (PR #15) and the physical bridge on the same host (PR #16).
 
 ## 1. Server prep (on the new server)
 
@@ -47,7 +32,7 @@ RF fixes are merged into it, or a fresh Pi fails at the Kismet repository step),
 3. Clone and check out:
    ```
    git clone git@github.com:Arrowhead-Research/black-relay-2026.git <REPO>
-   cd <REPO> && git checkout <BRANCH>
+   cd <REPO> && git checkout detection/develop
    ```
 4. Optional, saves build time: the images are private on ghcr.io, already built for amd64.
    `docker login ghcr.io -u <github user>` with a token that has `read:packages`. Without it the setup
@@ -85,13 +70,12 @@ From `<REPO>`:
 
 This creates the logins, reuses the certificate, adds the daily renewal to cron, and starts the
 registry and secrets store, the broker (1883 and 8883 with TLS), fusion, the RF services (Kismet, WBT
-Console, rf-analytics) and, with the camera commits, the camera relay. It is safe to run again. After
-the first run, `docker compose up -d` from `<REPO>` is enough.
+Console, rf-analytics) and the camera relay. It is safe to run again. After the first run,
+`docker compose up -d` from `<REPO>` is enough; to update, see step 9.
 
 ### Physical bridge, if the IQ panel is cabled to this server
 
-Needs the physical commits (step 0). Full notes: the physical thread's
-`central-server-physical-bridge.md`.
+Full notes: the physical thread's `central-server-physical-bridge.md`.
 
 1. The server needs an address on the panel link, for example `192.168.2.1/24` on the interface cabled
    to the panel. The panel does not answer ping; check with `nc -z <PANEL_IP> 8883`.
@@ -153,8 +137,6 @@ detection/central/node-secrets.sh camera cam-1 cam-2 cam-3 cam-4 >> node-secrets
 chmod 600 node-secrets
 ```
 
-On the RF-only branch the script is `detection/central/rf-node-secrets.sh wbt-1 wbt-2 wbt-3 wbt-4 > node-secrets`.
-
 Copy it to your Mac, then delete it on the server:
 
 ```
@@ -164,7 +146,7 @@ rm <REPO>/node-secrets                                        # run on the serve
 
 ## 7. Repoint and provision the nodes (on your Mac)
 
-In the fleet folder (`detection/rf-subsystem/node/fleet`) of a checkout on `<BRANCH>`:
+In the fleet folder (`detection/rf-subsystem/node/fleet`) of a checkout on `detection/develop`:
 
 1. Point the fleet at the new server. The old address is written in the Ansible settings; this replaces
    every occurrence and shows the result:
@@ -183,7 +165,7 @@ In the fleet folder (`detection/rf-subsystem/node/fleet`) of a checkout on `<BRA
    ```
    chmod 600 ~/node-secrets
    CENTRAL_SECRETS=~/node-secrets ./fleet.sh provision wbt-1
-   CENTRAL_SECRETS=~/node-secrets ./fleet.sh provision rf       # "all" on the RF-only branch
+   CENTRAL_SECRETS=~/node-secrets ./fleet.sh provision rf
    ```
 5. *(camera)* Set `CAMERA_HEF=/path/to/yolov6n.hef` in `fleet.env` (sha256 starts `6a20a395`), check
    `camera_zones` in `ansible/host_vars/cam-N.yml` against the RF zone names, then:
@@ -191,6 +173,10 @@ In the fleet folder (`detection/rf-subsystem/node/fleet`) of a checkout on `<BRA
    ./fleet.sh ping camera
    CENTRAL_SECRETS=~/node-secrets ./fleet.sh provision camera
    ```
+   This is proven on cam-3 and cam-4: Reolink adopted, Frigate healthy on the Hailo-8, bridge clock
+   synced and connected to the broker over TLS. Each Reolink goes on its Pi's `eth0` through a powered
+   PoE injector; a kit with no camera link stays at `no_camera` and needs no re-run once one is plugged
+   in. The first start downloads Frigate's image (several GB), so allow a few minutes per kit.
 6. Delete the file: `rm ~/node-secrets`
 
 Run one provision at a time. Two runs against the same node at once collide on the package lock.
@@ -244,7 +230,21 @@ and floor plan from the old machine do not carry over.
 Quick event test: unplug one RF node. Its `online` topic goes to `0` within about a minute, and an
 offline alert follows after five minutes of silence.
 
-## 9. Afterwards
+## 9. Updating a machine that already runs the stack
+
+On the server, from `<REPO>`:
+
+```
+git pull
+detection/central/make-env.sh
+docker compose up -d --build
+```
+
+`make-env.sh` only adds `.env` keys that are missing (new services' settings, logins for nodes newly in
+the fleet inventory). Existing logins, tokens and the certificate are kept, so nodes and clients keep
+working without re-provisioning.
+
+## 10. Afterwards
 
 - On the old central machine, remove the test workarounds if the bridge ran there: delete
   `detection/physical-subsystem/deploy/docker-compose.override.yml` and the `brlink` Docker network.
