@@ -1,14 +1,14 @@
-- name: Base packages (rtl-433 decodes TPMS for Kismet's helper; bluez gives btmgmt)
+- name: Base packages (rtl-433 decodes TPMS for Kismet's helper; bluez gives btmgmt; python3-debian for the deb822 repository below)
   ansible.builtin.apt:
-    name: [ca-certificates, curl, python3, python3-paho-mqtt, bluez, rfkill, usbutils, iw, rtl-433]
+    name: [ca-certificates, curl, python3, python3-debian, python3-paho-mqtt, bluez, rfkill, usbutils, iw, rtl-433]
     update_cache: true
     cache_valid_time: 3600
 
 - name: Kismet apt repository
   ansible.builtin.deb822_repository:
     name: kismet
-    uris: "https://www.kismetwireless.net/repos/apt/release/{{ ansible_distribution_release }}"
-    suites: "{{ ansible_distribution_release }}"
+    uris: "https://www.kismetwireless.net/repos/apt/release/{{ ansible_facts['distribution_release'] }}"
+    suites: "{{ ansible_facts['distribution_release'] }}"
     components: [main]
     signed_by: https://www.kismetwireless.net/repos/kismet-release.gpg.key
   register: kismet_repo
