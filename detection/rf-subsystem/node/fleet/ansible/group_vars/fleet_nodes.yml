@@ -7,7 +7,10 @@ ansible_user: "{{ lookup('ansible.builtin.env', 'FLEET_ADMIN_USER') | default('p
 ansible_ssh_private_key_file: "{{ lookup('ansible.builtin.env', 'FLEET_SSH_KEY') | default('~/.ssh/blackrelay_fleet', true) }}"
 # Host keys are kept by node name, so a node reached at 10.42.0.1 (setup or rescue hotspot) or a new
 # DHCP address is still checked against its own key; fleet.sh seed forgets a node's key when it re-seeds.
+# IPv4 only: camera nodes' firewalls admit the controller by the IPv4 address it connects from (SSH_CLIENT).
+# Over IPv6 (mDNS often resolves <node>.local to a link-local fe80:: address) it would be left out.
 ansible_ssh_extra_args: >-
+  -o AddressFamily=inet
   -o HostKeyAlias={{ inventory_hostname }}
   -o UserKnownHostsFile={{ lookup('ansible.builtin.env', 'FLEET_KNOWN_HOSTS') | default('~/.ssh/blackrelay_fleet_known_hosts', true) }}
 
