@@ -51,9 +51,8 @@ sed -e "s|@FUSION_USER@|$BROKER_FUSION_USER|" \
     "$acl_src" >"$auth/aclfile"
 rm -f "$auth/aclfile.in"
 mkdir -p "$auth/conf.d"
-# TLS listener on 8883 when a certificate is mounted (read-only) at /tls: the root compose mounts
-# central-broker/state/tls, the Let's Encrypt certificate from cert.sh (reg.bulexa.com). Copied so that
-# only the mosquitto user can read the key; the source stays private to the server's admin user.
+# TLS listener on 8883 when a certificate is mounted (read-only) at /tls. Copied so that only the
+# mosquitto user can read the key; the source can stay private to the store's owner.
 if [ -r /tls/server.crt ] && [ -r /tls/server.key ]; then
     cp /tls/server.crt "$auth/tls.crt"
     cp /tls/server.key "$auth/tls.key"

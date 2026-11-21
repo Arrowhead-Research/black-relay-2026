@@ -13,7 +13,7 @@ Consumer: the fusion service (subscribes). The bridge is publish-only on this co
 
 | | |
 |---|---|
-| Broker | the central broker on the central server, port 1883 with a login, repo-root `compose.yaml` |
+| Broker | the central broker on the central server: `reg.bulexa.com:8883` (TLS) or `:1883`, repo-root `compose.yaml` |
 | Transport | TLS on 8883 (Let's Encrypt certificate) with a per-publisher username/password; the bridge logs in as `physical-subsystem` and may only write `detection/physical/#` |
 | MQTT version | 3.1.1 |
 | Client id | `physical-subsystem` (config `fusion.client_id`; must be unique on the broker) |
