@@ -151,8 +151,12 @@ if [ "$bridge" = 1 ]; then
   # Same site as fusion files the camera and RF nodes under (its site_id), so /api/v1/nodes shows one site.
   site_id="$(sed -n 's/^ *site_id: *\([^ #]*\).*/\1/p' "$root/detection/central/fusion.config.yaml" | head -1)"
   if [ -n "$site_id" ]; then
+    site_block() { awk '/^site:/{f=1;next} /^[a-z]/{f=0} f' "$dep/config/config.yaml"; }
+    old_id="$(site_block | sed -n 's/^  id: *\([^ #]*\).*/\1/p')"
+    old_name="$(site_block | sed -n 's/^  name: *\([^ #]*\).*/\1/p')"
     set_yaml site id "$site_id"
-    grep -qE '^  name: default( |$)' <(awk '/^site:/{f=1;next} /^[a-z]/{f=0} f' "$dep/config/config.yaml") && set_yaml site name "$site_id"
+    # The name follows the id unless someone gave it a name of its own.
+    if [ "$old_name" = default ] || [ "$old_name" = "$old_id" ]; then set_yaml site name "$site_id"; fi
   fi
   if [ -n "$domain" ]; then  # the broker's alias on black-relay-local is its certificate name: TLS verifies
     set_yaml fusion host "$domain"; set_yaml fusion port 8883

@@ -23,7 +23,7 @@ The server needs one branch that holds everything. That is `detection/develop` o
 |---|---|---|
 | RF node fleet, no-SSH provisioning | `detection/rf-node-fleet` (PR #14) | pushed, tested on wbt-1 to wbt-4, not merged |
 | Camera kits in the fleet, camera relay in the root compose | `detection/camera-node-fleet` | pushed at ce4eac8, not merged, lacks the two RF provisioning fixes |
-| Physical bridge on the same host, `site_id=central` | `claude/project-thread-rwwcms` (PR into `detection/rf-node-fleet`) | pushed at c576fec, not merged |
+| Physical bridge on the same host, `site_id=sh1` | `claude/project-thread-rwwcms` (PR into `detection/rf-node-fleet`) | pushed at c576fec, not merged |
 
 Order: merge the physical PR into `detection/rf-node-fleet`, merge PR #14 into `detection/develop`,
 then merge `detection/develop` into the camera branch (it was branched before the `python3-debian` and
