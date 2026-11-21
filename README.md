@@ -33,6 +33,9 @@ detection/central/share-broker-login.sh <name>                    # a bridge's b
                                                                   # bridge with deploy/scripts/fetch-broker-login.sh
 ```
 
+To work against the API without any hardware, `detection/simulator-deploy/deploy-simulator-api.sh` starts simulated
+RF, panel and camera sources with their own broker and fusion on one machine.
+
 ## Images and device secrets on GitHub (ghcr.io)
 
 Images are built for amd64 and arm64 by `.github/workflows/publish-images.yml` on every push to `main` and pushed to

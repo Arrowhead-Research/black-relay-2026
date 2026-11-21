@@ -23,8 +23,8 @@ dev = [
 ]
 
 [tool.uv.sources]
-cameralink = { path = "../../cameralink", editable = true }
-cameraprovision = { path = "../../provision", editable = true }
+cameralink = { path = "../../camera-subsystem/cameralink", editable = true }
+cameraprovision = { path = "../../camera-subsystem/provision", editable = true }
 
 [build-system]
 requires = ["hatchling"]

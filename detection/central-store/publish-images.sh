@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Push images from this machine's Docker to the central store, so hosts pull them instead of
-# loading a tarball. Run on the build machine after detection/deploy/build.sh.
+# loading a tarball. Run on the build machine once the images are built (or pulled) locally.
 #
 #   docker login <server>:5001 -u publisher        once (password from ./server.sh init)
 #   ./publish-images.sh <server> [image ...]       default: the sf-dev bundle's images + the store toolbox
@@ -34,7 +34,8 @@ if [ "${images[0]:-}" = "--bridge" ]; then
   done
   exit 0
 elif [ ${#images[@]} -eq 0 ]; then
-  # Keep in step with detection/deploy/build.sh (its `docker save` list).
+  # The images a dev/simulator host runs, under local :sfdev tags (the old detection/deploy/build.sh
+  # list; detection/simulator-deploy builds the same services).
   images=(black-relay/fusion-service:sfdev black-relay/physical-sim:sfdev black-relay/rf-analytics:sfdev
           black-relay/rfsim:sfdev eclipse-mosquitto:2.1.2-alpine camera-relay-netguard:0.1.0
           camera-relay-chrony:4.8 bluenviron/mediamtx:1.21.3 black-relay/central-tools:0.1.0)
@@ -43,7 +44,7 @@ elif [ ${#images[@]} -eq 0 ]; then
 fi
 for spec in "${images[@]}"; do
   img="${spec%%=*}"; remote="${spec#*=}"
-  docker image inspect "$img" >/dev/null 2>&1 || { echo "missing locally: $img (run build.sh or docker pull it)" >&2; exit 1; }
+  docker image inspect "$img" >/dev/null 2>&1 || { echo "missing locally: $img (build or docker pull it)" >&2; exit 1; }
   docker tag "$img" "$server:5001/$remote"
   docker push -q "$server:5001/$remote"
   docker rmi "$server:5001/$remote" >/dev/null

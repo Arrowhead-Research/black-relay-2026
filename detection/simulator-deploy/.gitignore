@@ -1,0 +1,4 @@
+# Written by deploy-simulator-api.sh: the API token and the broker passwords.
+.env
+# Left over from the old bundle build.
+out/

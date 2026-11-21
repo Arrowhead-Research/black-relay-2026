@@ -13,7 +13,7 @@ Status: the broker files exist and start under Compose; nothing is deployed yet.
 Today there are two brokers and the physical subsystem cannot reach either from where its
 design puts it.
 
-- The camera relay bundle ships its own mosquitto (`camera-subsystem/relay`), authenticated with
+- The camera relay bundle ships its own mosquitto (`camera-relay-service`), authenticated with
   a password file and ACL, published on the site LAN. Camera nodes publish there. The camera
   design itself calls this a stopgap: "the broker itself is the shared compute node's; the camera
   subsystem is a publisher and provides the relay config, not the broker software."
@@ -72,11 +72,11 @@ change their own credential and ACL line by pull request here.
 
 | File | Purpose | Source |
 |---|---|---|
-| `compose.yaml` | One `mosquitto` service, hardened as the camera relay's is, publishing the VLAN listener | `camera-subsystem/relay/compose.yaml`, `mosquitto` service |
-| `mosquitto.conf` | `allow_anonymous false`, password file, ACL, persistence, queue and message size limits | `camera-subsystem/relay/mosquitto/mosquitto.conf` |
-| `aclfile` | Per-publisher write on its own prefix; fusion read on `detection/#` | `camera-subsystem/relay/mosquitto/aclfile`, extended |
-| `setup-credentials.sh` | Writes `.env` with one random password per client | `camera-subsystem/relay/setup-credentials.sh` |
-| `entrypoint.sh` | Builds the password and ACL files from `.env` inside the container at each start | `camera-subsystem/relay/mosquitto/entrypoint.sh` |
+| `compose.yaml` | One `mosquitto` service, hardened as the camera relay's is, publishing the VLAN listener | `camera-relay-service/compose.yaml`, `mosquitto` service |
+| `mosquitto.conf` | `allow_anonymous false`, password file, ACL, persistence, queue and message size limits | `camera-relay-service/mosquitto/mosquitto.conf` |
+| `aclfile` | Per-publisher write on its own prefix; fusion read on `detection/#` | `camera-relay-service/mosquitto/aclfile`, extended |
+| `setup-credentials.sh` | Writes `.env` with one random password per client | `camera-relay-service/setup-credentials.sh` |
+| `entrypoint.sh` | Builds the password and ACL files from `.env` inside the container at each start | `camera-relay-service/mosquitto/entrypoint.sh` |
 | `.env.example` | Credential names, bind address, port | new |
 | `PORTS.md` | The one published port, claimed as the RF overlay asks | new |
 
@@ -155,8 +155,8 @@ One code change plus configuration.
 Configuration only. The relay's bundled broker is already optional (`profiles: [broker]`) and
 the relay API reads `RELAY_BROKER_HOST` and `RELAY_BROKER_PORT`.
 
-- `relay/.env`: `RELAY_BROKER_HOST` set to the central broker; the `broker` profile not started.
-- `relay/compose.yaml`: no change to files; the `mosquitto` service, its ACL and
+- `camera-relay-service/.env`: `RELAY_BROKER_HOST` set to the central broker; the `broker` profile not started.
+- `camera-relay-service/compose.yaml`: no change to files; the `mosquitto` service, its ACL and
   `setup-credentials.sh` become the template this directory copies and can be removed from the
   relay afterwards.
 - Node onboarding (`provision` portal, `bridge.yaml`'s `broker:` block): the central broker's

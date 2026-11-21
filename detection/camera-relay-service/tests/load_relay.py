@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Measures what the relay API costs. Not part of the test suite, and it asserts nothing.
 
-    cd relay/api
+    cd camera-relay-service/api
     uv run python ../tests/load_relay.py ingest /var/tmp/relay-load
     uv run python ../tests/load_relay.py reads /var/tmp/relay-load
     uv run python ../tests/load_relay.py pathsync
     uv run python ../tests/load_relay.py e2e /var/tmp/relay-load --rate 60 --seconds 60
 
 Put the work directory on the disk under test, never a tmpfs, or fsync costs nothing. ``SRC``
-in the environment measures another checkout's ``relay/api/src``. ``--fsync-ms`` adds a delay to
+in the environment measures another checkout's ``camera-relay-service/api/src``. ``--fsync-ms`` adds a delay to
 every fsync and counts them, which stands in for a slower disk. ``e2e`` and ``pathsync`` run the
 real broker and MediaMTX under their own compose project on free loopback ports, and always tear
 that down. Touches no other container, and not a broker on the host.
