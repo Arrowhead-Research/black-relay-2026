@@ -24,6 +24,12 @@ builds the bridge, generates its certificates (asks for sudo once), gives it the
 at the central broker and starts it; the bridge's own broker (Home Assistant / Node-RED) moves to port 8884. The
 server needs a network interface that reaches the panel, and the panel pairing (pair once, or
 `detection/central-store/secrets.sh fetch detection/physical-subsystem/deploy` to restore it).
+The bridge's team publisher then reaches the central broker inside Docker, on the network `black-relay-local`
+(`detection/physical-subsystem/deploy/docker-compose.samehost.yml`, turned on by `COMPOSE_FILE` in
+`deploy/.env`), because a container on Docker Desktop cannot reach its own host's LAN address. With `--domain`
+the broker answers there as that name, so TLS on 8883 still verifies; without it the bridge uses
+`central-broker:1883`. The script also makes the bridge's broker password readable by the publisher only
+(`deploy/scripts/fusion-secret.sh`; run it again after editing that file by hand).
 
 After that:
 

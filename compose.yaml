@@ -20,7 +20,10 @@
 #
 # Publishers connect to <address or reg.bulexa.com>:8883 with TLS and their own login (physical: user
 # physical-subsystem, password BROKER_PHYSICAL_PASSWORD in ./.env). Camera kits log in as cam-node-<node>
-# and hold the shared kit login (BROKER_CAMERA_USER) for video; see detection/rf-subsystem/node/fleet. The RF console and rf-analytics run here and reach the broker inside Docker.
+# and hold the shared kit login (BROKER_CAMERA_USER) for video; see detection/rf-subsystem/node/fleet.
+# The RF console and rf-analytics run here and reach the broker inside Docker. A publisher on this
+# same machine joins the network black-relay-local, where the broker is `central-broker` and also
+# BROKER_DOMAIN (set in ./.env by setup-central.sh --domain).
 # Nothing here listens anywhere but BIND_ADDRESS.
 
 name: black-relay-central
@@ -81,6 +84,13 @@ services:
       - ./detection/central-store/state/tls:/tls:ro
       - broker-data:/mosquitto/data
       - rf-secrets:/run/rf-secrets:ro
+    networks:
+      default: {}
+      # A publisher on this same machine (the physical bridge from setup-central.sh --with-bridge) joins
+      # this network: a container on Docker Desktop cannot reach the host's own BIND_ADDRESS. The alias
+      # BROKER_DOMAIN is the certificate's name, so TLS on 8883 still verifies.
+      local-publishers:
+        aliases: [central-broker, "${BROKER_DOMAIN:-central-broker.invalid}"]
     ports:
       - "${BIND_ADDRESS:?run detection/central/make-env.sh}:1883:1883"
       - "${BIND_ADDRESS}:8883:8883"
@@ -123,6 +133,12 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+networks:
+  # Fixed name (no project prefix) so another compose project on this machine can join it as external:
+  # detection/physical-subsystem/deploy/docker-compose.samehost.yml.
+  local-publishers:
+    name: black-relay-local
 
 volumes:
   broker-data:

@@ -187,7 +187,7 @@ services:
   # separate container only because `outbound` uses host networking and so cannot join a Docker network.
   # Sends to the central broker over the LAN (fusion.host, e.g. reg.bulexa.com:8883 with TLS) with its own login:
   # put the password (BROKER_PHYSICAL_PASSWORD from the central server's .env) in secrets/fusion/fusion_password, owned by
-  # uid 10003, mode 0600. Publish-only: it reads the one-way IPC stream + the event log and sends to the team broker.
+  # uid 10003, mode 0600 (scripts/fusion-secret.sh sets that and checks it). Publish-only: it reads the one-way IPC stream + the event log and sends to the team broker.
   fusion:
     <<: *hardening
     image: ${IMAGE_PREFIX-ghcr.io/arrowhead-research/}blackrelay-f2/outbound:latest
@@ -204,7 +204,8 @@ services:
       - ./config:/config:ro
       - ./secrets/fusion:/run/secrets:ro     # fusion_password only (fusion.password_file: /run/secrets/fusion_password)
     # Lets the publisher reach the central broker by its certificate name even where LAN DNS will not resolve it
-    # (setup-central.sh --with-bridge sets these; the default is an unused placeholder).
+    # (bridge on ANOTHER machine; the default is an unused placeholder). On the central server itself, use
+    # docker-compose.samehost.yml instead and leave these unset (setup-central.sh --with-bridge does).
     extra_hosts: ["${CENTRAL_BROKER_NAME:-central-broker.invalid}:${CENTRAL_BROKER_IP:-127.0.0.1}"]
     # Health/metrics: the service serves /metrics and /healthz on fusion.metrics_host:fusion.metrics_port (default
     # 127.0.0.1:9101, i.e. inside this container only). Unhealthy = the producer loop stalled, or the oldest queued

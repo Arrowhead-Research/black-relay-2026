@@ -6,4 +6,6 @@
 set -euo pipefail
 deploy="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 "$deploy/../../central-store/secrets.sh" fetch "$deploy" ${1:+"$1"} --bundle broker --chown 10003:10000
-echo "Restart the publisher to use it: docker compose --profile fusion up -d fusion"
+# Directory 0700 / file 0600 owned by 10003:10000, and a read test as the publisher's user.
+"$deploy/scripts/fusion-secret.sh"
+echo "Restart the publisher to use it: docker compose --profile fusion up -d --force-recreate fusion"
