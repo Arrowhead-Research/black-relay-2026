@@ -236,9 +236,15 @@ cmd_flash() {
       xz -dc "$image" | sudo dd of="${dev/disk/rdisk}" bs=4m
       sync; sleep 2
       diskutil mountDisk "$dev" >/dev/null || true
-      local boot=""
-      for _ in $(seq 1 15); do [ -f /Volumes/bootfs/config.txt ] && { boot=/Volumes/bootfs; break; }; sleep 1; done
-      [ -n "$boot" ] || die "image written but /Volumes/bootfs did not mount; mount it and run: $0 seed $node /Volumes/bootfs"
+      # This card's own boot partition (s1), wherever it mounts: with another card in, it may be
+      # "/Volumes/bootfs 1", and /Volumes/bootfs may be the other card.
+      local boot="" mp
+      for _ in $(seq 1 15); do
+        mp="$(diskutil info "${dev}s1" 2>/dev/null | sed -n 's/^ *Mount Point: *//p')"
+        [ -n "$mp" ] && [ -f "$mp/config.txt" ] && { boot="$mp"; break; }
+        sleep 1
+      done
+      [ -n "$boot" ] || die "image written but ${dev}s1 (bootfs) did not mount; mount it and run: $0 seed $node <its mount point>"
       cmd_seed "$node" "$boot"
       diskutil eject "$dev" >/dev/null
       ;;
