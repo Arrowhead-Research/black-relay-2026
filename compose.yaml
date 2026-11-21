@@ -1,14 +1,18 @@
 # BlackRelay central server: everything that runs on the central node, in one project.
 #
-#   broker    the team's central MQTT broker on 1883, with a login per publisher
+#   broker    the team's central MQTT broker: 1883 (login) and 8883 (TLS + login, reg.bulexa.com)
 #   fusion    the fusion service and its API on 8090
 #
 # First time, on the central server, from the repo root:
 #   detection/central/make-env.sh <address>    # writes ./.env: the bind address, broker logins, fusion token
+#   detection/central-broker/cert.sh reg.bulexa.com <email>   # the TLS certificate (Let's Encrypt)
 #   docker compose up -d --wait
+# (./setup-central.sh <address> --domain reg.bulexa.com --email <email> does all three.)
 #
-# Publishers connect to <address>:1883 with their own login (physical: user physical-subsystem,
-# password BROKER_PHYSICAL_PASSWORD in ./.env). Nothing here listens anywhere but BIND_ADDRESS.
+# Publishers connect to reg.bulexa.com:8883 with TLS (or <address>:1883 without) and their own login
+# (physical: user physical-subsystem, password BROKER_PHYSICAL_PASSWORD in ./.env). reg.bulexa.com
+# must resolve to <address> for them (DNS, or an /etc/hosts line). Without a certificate the broker
+# runs 1883 only. Nothing here listens anywhere but BIND_ADDRESS.
 # Images come from GitHub's registry (ghcr.io); `docker compose up --build` builds fusion here instead.
 
 name: black-relay-central
@@ -26,7 +30,9 @@ services:
   broker:
     <<: *hardening
     image: eclipse-mosquitto:2.1.2-alpine
-    cap_add: [CHOWN, SETUID, SETGID]
+    # DAC_READ_SEARCH: entrypoint.sh (root) reads the private TLS key once, copies it for the
+    # mosquitto user, then mosquitto drops root.
+    cap_add: [CHOWN, SETUID, SETGID, DAC_READ_SEARCH]
     entrypoint: ["/bin/sh", "/broker/entrypoint.sh"]
     environment:
       BROKER_FUSION_USER: ${BROKER_FUSION_USER:?run detection/central/make-env.sh}
@@ -43,9 +49,11 @@ services:
       - ./detection/central-broker/mosquitto.conf:/broker/mosquitto.conf:ro
       - ./detection/central-broker/aclfile:/broker/aclfile:ro
       - ./detection/central-broker/entrypoint.sh:/broker/entrypoint.sh:ro
+      - ./detection/central-broker/state/tls:/tls:ro   # cert.sh; empty: no TLS listener
       - broker-data:/mosquitto/data
     ports:
       - "${BIND_ADDRESS:?run detection/central/make-env.sh}:1883:1883"
+      - "${BIND_ADDRESS}:8883:8883"
     healthcheck:
       test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -u \"$$BROKER_FUSION_USER\" -P \"$$BROKER_FUSION_PASSWORD\" -t 'detection/#' -E -W 3"]
       interval: 30s

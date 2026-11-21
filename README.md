@@ -6,13 +6,17 @@ Black Relay 2026 is a four-month, open-source build to create a portable, surviv
 
 ## Central server
 
-The central server runs the team's central MQTT broker (`detection/central-broker`, port 1883 with a login per
-publisher) and the fusion service (API on 8090), both from `compose.yaml` at the repo root. On the central server:
+The central server runs the team's central MQTT broker (`detection/central-broker`: 1883 with a login per
+publisher, and 8883 with TLS for `reg.bulexa.com`) and the fusion service (API on 8090), both from `compose.yaml`
+at the repo root. On the central server:
 
 ```sh
-detection/central/make-env.sh <address>    # once: writes .env with the bind address, broker logins and fusion token
-docker compose up -d --wait
+./setup-central.sh <address> --domain reg.bulexa.com --email <you>   # once; later runs: ./setup-central.sh <address>
 ```
+
+That writes `.env` (bind address, broker logins, fusion token), gets the Let's Encrypt certificate for
+`reg.bulexa.com` over Cloudflare DNS (`detection/central-broker/cert.sh`, renewed daily from cron) and starts
+everything. TLS clients connect to `reg.bulexa.com:8883` and need that name to resolve to the server's address.
 
 `<address>` is the server's address on the network the other hosts use. `./setup-central.sh <address>` runs the
 same two steps. Running either again keeps every login and all data.
