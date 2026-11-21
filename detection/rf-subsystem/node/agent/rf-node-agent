@@ -9,8 +9,8 @@ count), whether the capture adapters are present (Wi-Fi interface,
 Bluetooth adapter, RTL-SDR), and the node's tailnet address if it has one.
 
 With MQTT_HOST set it also publishes the same heartbeat, retained, to the
-central MQTT broker as this node's own login (MQTT_USER/MQTT_PASSWORD, TLS
-unless MQTT_TLS=0): <MQTT_PREFIX>/<node>/health, plus <MQTT_PREFIX>/<node>/online
+central MQTT broker as this node's own login (MQTT_USER/MQTT_PASSWORD; TLS
+unless MQTT_TLS=0, checked against MQTT_CA if set, else the system CAs): <MQTT_PREFIX>/<node>/health, plus <MQTT_PREFIX>/<node>/online
 ("1" while connected; the broker sets "0" when the node drops off). MQTT_PREFIX
 defaults to detection/rf/nodes. Needs python3-paho-mqtt.
 
@@ -227,7 +227,7 @@ class BrokerPublisher:
         self.client.username_pw_set(env.get("MQTT_USER") or f"rf-node-{node}", env.get("MQTT_PASSWORD") or None)
         tls = env.get("MQTT_TLS", "1") != "0"
         if tls:
-            self.client.tls_set()  # system CAs: the broker's certificate is Let's Encrypt
+            self.client.tls_set(ca_certs=env.get("MQTT_CA") or None)  # MQTT_CA: the team's CA; else system CAs
         self.client.will_set(self.online_topic, "0", qos=1, retain=True)
         self.client.on_connect = self._on_connect
         self.client.reconnect_delay_set(1, 60)

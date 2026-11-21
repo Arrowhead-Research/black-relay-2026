@@ -257,13 +257,21 @@ ansible_run() { # ansible_run <site.yml|wifi.yml|ping> [limit] [ansible args...]
   ensure_key
   local limit="${2:-all}"
   [ "$limit" = all ] || valid_node "$limit"
+  case "${CENTRAL_SECRETS:-}" in ""|/*) ;; *) CENTRAL_SECRETS="$PWD/$CENTRAL_SECRETS" ;; esac
   cd "$here/ansible"
   export FLEET_SSH_KEY="$SSH_KEY" FLEET_ADMIN_USER="$ADMIN_USER" FLEET_KNOWN_HOSTS="$KNOWN_HOSTS"
   if [ "$1" = ping ]; then
     ansible rf_nodes -m ansible.builtin.ping ${limit:+--limit "$limit"}
   else
-    # The central host is always in the play: it holds the console's heartbeat token.
-    ansible-playbook "$1" --limit "central,$( [ "$limit" = all ] && echo rf_nodes || echo "$limit")" "${@:3}"
+    local nodes; nodes="$( [ "$limit" = all ] && echo rf_nodes || echo "$limit")"
+    if [ "$1" = site.yml ] && [ -n "${CENTRAL_SECRETS:-}" ]; then
+      # No SSH to the central server: the values come from rf-node-secrets.sh's output, run there by hand.
+      [ -r "$CENTRAL_SECRETS" ] || die "CENTRAL_SECRETS: cannot read $CENTRAL_SECRETS"
+      ansible-playbook "$1" --limit "$nodes" -e "central_secrets_file=$CENTRAL_SECRETS" "${@:3}"
+    else
+      # The central host is in the play: it holds the console's heartbeat token and the broker logins.
+      ansible-playbook "$1" --limit "central,$nodes" "${@:3}"
+    fi
   fi
 }
 

@@ -15,11 +15,15 @@ central_host: 172.20.100.150
 central_port: 3501
 
 # Central MQTT broker (the root compose's `broker`, shared with the physical subsystem). Each node logs
-# in as rf-node-<node> over TLS and publishes its health to detection/rf/nodes/<node>/. The certificate
-# is Let's Encrypt for broker_host; broker_address pins that name in /etc/hosts so it works on the LAN
-# whatever DNS says (empty: use DNS).
+# in as rf-node-<node> over TLS (8883) and publishes its health to detection/rf/nodes/<node>/. The
+# certificate is Let's Encrypt for broker_host; broker_address pins that name in /etc/hosts so it works
+# on the LAN whatever DNS says (empty: use DNS).
+# For a certificate from the team's own CA instead, set broker_ca_file (a CA .crt on the admin machine,
+# copied to each node). For the plain login listener: broker_port: 1883, broker_tls: false.
 broker_host: reg.bulexa.com
 broker_port: 8883
+broker_tls: true
+broker_ca_file: ""
 broker_address: 172.20.100.150
 
 # Kismet capture helpers must match the central server's release (central/kismet/Dockerfile). The

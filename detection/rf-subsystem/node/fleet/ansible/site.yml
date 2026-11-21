@@ -5,6 +5,9 @@
 #     there on the first full run (nodes first, then the console, like ../../set-node-token.sh);
 #   - each node's broker login (rf-node-<node>) is made on the central server by
 #     detection/central/rf-node-logins.sh (kept in its .env) and read back over SSH.
+# Without SSH to the central server: run detection/central/rf-node-secrets.sh there by hand, save its
+# output on the admin machine and set CENTRAL_SECRETS to that file (fleet.env or the environment);
+# fleet.sh then leaves the central host out and the nodes take their values from the file.
 # Nodes are not on the tailnet; -e leave_tailnet=true takes older nodes off it.
 
 - name: Broker logins and heartbeat token from the central server
@@ -63,8 +66,25 @@
   hosts: rf_nodes
   become: true
   vars:
-    node_token: "{{ hostvars[groups['central'][0]].node_token }}"
-    broker_password: "{{ hostvars[groups['central'][0]].broker_passwords[inventory_hostname] }}"
+    central_secrets_file: ""
+    central_secrets: "{{ dict(lookup('ansible.builtin.file', central_secrets_file).splitlines() | select | map('split', ' ', 1)) }}"
+    node_token: >-
+      {{ central_secrets['token'] if central_secrets_file else hostvars[groups['central'][0]].node_token }}
+    broker_password: >-
+      {{ central_secrets[inventory_hostname] if central_secrets_file
+         else hostvars[groups['central'][0]].broker_passwords[inventory_hostname] }}
+  pre_tasks:
+    - name: The secrets file has this node's values
+      ansible.builtin.assert:
+        that:
+          - central_secrets['token'] | default('') | length > 0
+          - central_secrets[inventory_hostname] | default('') | length > 0
+        fail_msg: >-
+          {{ central_secrets_file }} needs a "token" line and a "{{ inventory_hostname }}" line: on the
+          central server, detection/central/rf-node-secrets.sh {{ inventory_hostname }}
+        quiet: true
+      no_log: true
+      when: central_secrets_file | length > 0
   roles:
     - rf_node
 

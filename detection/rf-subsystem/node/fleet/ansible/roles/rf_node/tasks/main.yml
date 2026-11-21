@@ -101,6 +101,14 @@
   when: broker_address | default('') | length > 0
   notify: Restart capture
 
+- name: Broker CA certificate
+  ansible.builtin.copy:
+    src: "{{ broker_ca_file }}"
+    dest: /etc/rf-node/broker-ca.crt
+    mode: "0644"
+  when: broker_ca_file | default('') | length > 0
+  notify: Restart capture
+
 - name: Heartbeat token and broker login (secrets, 0600)
   ansible.builtin.lineinfile:
     path: /etc/rf-node/rf-node.env
@@ -113,6 +121,8 @@
       NODE_TOKEN: "{{ node_token }}"
       MQTT_HOST: "{{ broker_host }}"
       MQTT_PORT: "{{ broker_port }}"
+      MQTT_TLS: "{{ '1' if broker_tls | bool else '0' }}"
+      MQTT_CA: "{{ '/etc/rf-node/broker-ca.crt' if broker_ca_file | default('') | length > 0 else '' }}"
       MQTT_USER: "rf-node-{{ inventory_hostname }}"
       MQTT_PASSWORD: "{{ broker_password }}"
   no_log: true

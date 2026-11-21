@@ -41,12 +41,26 @@ The fleet key pair (`SSH_KEY`, default `~/.ssh/blackrelay_fleet`) is created on 
 
 **Central connection.** Nodes are **not on the tailnet**. Everything goes to the central server (`172.20.100.150`) on the LAN:
 
-- **Central MQTT broker** (the root compose's `broker`, the same one the physical subsystem publishes to): each node logs in as its own `rf-node-<node>` on 8883 with TLS and publishes its health, retained, to `detection/rf/nodes/<node>/health`, plus `.../online` (`1`, or `0` as its last will when it drops off). The broker only lets it write under its own `detection/rf/nodes/<node>/`.
+- **Central MQTT broker** (the root compose's `broker`, the same one the physical subsystem publishes to): each node logs in as its own `rf-node-<node>` on 8883 with TLS (the `reg.bulexa.com` Let's Encrypt certificate; `broker_tls`, `broker_ca_file` and `broker_port` in `ansible/group_vars/rf_nodes.yml` cover a private CA or the plain 1883 listener) and publishes its health, retained, to `detection/rf/nodes/<node>/health`, plus `.../online` (`1`, or `0` as its last will when it drops off). The broker only lets it write under its own `detection/rf/nodes/<node>/`.
 - **Kismet remote capture** on TCP 3501 (raw packets; the RF stack's analytics turn them into `detection/rf/...` messages under its own login) and **console heartbeats** on 8080. The RF stack must publish these on that address (`BIND_ADDR=172.20.100.150` in `rf-subsystem/central/.env`).
 
 The nodes' network must be allowed to reach 8883, 3501 and 8080 there. A node that was joined earlier stays joined until you run `fleet.sh provision <node> -e leave_tailnet=true` (logs out, removes the package).
 
 **Secrets.** Nothing secret is in the repo, the inventory or on the card. **Broker logins:** the playbook runs `detection/central/rf-node-logins.sh <nodes>` on the central server, which keeps one random password per node in the root `.env` (`BROKER_RF_NODE_LOGINS`, 0600) and re-creates the broker when it adds one; it then reads them back over SSH (`no_log`) and writes each node only its own. Re-running keeps existing passwords; to rotate one, delete that `node:password` entry from `BROKER_RF_NODE_LOGINS` and provision the node again. The console's heartbeat token is read over SSH from `CONSOLE_NODE_TOKEN` in the central RF stack's `.env` and written to each node (`no_log`). If the console has none yet, the first `fleet.sh provision all` creates one, writes the nodes first and then the console, and restarts `rf-console`, the same order as `../set-node-token.sh` (which still works to rotate it). The central login and this repo's checkout there are `ansible_user` and `central_repo_dir` in `ansible/group_vars/central.yml`.
+
+**Without SSH to the central server.** Run this by hand on the central server, from the repo root:
+
+```sh
+detection/central/rf-node-secrets.sh wbt-1 wbt-2 wbt-3 wbt-4 > rf-node-secrets
+```
+
+It creates the broker logins and, if the console has none, the heartbeat token (restarting `broker` / `rf-console` as needed), and prints a `token` line and one line per node. Bring that file to the admin machine (it is secret: keep it 0600, delete it afterwards; `rf-node-secrets*` is gitignored here) and provision with it:
+
+```sh
+CENTRAL_SECRETS=rf-node-secrets ./fleet.sh provision wbt-2
+```
+
+(or set `CENTRAL_SECRETS=` in `fleet.env`). The central host is then left out of the run entirely.
 
 ## Wi-Fi: setup hub, hand-over, rescue hotspot
 
