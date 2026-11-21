@@ -1,4 +1,4 @@
-# Move running nodes onto a Wi-Fi network (the onboard radio, wlan0), e.g. at the safehouse:
+# Move running nodes (RF and camera) onto a Wi-Fi network (the onboard radio, wlan0), e.g. at the safehouse:
 #   ../fleet.sh wifi all "Safehouse WiFi"       (asks for the passphrase; or set WIFI_PASSWORD)
 # fleet.sh passes only the derived WPA key, in the environment, and with a setup network (SETUP_SSID in
 # fleet.env) also -e setup_hub=<hub>. Capture stays on the external adapter.
@@ -13,7 +13,7 @@
 # Without a hub, every node saves the network and joins it now if it is in range.
 
 - name: Save the network on every node
-  hosts: rf_nodes
+  hosts: fleet_nodes
   become: true
   gather_facts: false
   vars: &wifi_vars
@@ -83,7 +83,7 @@
       when: setup_hub | length == 0
 
 - name: Switch the other nodes (they leave the setup network)
-  hosts: "rf_nodes:!{{ setup_hub | default('none', true) }}"
+  hosts: "fleet_nodes:!{{ setup_hub | default('none', true) }}"
   become: true
   gather_facts: false
   vars: *wifi_vars
@@ -95,7 +95,7 @@
       when: setup_hub | length > 0
 
 - name: Check they left the setup network
-  hosts: "rf_nodes:!{{ setup_hub | default('none', true) }}"
+  hosts: "fleet_nodes:!{{ setup_hub | default('none', true) }}"
   gather_facts: false
   ignore_unreachable: true
   vars: *wifi_vars
@@ -121,8 +121,8 @@
     - name: Every node in this run got the new network
       vars:
         missed: >-
-          {{ groups['rf_nodes'] | intersect(query('inventory_hostnames', ansible_limit | default('all')))
-             | reject('in', groups['rf_nodes'] | map('extract', hostvars) | selectattr('wifi_saved', 'defined')
+          {{ groups['fleet_nodes'] | intersect(query('inventory_hostnames', ansible_limit | default('all')))
+             | reject('in', groups['fleet_nodes'] | map('extract', hostvars) | selectattr('wifi_saved', 'defined')
                               | map(attribute='inventory_hostname') | list) | list }}
       ansible.builtin.assert:
         that: missed | length == 0
@@ -134,7 +134,7 @@
     - name: Every other node left the setup network
       vars:
         stuck: >-
-          {{ groups['rf_nodes'] | difference([setup_hub])
+          {{ groups['fleet_nodes'] | difference([setup_hub])
              | select('in', hostvars) | map('extract', hostvars)
              | selectattr('still_here', 'defined') | rejectattr('still_here.unreachable', 'defined')
              | map(attribute='inventory_hostname') | list }}

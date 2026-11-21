@@ -1,0 +1,4 @@
+# Copy to host_vars/<node>.yml. No secrets.
+# ansible_host: 172.22.100.21        # its LAN address, if <node>.local does not resolve
+camera_zones: [perimeter-north, driveway]   # site zones this camera covers (required)
+camera_upside_down: false                   # true if the camera is mounted inverted

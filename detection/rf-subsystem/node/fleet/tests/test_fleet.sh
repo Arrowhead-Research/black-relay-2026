@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Checks fleet.sh seed output (valid YAML, no passphrase on the card, PSK matches wpa_passphrase's
+# Checks fleet.sh seed output (RF and camera nodes) (valid YAML, no passphrase on the card, PSK matches wpa_passphrase's
 # algorithm) and the playbook's syntax. Runs anywhere with bash and python3 (PyYAML); the playbook
 # check also needs ansible-playbook.
 set -euo pipefail
@@ -82,12 +82,53 @@ assert "/usr/local/sbin/rf-diag" in paths and any(p.endswith("setup-ap.nmconnect
 PY
 sh -n "$here/files/rf-diag" || fail "rf-diag syntax"
 
+# Camera nodes: eth0 is the camera link, so seeding needs Wi-Fi and the network config has no eth0.
+rm -rf "$work/cam"; mkdir "$work/cam"
+if "$here/fleet.sh" seed cam-2 "$work/cam" 2>/dev/null; then fail "seeded a camera node without Wi-Fi"; fi
+SETUP_SSID=BlackRelay-Setup SETUP_HUB=wbt-1 SETUP_PASSWORD='setup pass 99' "$here/fleet.sh" seed cam-2 "$work/cam" >/dev/null
+WIFI_SSID='Lab "5G"' WIFI_PASSWORD='correct horse battery' "$here/fleet.sh" seed cam-3 "$work/boot" >/dev/null
+python3 - "$work" <<'PY'
+import base64, sys, yaml
+w = sys.argv[1]
+for d in ("cam", "boot"):
+    nc = open(f"{w}/{d}/network-config").read()
+    assert "eth0" not in nc, nc
+    assert yaml.safe_load(nc)["network"]["version"] == 2
+ud = yaml.safe_load(open(f"{w}/cam/user-data"))
+assert ud["hostname"] == "cam-2" and "video" in ud["users"][0]["groups"]
+files = {f["path"].rsplit("/", 1)[1]: base64.b64decode(f["content"]).decode() for f in ud["write_files"]}
+assert "ssid=cam-2-setup" in files["setup-ap.nmconnection"] and "pmf=1" in files["setup-ap.nmconnection"]
+assert "ssid=BlackRelay-Setup" in files["setup-wifi.nmconnection"] and "rf-wifi-fallback" in files
+assert "no-auto-default=eth0" in files["10-black-relay-camera.conf"]
+assert yaml.safe_load(open(f"{w}/cam/meta-data"))["local-hostname"] == "cam-2"
+assert "wlan0" in yaml.safe_load(open(f"{w}/boot/network-config"))["network"]["wifis"]
+PY
+! grep -rq 'setup pass 99' "$work/cam" || fail "setup passphrase written to a camera card"
+# RF nodes keep Ethernet DHCP
+rm -f "$work/boot"/*; WIFI_SSID='' "$here/fleet.sh" seed wbt-7 "$work/boot" >/dev/null
+grep -q eth0 "$work/boot/network-config" || fail "RF node lost eth0"
+
 if "$here/fleet.sh" seed 'Bad_Name' "$work/boot" 2>/dev/null; then fail "accepted a bad node name"; fi
 mkdir "$work/notboot"
 if FLEET_SEED_ANY_DIR='' "$here/fleet.sh" seed wbt-1 "$work/notboot" 2>/dev/null; then fail "seeded a non-boot dir"; fi
 
 if command -v ansible-playbook >/dev/null; then
   (cd "$here/ansible" && ansible-playbook --syntax-check site.yml >/dev/null && ansible-playbook --syntax-check wifi.yml >/dev/null) || fail "playbook syntax"
-  (cd "$here/ansible" && ansible-inventory --graph | grep -q wbt-4) || fail "inventory"
+  graph="$(cd "$here/ansible" && ansible-inventory --graph)"
+  grep -q wbt-4 <<<"$graph" && grep -q cam-1 <<<"$graph" && grep -q '@fleet_nodes' <<<"$graph" || fail "inventory"
+  # Without SSH to central: CENTRAL_SECRETS leaves the central host out, and one node-secrets.sh file
+  # (rf and camera output together) gives each node kind its values.
+  printf 'token tok123\nwbt-1 rfpw 1\nrelay_user relay\nrelay_password kitpw\ncam-1 campw\n' >"$work/node-secrets"
+  hosts="$(CENTRAL_SECRETS="$work/node-secrets" "$here/fleet.sh" provision cam-1 --list-hosts)"
+  grep -qx ' *cam-1' <<<"$hosts" && ! grep -qx ' *rf-central' <<<"$hosts" || fail "CENTRAL_SECRETS run still includes central: $hosts"
+  hosts="$("$here/fleet.sh" provision cam-1 --list-hosts)"
+  grep -qx ' *rf-central' <<<"$hosts" || fail "SSH run lost the central host: $hosts"
+  if CENTRAL_SECRETS="$work/missing" "$here/fleet.sh" provision cam-1 --list-hosts >/dev/null 2>&1; then fail "accepted an unreadable CENTRAL_SECRETS"; fi
+  secrets="$(cd "$here/ansible" && ansible 'cam-1,wbt-1' -m ansible.builtin.debug \
+    -a 'msg={{ [inventory_hostname, central_secrets[inventory_hostname], central_secrets.token, central_secrets.relay_password] | join("|") }}' \
+    -e "central_secrets_file=$work/node-secrets")"
+  grep -qF 'cam-1|campw|tok123|kitpw' <<<"$secrets" && grep -qF 'wbt-1|rfpw 1|tok123|kitpw' <<<"$secrets" || fail "central_secrets: $secrets"
+else
+  echo "note: ansible-playbook not installed; playbook and inventory checks skipped" >&2
 fi
 echo "fleet tests passed"

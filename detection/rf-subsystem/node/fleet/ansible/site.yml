@@ -1,29 +1,34 @@
-# Provision the RF nodes: packages, capture units, node agent, the node's own central broker login and
-# the console heartbeat token.
-# Run through ../fleet.sh provision [node|all]. Secrets are read at run time, never stored here:
-#   - the heartbeat token comes from the central RF stack's .env (CONSOLE_NODE_TOKEN), or is created
-#     there on the first full run (nodes first, then the console, like ../../set-node-token.sh);
-#   - each node's broker login (rf-node-<node>) is made on the central server by
-#     detection/central/rf-node-logins.sh (kept in its .env) and read back over SSH.
-# Without SSH to the central server: run detection/central/rf-node-secrets.sh there by hand, save its
+# Provision the fleet: the RF nodes (packages, capture units, node agent, the console heartbeat token)
+# and the camera nodes (Docker stack, Frigate and Hailo host setup, firewall), each with its own central
+# broker login.
+# Run through ../fleet.sh provision [node|all|rf|camera]. Secrets are read at run time, never stored here:
+#   - the heartbeat token (RF nodes only) comes from the central RF stack's .env (CONSOLE_NODE_TOKEN), or
+#     is created there on the first full RF run (nodes first, then the console, like ../../set-node-token.sh);
+#   - each node's broker login (rf-node-<node> or cam-node-<node>) is made on the central server by
+#     detection/central/rf-node-logins.sh and node-logins.sh (kept in its .env) and read back over SSH;
+#   - camera nodes also get the shared kit relay login (BROKER_CAMERA_USER / BROKER_CAMERA_PASSWORD) from
+#     the root .env on the central server.
+# Without SSH to the central server: run detection/central/node-secrets.sh rf|camera there by hand, save its
 # output on the admin machine and set CENTRAL_SECRETS to that file (fleet.env or the environment);
 # fleet.sh then leaves the central host out and the nodes take their values from the file.
-# Nodes are not on the tailnet; -e leave_tailnet=true takes older nodes off it.
+# Nodes are not on the tailnet; -e leave_tailnet=true takes older RF nodes off it.
 
 - name: Broker logins and heartbeat token from the central server
   hosts: central
   gather_facts: false
   vars:
-    play_nodes: "{{ groups['rf_nodes'] | intersect(query('inventory_hostnames', ansible_limit | default('all'))) | sort }}"
+    limit_hosts: "{{ query('inventory_hostnames', ansible_limit | default('all')) }}"
+    play_nodes: "{{ groups['rf_nodes'] | intersect(limit_hosts) | sort }}"
+    camera_play_nodes: "{{ groups['camera_nodes'] | intersect(limit_hosts) | sort }}"
   tasks:
-    - name: A broker login for each node (new ones re-create the broker)
+    - name: A broker login for each RF node (new ones re-create the broker)
       ansible.builtin.command:
         argv: "{{ [central_repo_dir ~ '/detection/central/rf-node-logins.sh'] + play_nodes }}"
       register: logins_added
       changed_when: "'added' in logins_added.stdout"
       when: play_nodes | length > 0
 
-    - name: Read the nodes' broker passwords
+    - name: Read the RF nodes' broker passwords
       ansible.builtin.command:
         argv: "{{ [central_repo_dir ~ '/detection/central/rf-node-logins.sh', '--get'] + play_nodes }}"
       register: logins
@@ -37,6 +42,53 @@
         broker_passwords: "{{ dict(logins.stdout_lines | default([]) | map('split', ' ', 1)) }}"
       no_log: true
 
+    - name: A broker login for each camera node (new ones re-create the broker)
+      ansible.builtin.command:
+        argv: "{{ [central_repo_dir ~ '/detection/central/node-logins.sh', 'camera'] + camera_play_nodes }}"
+      register: camera_logins_added
+      changed_when: "'added' in camera_logins_added.stdout"
+      when: camera_play_nodes | length > 0
+
+    - name: Read the camera nodes' broker passwords
+      ansible.builtin.command:
+        argv: "{{ [central_repo_dir ~ '/detection/central/node-logins.sh', 'camera', '--get'] + camera_play_nodes }}"
+      register: camera_logins
+      changed_when: false
+      check_mode: false
+      no_log: true
+      when: camera_play_nodes | length > 0
+
+    - name: Keep them for the camera play
+      ansible.builtin.set_fact:
+        camera_broker_passwords: "{{ dict(camera_logins.stdout_lines | default([]) | map('split', ' ', 1)) }}"
+      no_log: true
+
+    - name: Read the shared kit relay login from the root .env
+      ansible.builtin.shell: "grep -m1 '^{{ item }}=' .env | cut -d= -f2- || true"
+      args:
+        chdir: "{{ central_repo_dir }}"
+      loop: [BROKER_CAMERA_USER, BROKER_CAMERA_PASSWORD]
+      register: relay_env
+      changed_when: false
+      check_mode: false
+      no_log: true
+      when: camera_play_nodes | length > 0
+
+    - name: Keep it for the camera play
+      ansible.builtin.set_fact:
+        relay_user: "{{ (relay_env.results[0].stdout | trim) or 'relay' }}"
+        relay_password: "{{ relay_env.results[1].stdout | trim }}"
+      no_log: true
+      when: camera_play_nodes | length > 0
+
+    - name: The relay password is set
+      ansible.builtin.assert:
+        that: relay_password | length > 0
+        fail_msg: "BROKER_CAMERA_PASSWORD is not set in {{ central_repo_dir }}/.env on the central server."
+        quiet: true
+      when: camera_play_nodes | length > 0
+
+    # The heartbeat token belongs to the RF nodes: a camera-only run leaves it alone.
     - name: Read CONSOLE_NODE_TOKEN
       ansible.builtin.shell: "grep -m1 '^CONSOLE_NODE_TOKEN=' .env | cut -d= -f2- || true"
       args:
@@ -45,6 +97,7 @@
       changed_when: false
       check_mode: false
       no_log: true
+      when: play_nodes | length > 0
 
     - name: Keep it, or make a new one
       ansible.builtin.set_fact:
@@ -53,21 +106,26 @@
              or lookup('ansible.builtin.password', '/dev/null', chars=['ascii_lowercase', 'digits'], length=48) }}
         node_token_is_new: "{{ (central_token.stdout | trim) == '' }}"
       no_log: true
+      when: play_nodes | length > 0
+
+    - name: No token work in this run
+      ansible.builtin.set_fact:
+        node_token_is_new: false
+      when: play_nodes | length == 0
 
     - name: A new token must reach every node in the same run
       ansible.builtin.assert:
         that: groups['rf_nodes'] | difference(ansible_play_hosts_all + query('inventory_hostnames', ansible_limit | default('all'))) | length == 0
         fail_msg: >-
           The console has no node token yet, so the first run must include every node
-          (fleet.sh provision all); otherwise nodes left out would be rejected once it is set.
+          (fleet.sh provision all or rf); otherwise nodes left out would be rejected once it is set.
       when: node_token_is_new and ansible_limit is defined and 'rf_nodes' not in ansible_limit
 
 - name: RF nodes
   hosts: rf_nodes
   become: true
   vars:
-    central_secrets_file: ""
-    central_secrets: "{{ dict(lookup('ansible.builtin.file', central_secrets_file).splitlines() | select | map('split', ' ', 1)) }}"
+    # central_secrets_file and central_secrets: group_vars/fleet_nodes.yml
     node_token: >-
       {{ central_secrets['token'] if central_secrets_file else hostvars[groups['central'][0]].node_token }}
     broker_password: >-
@@ -87,6 +145,42 @@
       when: central_secrets_file | length > 0
   roles:
     - rf_node
+
+- name: Camera nodes
+  hosts: camera_nodes
+  become: true
+  vars:
+    broker_password: >-
+      {{ central_secrets[inventory_hostname] if central_secrets_file
+         else hostvars[groups['central'][0]].camera_broker_passwords[inventory_hostname] }}
+    relay_user: >-
+      {{ central_secrets['relay_user'] | default('relay', true) if central_secrets_file
+         else hostvars[groups['central'][0]].relay_user }}
+    relay_password: >-
+      {{ central_secrets['relay_password'] if central_secrets_file
+         else hostvars[groups['central'][0]].relay_password }}
+  pre_tasks:
+    - name: The secrets file has this node's values
+      ansible.builtin.assert:
+        that:
+          - central_secrets['relay_password'] | default('') | length > 0
+          - central_secrets[inventory_hostname] | default('') | length > 0
+        fail_msg: >-
+          {{ central_secrets_file }} needs a "relay_password" line and a "{{ inventory_hostname }}" line: on
+          the central server, detection/central/node-secrets.sh camera {{ inventory_hostname }}
+        quiet: true
+      no_log: true
+      when: central_secrets_file | length > 0
+
+    - name: The broker is checked against the system CAs
+      ansible.builtin.assert:
+        that: not (broker_tls | bool) or broker_ca_file | default('') | length == 0
+        fail_msg: >-
+          Camera nodes cannot use broker_ca_file (the bridge only checks against the system CAs). Use a
+          publicly trusted certificate, or broker_tls: false and broker_port: 1883 for camera_nodes.
+        quiet: true
+  roles:
+    - camera_node
 
 - name: Turn on heartbeat authentication on the console
   hosts: central

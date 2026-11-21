@@ -162,6 +162,10 @@ the relay API reads `RELAY_BROKER_HOST` and `RELAY_BROKER_PORT`.
 - Node onboarding (`provision` portal, `bridge.yaml`'s `broker:` block): the central broker's
   address and the per-node credential. Existing nodes are re-pointed at their next onboarding;
   the bridge code does not change.
+- Camera nodes have their own logins, as the RF nodes do: `detection/central/node-logins.sh camera
+  cam-1 ...` keeps one password per node in `.env` (`BROKER_CAMERA_NODE_LOGINS`); `entrypoint.sh`
+  gives `cam-node-<node>` write access to `detection/camera/#` and read on `detection/rf/cues/camera`.
+  The fleet playbook creates them and installs each on its node, as for RF nodes.
 - `DESIGN.md` section 4.2: the "until that broker exists" sentence is retired.
 
 ### Not changed

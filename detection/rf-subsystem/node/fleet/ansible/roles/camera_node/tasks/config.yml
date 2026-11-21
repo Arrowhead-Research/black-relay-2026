@@ -1,0 +1,22 @@
+- name: Bridge config (0600, owned by the bridge's user; the broker and relay passwords are in it)
+  ansible.builtin.template:
+    src: bridge.yaml.j2
+    dest: /etc/camerabridge/bridge.yaml
+    owner: camerabridge
+    group: camerabridge
+    mode: "0600"
+  no_log: true
+  notify: Restart camera services
+
+- name: Node settings for camera-link and the bridge
+  ansible.builtin.copy:
+    dest: /var/lib/camera-provision/node.json
+    content: "{{ node_json | to_nice_json }}\n"
+    mode: "0600"
+  vars:
+    node_json:
+      hostname: "{{ inventory_hostname }}"
+      camera_upside_down: "{{ camera_upside_down | bool }}"
+      broker_anonymous: false
+      ntp_server: "{{ camera_ntp_server }}"
+  notify: Restart camera services

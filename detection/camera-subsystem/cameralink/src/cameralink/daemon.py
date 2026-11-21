@@ -876,11 +876,20 @@ def _read_provisioning(paths: Paths, parse=_parse_bridge_yaml) -> _Provisioning 
         or not isinstance(broker.get("password"), str)
     ):
         raise ProvisioningError("bridge.yaml lacks node_id, broker.username or broker.password")
+    # Fleet nodes log in to the broker as themselves. The optional relay section then holds the
+    # shared login that go2rtc pulls RTSP with and the proxy secret is derived from.
+    relay = config.get("relay", broker)
+    if (
+        not isinstance(relay, dict)
+        or not isinstance(relay.get("username"), str)
+        or not isinstance(relay.get("password"), str)
+    ):
+        raise ProvisioningError("bridge.yaml relay needs a username and a password")
     return _Provisioning(
         node_id=config["node_id"],
         covered_zones=config.get("covered_zones"),
-        relay_user=broker["username"],
-        relay_password=broker["password"],
+        relay_user=relay["username"],
+        relay_password=relay["password"],
         flipped=_read_flipped(paths.node_file),
     )
 

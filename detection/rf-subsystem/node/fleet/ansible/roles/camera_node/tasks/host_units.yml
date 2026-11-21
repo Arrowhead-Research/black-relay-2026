@@ -1,0 +1,91 @@
+# eth0 is the camera link (10.77.0.1/24, served by camera-link-dhcp). Nothing here brings eth0 up or
+# down: an SSH session may be on it, so profile changes apply at the reboot.
+- name: Docker daemon settings (no bridge, no iptables, Frigate uses host networking)
+  ansible.builtin.copy:
+    src: "{{ camera_ops }}/daemon.json"
+    dest: /etc/docker/daemon.json
+    mode: "0644"
+  register: daemon_json
+
+- name: Hailo module option for the Pi 5's 16 KB page kernel
+  ansible.builtin.copy:
+    src: "{{ camera_ops }}/hailo_pci.conf"
+    dest: /etc/modprobe.d/hailo_pci.conf
+    mode: "0644"
+  register: hailo_conf
+
+- name: Camera link profile for eth0 (NetworkManager, 0600)
+  ansible.builtin.copy:
+    src: "{{ camera_ops }}/black-relay-camera.nmconnection"
+    dest: /etc/NetworkManager/system-connections/black-relay-camera.nmconnection
+    mode: "0600"
+    owner: root
+  register: camera_profile
+
+- name: Client profiles for eth0 ('Wired connection 1', or a netplan file for eth0)
+  ansible.builtin.shell: |
+    for f in /etc/NetworkManager/system-connections/*.nmconnection; do
+      [ -f "$f" ] && grep -qx 'id=Wired connection 1' "$f" && echo "$f"
+    done
+    for f in /etc/netplan/*.yaml; do
+      [ -f "$f" ] || continue
+      grep -q '^ *eth0:' "$f" || continue
+      if grep -q 'wlan0' "$f"; then echo "MIXED $f"; else echo "$f"; fi
+    done
+    true
+  register: eth0_files
+  changed_when: false
+  check_mode: false
+
+- name: A netplan file that also configures Wi-Fi is not removed blindly
+  ansible.builtin.assert:
+    that: eth0_files.stdout_lines | select('match', 'MIXED ') | list | length == 0
+    fail_msg: >-
+      {{ eth0_files.stdout_lines | select('match', 'MIXED ') | join(', ') }} configures eth0 and wlan0 together.
+      Re-seed the card with fleet.sh (camera nodes get no eth0 there) or edit that file by hand, then run again.
+    quiet: true
+
+- name: Remove them (eth0 changes at the reboot, never live)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ eth0_files.stdout_lines | reject('match', 'MIXED ') | list }}"
+  register: eth0_removed
+
+- name: Reboot needed for eth0, the driver option or Docker
+  ansible.builtin.set_fact:
+    reboot_reasons: >-
+      {{ reboot_reasons
+         + (['eth0 profile'] if camera_profile is changed or eth0_removed is changed else [])
+         + (['daemon.json'] if daemon_json is changed else [])
+         + (['hailo_pci.conf'] if hailo_conf is changed else []) }}
+
+- name: Frigate and camera link units (camera-link starts Frigate, so frigate.service is not enabled)
+  ansible.builtin.copy:
+    src: "{{ camera_ops }}/{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+  loop:
+    - frigate.service
+    - camera-link-dhcp.service
+    - 'run-frigate\x2dcache.mount'
+  notify: Reload systemd
+
+- name: Docker enabled
+  ansible.builtin.systemd_service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Apply unit changes before starting
+  ansible.builtin.meta: flush_handlers
+
+- name: Segment cache mount (Frigate's units require it)
+  ansible.builtin.systemd_service:
+    name: 'run-frigate\x2dcache.mount'
+    state: started
+
+- name: Camera link DHCP
+  ansible.builtin.systemd_service:
+    name: camera-link-dhcp.service
+    enabled: true
