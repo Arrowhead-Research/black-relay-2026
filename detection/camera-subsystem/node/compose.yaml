@@ -44,6 +44,9 @@ services:
       - /run/camera-link:/run/camera-link:ro
       # timedatectl asks timedated here for the NTP check.
       - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
+      # ...and refuses ("System has not been booted with systemd") unless it sees this directory.
+      # Without it the bridge never sees NTP as synced and holds every event.
+      - /run/systemd/system:/run/systemd/system:ro
 
   camera-link:
     <<: *node
