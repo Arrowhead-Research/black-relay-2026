@@ -24,5 +24,9 @@
     - { path: /var/lib/frigate/media, mode: "0755" }
     - { path: /var/lib/frigate/config/model_cache, mode: "0755" }
     - { path: /etc/black-relay, mode: "0755" }
+    # Drop-in directories the role writes to; stock Raspberry Pi OS Lite does not ship them.
+    - { path: /etc/systemd/journald.conf.d, mode: "0755" }
+    - { path: /etc/systemd/timesyncd.conf.d, mode: "0755" }
+    - { path: /etc/docker, mode: "0755" }
   loop_control:
     label: "{{ item.path }}"
