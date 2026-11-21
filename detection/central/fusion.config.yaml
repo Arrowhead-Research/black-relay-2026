@@ -12,6 +12,6 @@ brokers:
     client_id: fusion-central-v1
     subsystems: [camera, rf, physical]
     physical_node_id: physical-bridge-01
-    site_id: central
+    site_id: sh1
     username_env: FUSION_CENTRAL_MQTT_USER
     password_env: FUSION_CENTRAL_MQTT_PASSWORD

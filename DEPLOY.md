@@ -17,7 +17,8 @@ Never paste them in chat or commit them.
 ## 0. Before you start: which branch
 
 Deploy `detection/develop`. It holds the RF node fleet (PR #14), the camera kits and the camera relay
-in the central project (PR #15) and the physical bridge on the same host (PR #16).
+in the central project (PR #15) and the physical bridge on the same host (PRs #16 and #17, site id
+`sh1`).
 
 ## 1. Server prep (on the new server)
 
