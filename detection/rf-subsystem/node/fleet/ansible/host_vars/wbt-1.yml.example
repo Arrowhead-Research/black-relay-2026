@@ -1,0 +1,5 @@
+# Copy to host_vars/<node>.yml for anything that differs from group_vars/rf_nodes.yml. No secrets.
+ansible_host: 10.73.200.21        # its LAN address
+wifi_iface: wlan1
+bt_addr: "AA:BB:CC:DD:EE:FF"
+# capture_units: [kismet-cap-wifi, kismet-cap-bt]   # e.g. a node without an RTL-SDR

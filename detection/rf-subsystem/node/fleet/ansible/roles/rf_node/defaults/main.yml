@@ -1,0 +1,9 @@
+# See group_vars/rf_nodes.yml for the settings meant to be changed.
+node_src: "{{ playbook_dir }}/../.."     # detection/rf-subsystem/node
+central_port: 3501
+capture_units: [kismet-cap-wifi, kismet-cap-bt, kismet-cap-tpms]
+kismet_packages:
+  kismet-cap-wifi: kismet-capture-linux-wifi
+  kismet-cap-bt: kismet-capture-linux-bluetooth
+  kismet-cap-tpms: kismet-capture-rtl433-v2
+leave_tailnet: false

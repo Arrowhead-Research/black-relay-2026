@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Camera node setup</title>
+<style>
+body { margin: 0 auto; max-width: 30rem; padding: 1rem; font: 16px/1.4 system-ui, sans-serif; }
+h1 { font-size: 1.4rem; }
+fieldset { margin: 0 0 1rem; border: 1px solid #bbb; border-radius: 4px; }
+label { display: block; margin: 0.75rem 0; }
+input[type=text], input[type=password] {
+  display: block; box-sizing: border-box; width: 100%; padding: 0.6rem; margin-top: 0.25rem;
+  font-size: 1rem; border: 1px solid #888; border-radius: 4px;
+}
+input[type=checkbox] { width: 1.2rem; height: 1.2rem; vertical-align: middle; }
+button { width: 100%; padding: 0.8rem; font-size: 1.1rem; }
+.errors { padding: 0.5rem 1rem; color: #900; border: 2px solid #900; border-radius: 4px; }
+small { color: #555; }
+</style>
+</head>
+<body>
+<h1>Camera node setup</h1>
+$errors
+$intro
+<form method="post" action="/">
+<fieldset>
+<legend>Site WiFi</legend>
+<label>Network name
+<input type="text" name="wifi_ssid" list="scanned-ssids" value="$wifi_ssid" required autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+<small>Pick a scanned network or type the name.</small>
+</label>
+<datalist id="scanned-ssids">$ssid_options</datalist>
+<label>Password
+<input type="password" name="wifi_psk" required autocomplete="off">
+<small>Never filled in. Type it again each time you save.</small>
+</label>
+</fieldset>
+$full_fields
+<button type="submit">Save and connect</button>
+</form>
+</body>
+</html>

@@ -1,0 +1,12 @@
+# entrypoint.sh fills in the two logins from .env.
+
+# The API only reads, and only the camera topics it stores.
+user @API_USER@
+topic read detection/camera/detections
+topic read detection/camera/cue-acks
+topic read detection/camera/status/nodes
+
+# Nodes and RF share one login in v0, because each node's Frigate proxy secret derives from it.
+# Nothing outside detection/ can be read or written, and that includes $SYS.
+user @NODE_USER@
+topic readwrite detection/#

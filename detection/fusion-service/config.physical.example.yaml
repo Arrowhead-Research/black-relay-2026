@@ -1,0 +1,18 @@
+# Physical-only source configuration for scripts/bench.sh's local team broker.
+# Copy to config.yaml when ready to run locally. Do not run both configs concurrently
+# against the same database or MQTT client id.
+database: data/fusion-physical.sqlite3
+camera_schemas: ../camera-subsystem/bridge/schemas
+rf_schemas: ../rf-subsystem/schemas
+physical_schemas: ../physical-subsystem/schemas
+physical_stale_s: 120
+brokers:
+  - id: physical
+    namespace: physical-bench
+    host: 127.0.0.1
+    port: 11883
+    client_id: fusion-physical-bench-v1
+    subsystems: [physical]
+    physical_node_id: physical-bridge-bench
+# This loopback address is for running fusion from source on the same host as bench.sh.
+# A container needs a broker hostname reachable from its own network namespace.

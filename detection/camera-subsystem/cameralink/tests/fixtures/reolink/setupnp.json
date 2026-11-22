@@ -1,0 +1,24 @@
+{
+  "request": [
+    {
+      "cmd": "SetUpnp",
+      "action": 0,
+      "param": {
+        "Upnp": {
+          "enable": 0
+        }
+      }
+    }
+  ],
+  "http_status": 200,
+  "seconds": 0.07,
+  "response": [
+    {
+      "cmd": "SetUpnp",
+      "code": 0,
+      "value": {
+        "rspCode": 200
+      }
+    }
+  ]
+}

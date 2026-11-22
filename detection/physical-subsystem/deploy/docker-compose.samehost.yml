@@ -1,0 +1,16 @@
+# Overlay for a bridge on the SAME machine as the central stack (repo-root compose.yaml).
+# A container on Docker Desktop cannot reach its own host's LAN address, so the team publisher joins the
+# central broker's network `black-relay-local` instead, where the broker answers as `central-broker` and
+# as its certificate name (BROKER_DOMAIN in the root .env, e.g. reg.bulexa.com: TLS on 8883 still verifies).
+# setup-central.sh --with-bridge turns it on with COMPOSE_FILE in deploy/.env; by hand:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.samehost.yml   (in deploy/.env)
+# and in config/config.yaml: fusion.host <BROKER_DOMAIN> port 8883, or host central-broker port 1883 tls null.
+# Leave CENTRAL_BROKER_NAME/IP out of deploy/.env here: that mapping would override the network alias.
+services:
+  fusion:
+    networks: [fusion-out, central-local]
+
+networks:
+  central-local:
+    external: true
+    name: black-relay-local      # created by the root compose.yaml: start the central stack first

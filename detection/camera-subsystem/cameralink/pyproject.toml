@@ -1,0 +1,34 @@
+[project]
+name = "cameralink"
+version = "0.0.0"
+description = "Black Relay camera subsystem camera link: configures a factory-fresh Reolink RLC-520A from the edge node."
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6.0",
+    "reolink_aio==0.22.0",
+]
+
+[project.scripts]
+camera-link = "cameralink.__main__:main"
+
+[dependency-groups]
+dev = [
+    # Test-only: proves the portal's copy of render's rules has not drifted. Never a runtime
+    # dependency of the camera link.
+    "cameraprovision",
+    "pytest>=8.0",
+    "ruamel-yaml>=0.18,<0.19",
+]
+
+[tool.uv.sources]
+cameraprovision = { path = "../provision", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cameralink"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

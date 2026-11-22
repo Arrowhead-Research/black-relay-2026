@@ -1,0 +1,31 @@
+{
+  "request": [
+    {
+      "cmd": "Login",
+      "action": 0,
+      "param": {
+        "User": {
+          "Version": "0",
+          "userName": "admin",
+          "password": "<redacted>"
+        }
+      }
+    }
+  ],
+  "http_status": 200,
+  "seconds": 0.07,
+  "response": [
+    {
+      "cmd": "Login",
+      "code": 1,
+      "error": {
+        "auth_warning_info": {
+          "remain_times": 10,
+          "unlock_time": 0
+        },
+        "detail": "login failed",
+        "rspCode": -7
+      }
+    }
+  ]
+}

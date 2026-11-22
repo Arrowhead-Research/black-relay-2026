@@ -1,0 +1,2 @@
+# Root compose.yaml secrets (detection/central/make-env.sh)
+.env

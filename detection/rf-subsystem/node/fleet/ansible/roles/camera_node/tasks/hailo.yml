@@ -1,0 +1,72 @@
+- name: Is the Hailo driver installed?
+  ansible.builtin.command: modinfo -F version hailo_pci
+  register: hailo_version
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Installed packages
+  ansible.builtin.package_facts:
+
+- name: Not hailo-all
+  ansible.builtin.assert:
+    that: "'hailo-all' not in ansible_facts.packages"
+    fail_msg: "hailo-all is installed on {{ inventory_hostname }}: remove it (apt purge hailo-all) and run again."
+    quiet: true
+
+- name: Frigate's Hailo driver installer (pinned release and checksum)
+  ansible.builtin.get_url:
+    url: "{{ hailo_install_url }}"
+    dest: /var/lib/camera-provision/hailo-user-installation.sh
+    checksum: "sha256:{{ hailo_install_sha256 }}"
+    mode: "0700"
+  when: hailo_version.stdout | trim != hailo_driver_version
+
+- name: Install the driver (builds it; the new one loads after the reboot)
+  ansible.builtin.command: /var/lib/camera-provision/hailo-user-installation.sh
+  when: hailo_version.stdout | trim != hailo_driver_version
+  register: hailo_install
+  changed_when: true
+
+- name: Reboot needed for the driver
+  ansible.builtin.set_fact:
+    reboot_reasons: "{{ reboot_reasons + ['Hailo driver'] }}"
+  when: hailo_install is changed
+
+- name: Is the model there?
+  ansible.builtin.stat:
+    path: /var/lib/frigate/config/model_cache/yolov6n.hef
+    checksum_algorithm: sha256
+  register: hef
+
+- name: The model file is needed
+  ansible.builtin.assert:
+    that: camera_hef | default('') | length > 0
+    fail_msg: >-
+      {{ inventory_hostname }} has no good yolov6n.hef yet: set camera_hef to the file on this machine
+      (CAMERA_HEF in fleet.env, or -e camera_hef=/path/yolov6n.hef; sha256 {{ camera_hef_sha256 }}).
+    quiet: true
+  when: not hef.stat.exists or hef.stat.checksum != camera_hef_sha256
+
+- name: The copy on this machine is the right file
+  ansible.builtin.stat:
+    path: "{{ camera_hef | expanduser }}"
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  become: false
+  register: hef_source
+  when: not hef.stat.exists or hef.stat.checksum != camera_hef_sha256
+
+- name: Checksum
+  ansible.builtin.assert:
+    that: hef_source.stat.exists and hef_source.stat.checksum == camera_hef_sha256
+    fail_msg: "{{ camera_hef }} is not yolov6n.hef (sha256 {{ camera_hef_sha256 }})."
+    quiet: true
+  when: not hef.stat.exists or hef.stat.checksum != camera_hef_sha256
+
+- name: Model for Frigate
+  ansible.builtin.copy:
+    src: "{{ camera_hef | expanduser }}"
+    dest: /var/lib/frigate/config/model_cache/yolov6n.hef
+    mode: "0644"
+  when: not hef.stat.exists or hef.stat.checksum != camera_hef_sha256

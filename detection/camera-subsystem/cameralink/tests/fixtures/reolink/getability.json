@@ -1,0 +1,21 @@
+{
+  "request": [
+    {
+      "cmd": "GetAbility",
+      "action": 1,
+      "param": {}
+    }
+  ],
+  "http_status": 200,
+  "seconds": 0.05,
+  "response": [
+    {
+      "cmd": "GetAbility",
+      "code": 1,
+      "error": {
+        "detail": "err get data from json",
+        "rspCode": -56
+      }
+    }
+  ]
+}

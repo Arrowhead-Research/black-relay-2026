@@ -1,0 +1,158 @@
+# Move running nodes (RF and camera) onto a Wi-Fi network (the onboard radio, wlan0), e.g. at the safehouse:
+#   ../fleet.sh wifi all "Safehouse WiFi"       (asks for the passphrase; or set WIFI_PASSWORD)
+# fleet.sh passes only the derived WPA key, in the environment, and with a setup network (SETUP_SSID in
+# fleet.env) also -e setup_hub=<hub>. Capture stays on the external adapter.
+#
+# With a setup hub, this is a hand-over, run from a machine on the hub's setup network:
+#   1. every node saves the new network, ranked above the setup network;
+#   2. the other nodes switch first (each falls back to the setup network if it can't join);
+#   3. after SWITCH_WAIT_S, any node still answering on the setup network failed: the run stops there
+#      and the hub keeps its hotspot up, so you can fix it and run again;
+#   4. otherwise the hub switches last and turns its hotspot off (back on by itself if it can't join).
+# Then join the new network yourself and run ../fleet.sh ping.
+# Without a hub, every node saves the network and joins it now if it is in range.
+
+- name: Save the network on every node
+  hosts: fleet_nodes
+  become: true
+  gather_facts: false
+  vars: &wifi_vars
+    wifi_ssid: "{{ lookup('ansible.builtin.env', 'FLEET_WIFI_SSID') }}"
+    wifi_psk: "{{ lookup('ansible.builtin.env', 'FLEET_WIFI_PSK') }}"
+    wifi_country: "{{ lookup('ansible.builtin.env', 'FLEET_WIFI_COUNTRY') | default('US', true) }}"
+    setup_hub: ""
+  tasks:
+    - name: Run through fleet.sh wifi
+      ansible.builtin.assert:
+        that:
+          - wifi_ssid | length > 0
+          - wifi_psk is match('^[0-9a-f]{64}$')
+        fail_msg: "use ../fleet.sh wifi <node|all> <ssid>"
+        quiet: true
+
+    - name: Wi-Fi country (also unblocks the radio)
+      ansible.builtin.command: raspi-config nonint do_wifi_country {{ wifi_country }}
+      changed_when: false
+
+    - name: NetworkManager profile (0600, only the derived key; ranked above the setup network)
+      ansible.builtin.copy:
+        dest: /etc/NetworkManager/system-connections/fleet-wifi.nmconnection
+        mode: "0600"
+        owner: root
+        content: |
+          [connection]
+          id=fleet-wifi
+          type=wifi
+          interface-name=wlan0
+          autoconnect=true
+          autoconnect-priority=10
+
+          [wifi]
+          mode=infrastructure
+          ssid={{ wifi_ssid }}
+
+          [wifi-security]
+          key-mgmt=wpa-psk
+          psk={{ wifi_psk }}
+
+          [ipv4]
+          method=auto
+
+          [ipv6]
+          method=auto
+      no_log: true
+
+    - name: Load it
+      ansible.builtin.command: nmcli connection reload
+      changed_when: false
+
+    - name: Saved here
+      ansible.builtin.set_fact:
+        wifi_saved: true
+
+    - name: Join now (without a hub; with one, the switch-over below does it)
+      ansible.builtin.command: nmcli -w 45 connection up fleet-wifi
+      register: up
+      failed_when: false
+      changed_when: up.rc == 0
+      when: setup_hub | length == 0
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: "{{ 'on ' ~ wifi_ssid if up.rc == 0 else wifi_ssid ~ ' saved; joins when it is in range' }}"
+      when: setup_hub | length == 0
+
+- name: Switch the other nodes (they leave the setup network)
+  hosts: "fleet_nodes:!{{ setup_hub | default('none', true) }}"
+  become: true
+  gather_facts: false
+  vars: *wifi_vars
+  tasks:
+    - name: Switch in the background (the SSH session drops with the setup network)
+      ansible.builtin.command: >-
+        systemd-run --collect --unit=fleet-wifi-switch
+        sh -c 'sleep 3; nmcli -w 60 connection up fleet-wifi || nmcli connection up setup-wifi'
+      when: setup_hub | length > 0
+
+- name: Check they left the setup network
+  hosts: "fleet_nodes:!{{ setup_hub | default('none', true) }}"
+  gather_facts: false
+  ignore_unreachable: true
+  vars: *wifi_vars
+  tasks:
+    - name: Give them time to switch
+      ansible.builtin.pause:
+        seconds: "{{ lookup('ansible.builtin.env', 'SWITCH_WAIT_S') | default(90, true) }}"
+      run_once: true
+      delegate_to: localhost
+      when: setup_hub | length > 0
+
+    - name: Still answering here?
+      ansible.builtin.ping:
+      register: still_here
+      when: setup_hub | length > 0
+
+- name: Switch the hub last (its hotspot goes off)
+  hosts: "{{ setup_hub | default('none', true) }}"
+  become: true
+  gather_facts: false
+  vars: *wifi_vars
+  tasks:
+    - name: Every node in this run got the new network
+      vars:
+        missed: >-
+          {{ groups['fleet_nodes'] | intersect(query('inventory_hostnames', ansible_limit | default('all')))
+             | reject('in', groups['fleet_nodes'] | map('extract', hostvars) | selectattr('wifi_saved', 'defined')
+                              | map(attribute='inventory_hostname') | list) | list }}
+      ansible.builtin.assert:
+        that: missed | length == 0
+        fail_msg: >-
+          Not reached, so they don't have {{ wifi_ssid }} yet: {{ missed | join(', ') }}. The hub keeps its
+          hotspot up; power them on near it and run again (or leave them out with a narrower target).
+        quiet: true
+
+    - name: Every other node left the setup network
+      vars:
+        stuck: >-
+          {{ groups['fleet_nodes'] | difference([setup_hub])
+             | select('in', hostvars) | map('extract', hostvars)
+             | selectattr('still_here', 'defined') | rejectattr('still_here.unreachable', 'defined')
+             | map(attribute='inventory_hostname') | list }}
+      ansible.builtin.assert:
+        that: stuck | length == 0
+        fail_msg: >-
+          Still on the setup network (could not join {{ wifi_ssid }}): {{ stuck | join(', ') }}.
+          The hub keeps its hotspot up: check the network name, passphrase and range, then run again.
+        quiet: true
+
+    - name: Switch in the background; hotspot back on if it can't join
+      ansible.builtin.command: >-
+        systemd-run --collect --unit=fleet-wifi-switch
+        sh -c 'sleep 3;
+        nmcli connection modify setup-ap connection.autoconnect no;
+        if ! nmcli -w 60 connection up fleet-wifi; then
+        nmcli connection modify setup-ap connection.autoconnect yes; nmcli connection up setup-ap; fi'
+
+    - name: Next
+      ansible.builtin.debug:
+        msg: "Hub switching to {{ wifi_ssid }}. Join that network and run: ../fleet.sh ping"

@@ -1,0 +1,33 @@
+# Example node layout for rf-dfviz. Copy to dfviz/site/layout.yaml (local, not
+# committed) and replace the positions with the deployment site's own:
+#   mkdir -p dfviz/site && cp dfviz/layout.example.yaml dfviz/site/layout.yaml
+# Without a site file the page runs on this example.
+#
+# Units: feet. Pick any origin; x to the right, y down as seen on the map.
+name: example-site
+
+# How well the node positions below are known (1 standard deviation, ft).
+node_sd_ft: 2
+
+# Node IDs must match the Kismet datasource name prefix (wbt-1:wifi -> wbt-1).
+nodes:
+  wbt-1: [0, 0]
+  wbt-2: [20, 0]
+  wbt-3: [0, 40]
+  wbt-4: [20, 40]
+
+# Each node's onboard Wi-Fi (wlan0). These belong to the node hardware, not the
+# site: keep them when the nodes move; update them if nodes are swapped.
+# Confirm with `ip link show wlan0` on each node.
+self_emitters:
+  wbt-1: 2c:cf:67:c0:76:71
+  wbt-2: 2c:cf:67:c0:76:1b
+  wbt-3: 2c:cf:67:c0:76:dd
+  wbt-4: 2c:cf:67:c0:72:98
+
+# Starting path-loss values per band until live calibration replaces them:
+#   rssi = ref_rssi_1m - 10 * path_loss_exp * log10(d_m) - wall_db * (walls crossed)
+models:
+  wifi: {ref_rssi_1m: -40, path_loss_exp: 2.7, sigma_db: 6, wall_db: 4}
+  bt: {ref_rssi_1m: -59, path_loss_exp: 2.5, sigma_db: 6, wall_db: 4}
+  tpms: {ref_rssi_1m: -45, path_loss_exp: 2.2, sigma_db: 7, wall_db: 3}

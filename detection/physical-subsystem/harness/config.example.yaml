@@ -1,0 +1,65 @@
+# BlackRelay configuration. Copy to deploy/config/config.yaml and edit.
+# Secrets are never stored here. The MQTT password is read from /run/secrets/mqtt_password.
+# Paths are container paths; see deploy/docker-compose.yml. Defaults shown are the schema defaults.
+
+iq_remote:
+  enabled: true
+  panel_ip: 192.168.1.50          # IQ Panel 5 address; give the panel a DHCP reservation
+  plugin_ip: null                 # this host's LAN IP; null = auto-detect (set it on multi-NIC hosts)
+  pki_dir: /data/pki              # pairing keys (host: deploy/data/pki). Back this up.
+
+control4:                         # optional second adapter, used only as fallback
+  enabled: false
+  host: null                      # e.g. 192.168.1.60
+  port: 12345
+  token_file: null                # file holding the Control4 token; add a compose secret first
+  cert_sha256: null               # pinned panel cert fingerprint (hex SHA-256); null = refuse to connect
+
+timers:
+  silence_probe_s: 60             # no panel message for this long: probe the link
+  probe_timeout_s: 10             # how long a probe may take
+  backoff_initial_s: 1            # first reconnect delay
+  backoff_max_s: 60               # reconnect delay ceiling
+  fallback_after_s: 120           # primary adapter down this long: switch to control4 (if enabled)
+
+zones:                            # keyed by panel zone id; every field is optional
+  12:
+    name: Front door              # overrides the panel's label
+    kind: contact                 # glass_break | motion | contact | other
+  13:
+    name: Garage motion
+    kind: motion
+  40:
+    ignore: true                  # excludes this zone from the output
+
+mqtt:
+  host: 127.0.0.1                 # host networking: reach the mosquitto container via its published port
+  port: 8883
+  tls: true
+  ca_file: /certs/ca.crt
+  username: blackrelay
+  password_file: /run/secrets/mqtt_password
+  topic_prefix: blackrelay/v1
+  client_id: blackrelay-bridge
+  ha_discovery: true              # publish Home Assistant MQTT discovery configs
+  ha_discovery_prefix: homeassistant
+
+api:
+  host: 0.0.0.0
+  port: 8443
+  tls_cert: /certs/api.crt
+  tls_key: /certs/api.key
+  keys:                           # Bearer API keys. Only argon2 hashes are stored here.
+    - name: home-assistant
+      # Generate with: docker compose run --rm bridge hash-key
+      # It prints a new key (shown once) and its hash. Paste only the hash here.
+      # Replace this placeholder before starting the bridge.
+      argon2_hash: "$argon2id$v=19$m=65536,t=3,p=4$cGxhY2Vob2xkZXJzYWx0$cGxhY2Vob2xkZXJoYXNoLXJlcGxhY2UtbWUtMDAwMDAwMDA"
+  rate_limit_per_minute: 120
+  metrics_port: 9100              # Prometheus metrics; keep on the LAN
+
+storage:
+  data_dir: /data
+  retention_days: 30              # event log retention
+
+log_level: INFO                   # DEBUG | INFO | WARNING | ERROR

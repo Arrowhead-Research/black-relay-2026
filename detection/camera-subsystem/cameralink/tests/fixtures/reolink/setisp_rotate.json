@@ -1,0 +1,58 @@
+{
+  "request": [
+    {
+      "cmd": "SetIsp",
+      "action": 0,
+      "param": {
+        "Isp": {
+          "antiFlicker": "Off",
+          "backLight": "Off",
+          "bd_day": {
+            "bright": 128,
+            "dark": 128,
+            "mode": "Auto"
+          },
+          "bd_night": {
+            "bright": 128,
+            "dark": 128,
+            "mode": "Auto"
+          },
+          "blc": 128,
+          "blueGain": 128,
+          "channel": 0,
+          "constantFrameRate": 0,
+          "dayNight": "Auto",
+          "dayNightThreshold": 50,
+          "drc": 128,
+          "encType": "VBR",
+          "exposure": "Auto",
+          "gain": {
+            "max": 62,
+            "min": 1
+          },
+          "hdr": 0,
+          "mirroring": 0,
+          "nr3d": 1,
+          "redGain": 128,
+          "rotation": 1,
+          "shutter": {
+            "max": 125,
+            "min": 0
+          },
+          "whiteBalance": "Auto"
+        }
+      }
+    }
+  ],
+  "http_status": 200,
+  "seconds": 0.21,
+  "response": [
+    {
+      "cmd": "SetIsp",
+      "code": 0,
+      "value": {
+        "rspCode": 200
+      }
+    }
+  ]
+}

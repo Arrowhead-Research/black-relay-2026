@@ -1,0 +1,71 @@
+# Runtime data and state (SQLite event log, fusion outbox, replay pointers)
+data/
+deploy/data/
+deploy/certs/
+deploy/secrets/
+deploy/ca-private/
+deploy/config/config.yaml
+deploy/mosquitto/passwd
+state/
+*.db
+*.db-wal
+*.db-shm
+*.journal
+*.mqtt_seq
+
+# PKI, certificates, keys, tokens, secrets
+pki/
+certs/
+secrets/
+ca-private/
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
+*.jks
+id_rsa*
+id_ed25519*
+*token*
+!tests/**/*token*.py
+.env
+.env.*
+!.env.example
+
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Captures and logs
+captures/
+*.pcap
+*.pcapng
+*.har
+*.log
+*.log.*
+*.stderr
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# harness run output
+harness/work/
+harness/certs/
+
+# bench run (scripts/bench.sh)
+bench/

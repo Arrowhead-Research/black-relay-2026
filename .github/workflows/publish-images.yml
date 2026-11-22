@@ -1,0 +1,65 @@
+# Builds the deployable images for linux/amd64 and linux/arm64 and pushes them to GitHub Container
+# Registry as ghcr.io/<owner>/<name>:latest (+ :sha-<commit>). Runs on GitHub-hosted runners only:
+# nothing here touches a self-hosted machine, and pull requests never push.
+name: publish-images
+
+on:
+  push:
+    # detection/develop is the detection team's integration branch; main is the release branch.
+    branches: [main, detection/develop]
+    paths: ["detection/**", ".github/workflows/publish-images.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: blackrelay-f2/normalizer, context: detection/physical-subsystem, file: docker/Dockerfile.normalizer}
+          - {name: blackrelay-f2/iq-remote,  context: detection/physical-subsystem, file: docker/Dockerfile.iq-remote}
+          - {name: blackrelay-f2/control4,   context: detection/physical-subsystem, file: docker/Dockerfile.control4}
+          - {name: blackrelay-f2/outbound,   context: detection/physical-subsystem, file: docker/Dockerfile.outbound}
+          - {name: black-relay/fusion-service, context: detection, file: fusion-service/Dockerfile}
+          - {name: black-relay/central-tools,  context: detection/central-store/tools, file: Dockerfile}
+          - {name: black-relay/rf-analytics,   context: detection/rf-subsystem/analytics, file: Dockerfile}
+          - {name: black-relay/rf-console,     context: detection/rf-subsystem, file: console/Dockerfile}
+          - {name: black-relay/rf-kismet-server, context: detection/rf-subsystem/central/kismet, file: Dockerfile}
+          - {name: black-relay/camera-node,    context: detection/camera-subsystem, file: Dockerfile}
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - name: Image name (ghcr needs a lowercase owner)
+        id: n
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${{ matrix.name }}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.context }}/${{ matrix.file }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.n.outputs.image }}:latest
+            ${{ steps.n.outputs.image }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}

@@ -1,0 +1,32 @@
+name: passersby
+description: >
+  Negative control. One hour of ordinary pedestrian and vehicle traffic along
+  the road, plus the team at the safehouse. Nobody stops. Analytics should
+  build visits for the passers-by but raise no loiter, repeat-visitor, or
+  co-traveler alerts.
+site: ../sites/dev-site.yaml
+start_time: "2026-11-02T17:00:00Z"
+duration: "1:00:00"
+seed: 202
+
+background:
+  road: { from: [-20, 40], to: [60, 40] }
+  pedestrians_per_hour: 40
+  vehicles_per_hour: 60
+
+actors:
+  - id: safehouse-ap
+    role: infrastructure
+    friendly: true
+    devices:
+      - { kit: access_point, attributes: { ssid: RELAY-OPS } }
+    path:
+      - { t: 0, pos: [20, 12] }
+      - { t: end, pos: [20, 12] }
+
+  - id: team-1
+    role: friendly
+    devices: [phone, smartwatch]
+    path:
+      - { t: 0, pos: [15, 10] }
+      - { t: end, pos: [15, 10] }

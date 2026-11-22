@@ -1,0 +1,18 @@
+# Install as /etc/NetworkManager/system-connections/black-relay-camera.nmconnection, mode 0600.
+# The camera link. Never ipv4.method=shared, which would turn on IP forwarding.
+[connection]
+id=black-relay-camera
+uuid=7a1f0c62-3d5e-5b8a-9c41-6e2d8f4b1a07
+type=ethernet
+interface-name=eth0
+autoconnect=true
+
+[ethernet]
+
+[ipv4]
+method=manual
+address1=10.77.0.1/24
+never-default=true
+
+[ipv6]
+method=disabled

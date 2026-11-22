@@ -1,0 +1,32 @@
+# Notional development site: a safehouse on a 50 x 30 m lot with a road along
+# the north edge. Coordinates are meters in a local grid (x east, y north).
+# Replace with the real field-site layout once node placement is known
+# (DESIGN.md, open question 7).
+#
+#   y=50 +--------------------------------------------------+
+#        |                  north-road                      |
+#   y=40 |  ====================== road ==================  |
+#   y=30 +----------+--------------------+-----------+------+
+#        |          |   north-entrance   |           |
+#   y=20 |          +--------------------+           |
+#        | west-    |                    |  east-    |
+#        | yard     |     building       |  lot      |
+#        |          |                    |           |
+#   y=5  |          +--------------------+           |
+#   y=0  +----------+                    +-----------+
+#       x=-5      x=10                 x=30         x=45
+
+name: dev-site
+
+zones:
+  - { name: north-road,     rect: [-20, 30, 60, 50] }
+  - { name: north-entrance, rect: [10, 20, 30, 30] }
+  - { name: building,       rect: [10, 5, 30, 20] }
+  - { name: east-lot,       rect: [30, 0, 45, 30] }
+  - { name: west-yard,      rect: [-5, 0, 10, 30] }
+
+nodes:
+  - { node_id: rf-node-01, zone: north-entrance, position: [20, 21], rssi_offset_db: 0 }
+  - { node_id: rf-node-02, zone: east-lot,       position: [31, 12], rssi_offset_db: -3 }
+  - { node_id: rf-node-03, zone: west-yard,      position: [9, 12],  rssi_offset_db: 2 }
+  - { node_id: rf-node-04, zone: building,       position: [20, 10], rssi_offset_db: -1 }

@@ -1,0 +1,78 @@
+# The camera node's software. Frigate, dnsmasq and the cache mount stay host units.
+# Run from this directory: docker compose up -d --build
+name: black-relay-camera
+
+x-node: &node
+  image: ${CAMERA_NODE_IMAGE:-black-relay/camera-node:local}
+  build:
+    context: ..
+    dockerfile: Dockerfile
+    # The node's Docker has no bridge network (daemon.json "bridge": "none"), so build steps
+    # (pip, apk) reach the internet only on the host network.
+    network: host
+  network_mode: host
+  restart: unless-stopped
+
+services:
+  # Anonymous, 127.0.0.1:1883 only (see mosquitto.conf). Frigate publishes here.
+  mosquitto:
+    image: eclipse-mosquitto:2.1.2-alpine
+    network_mode: host
+    restart: unless-stopped
+    # The image's mosquitto user, so the entrypoint needs no capabilities.
+    user: "1883:1883"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  camerabridge:
+    <<: *node
+    command: ["camerabridge", "run", "--config", "/etc/camerabridge/bridge.yaml"]
+    # The owner of bridge.yaml (0600), see .env.
+    user: "${CAMERABRIDGE_UID:?set in .env}:${CAMERABRIDGE_GID:?set in .env}"
+    depends_on: [mosquitto]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+    volumes:
+      - /etc/camerabridge:/etc/camerabridge:ro
+      - /var/lib/camerabridge:/var/lib/camerabridge
+      - /run/camera-link:/run/camera-link:ro
+      # timedatectl asks timedated here for the NTP check.
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
+      # ...and refuses ("System has not been booted with systemd") unless it sees this directory.
+      # Without it the bridge never sees NTP as synced and holds every event.
+      - /run/systemd/system:/run/systemd/system:ro
+
+  camera-link:
+    <<: *node
+    command: ["camera-link", "run"]
+    # systemctl as root uses systemd's private socket, which refuses a peer in another PID namespace
+    # ("Failed to connect to system scope bus ... No data available"). D-Bus works from a container.
+    environment:
+      SYSTEMCTL_FORCE_BUS: "1"
+    # Root: it holds the camera password and writes the root-only frigate.env. It starts and
+    # stops host units (frigate, DHCP) by asking host systemd over the mounted sockets.
+    read_only: true
+    cap_drop: [ALL]
+    # bridge.yaml is 0600 and owned by the bridge's user.
+    cap_add: [DAC_READ_SEARCH]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+    stop_grace_period: 140s
+    volumes:
+      - /etc/camerabridge:/etc/camerabridge
+      - /var/lib/camera-link:/var/lib/camera-link
+      - /var/lib/frigate:/var/lib/frigate
+      - /var/lib/camera-provision:/var/lib/camera-provision:ro
+      - /run/camera-link:/run/camera-link
+      # rslave: sees the mount unit's tmpfs even if it appears after the container started.
+      - {type: bind, source: /run/frigate-cache, target: /run/frigate-cache, read_only: true, bind: {propagation: rslave}}
+      # systemctl: /run/systemd/private (units) and system/ (so systemctl sees a booted systemd).
+      - /run/systemd:/run/systemd
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
+      - /var/run/docker.sock:/var/run/docker.sock

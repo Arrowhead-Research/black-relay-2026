@@ -1,0 +1,44 @@
+# Paths resolve relative to this file. Copy to config.yaml; do not commit site configuration.
+database: data/fusion.sqlite3
+camera_schemas: ../camera-subsystem/bridge/schemas
+rf_schemas: ../rf-subsystem/schemas
+physical_schemas: ../physical-subsystem/schemas
+api_token_env: FUSION_API_TOKEN
+retention_s: 604800
+dedupe_s: 1209600
+max_event_bytes: 268435456
+max_database_bytes: 536870912
+max_dedupe_entries: 1000000
+max_nodes: 1000
+max_message_bytes: 65536
+max_message_depth: 32
+future_tolerance_s: 60
+camera_stale_s: 90
+rf_stale_s: 180
+physical_stale_s: 120
+brokers:
+  - id: camera
+    namespace: camera-deployment-01
+    host: camera-central.example.lan
+    port: 1883
+    client_id: fusion-camera-v1
+    subsystems: [camera]
+    site_id: site-01
+    # Optional node-specific overrides, e.g. cam-01: site-01
+    node_sites: {}
+    username_env: FUSION_CAMERA_MQTT_USER
+    password_env: FUSION_CAMERA_MQTT_PASSWORD
+    # Optional verified TLS; paths are relative to this configuration file.
+    # tls_ca: certificates/ca.pem
+    # tls_cert: certificates/fusion.pem
+    # tls_key: certificates/fusion-key.pem
+  - id: rf
+    namespace: rf-deployment-01
+    host: rf-mqtt
+    port: 1883
+    client_id: fusion-rf-v1
+    # Physical's optional team publisher uses this broker by default too.
+    subsystems: [rf, physical]
+    physical_node_id: physical-bridge-01
+    # Only used if RF omits site.id. RF site.id takes precedence over this fallback.
+    site_id: site-01

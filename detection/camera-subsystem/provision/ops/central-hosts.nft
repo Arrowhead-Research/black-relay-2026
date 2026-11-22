@@ -1,0 +1,3 @@
+# Install as /etc/black-relay/central-hosts.nft. Included by /etc/nftables.conf.
+# No elements in the image: nobody reaches the node's services over the network until the portal
+# saves a broker address here. A console and the setup AP do not depend on it.

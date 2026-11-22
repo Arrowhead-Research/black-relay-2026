@@ -1,0 +1,151 @@
+# The simulators, with their own broker and fusion, on one machine. Nothing here is the real central
+# server: it is a stand-in whose fusion API serves simulated RF, panel and camera events.
+# Everything is built from this checkout. No registry, no bundle. See README.md.
+#
+#   ./deploy-simulator-api.sh        # writes .env, builds, starts, prints the API address and token
+
+name: black-relay-sim
+
+x-hardening: &hardening
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: "3"}
+
+services:
+  # The same broker setup as the central server, reachable only by the containers below.
+  broker:
+    <<: *hardening
+    image: eclipse-mosquitto:2.1.2-alpine
+    cap_add: [CHOWN, SETUID, SETGID]
+    entrypoint: ["/bin/sh", "/broker/entrypoint.sh"]
+    environment:
+      BROKER_FUSION_USER: ${BROKER_FUSION_USER:?run ./deploy-simulator-api.sh}
+      BROKER_FUSION_PASSWORD: ${BROKER_FUSION_PASSWORD:?run ./deploy-simulator-api.sh}
+      BROKER_PHYSICAL_USER: ${BROKER_PHYSICAL_USER:?run ./deploy-simulator-api.sh}
+      BROKER_PHYSICAL_PASSWORD: ${BROKER_PHYSICAL_PASSWORD:?run ./deploy-simulator-api.sh}
+      BROKER_RF_USER: ${BROKER_RF_USER:?run ./deploy-simulator-api.sh}
+      BROKER_RF_PASSWORD: ${BROKER_RF_PASSWORD:?run ./deploy-simulator-api.sh}
+      BROKER_CAMERA_USER: ${BROKER_CAMERA_USER:?run ./deploy-simulator-api.sh}
+      BROKER_CAMERA_PASSWORD: ${BROKER_CAMERA_PASSWORD:?run ./deploy-simulator-api.sh}
+    mem_limit: 256m
+    tmpfs: [/tmp, "/run/mosquitto-auth:mode=0700", /mosquitto/log]
+    volumes:
+      - ../central-broker/mosquitto.conf:/broker/mosquitto.conf:ro
+      - ../central-broker/aclfile:/broker/aclfile:ro
+      - ../central-broker/entrypoint.sh:/broker/entrypoint.sh:ro
+      - broker-data:/mosquitto/data
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -u \"$$BROKER_FUSION_USER\" -P \"$$BROKER_FUSION_PASSWORD\" -t 'detection/#' -E -W 3"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # The one thing this stack exposes: the fusion API.
+  fusion:
+    <<: *hardening
+    build:
+      context: ..
+      dockerfile: fusion-service/Dockerfile
+    image: black-relay/fusion-service:sim
+    depends_on:
+      broker: {condition: service_healthy}
+    init: true
+    environment:
+      FUSION_DATABASE: /data/fusion.sqlite3
+      FUSION_CAMERA_SCHEMAS: /contracts/camera
+      FUSION_RF_SCHEMAS: /contracts/rf
+      FUSION_PHYSICAL_SCHEMAS: /contracts/physical
+      FUSION_API_TOKEN: ${FUSION_API_TOKEN:?run ./deploy-simulator-api.sh}
+      FUSION_CENTRAL_MQTT_USER: ${BROKER_FUSION_USER}
+      FUSION_CENTRAL_MQTT_PASSWORD: ${BROKER_FUSION_PASSWORD}
+      # Lets the snapshot route answer. A mock camera has no image behind it, so it answers 404.
+      FUSION_CAMERA_PASSWORD: ${BROKER_CAMERA_PASSWORD}
+    ports:
+      - "${API_PORT:-8090}:8090"
+    volumes:
+      - fusion-data:/data
+      - ./fusion.config.yaml:/config/config.yaml:ro
+    tmpfs: ["/tmp:size=16m"]
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,json,urllib.request; r=urllib.request.Request('http://127.0.0.1:8090/api/v1/health',headers={'Authorization':'Bearer '+os.environ['FUSION_API_TOKEN']}); assert json.load(urllib.request.urlopen(r,timeout=3))['storage']['ready']"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # Panel simulator + the physical bridge (bench.sh --simulator), publishing to `broker`.
+  # Drive it:  docker compose exec physical-sim sh -c 'echo "zone 12 Open" > /app/fusion-service/bench/sim.in'
+  physical-sim:
+    build:
+      context: ..
+      dockerfile: simulator-deploy/physical-sim/Dockerfile
+    image: black-relay/physical-sim:sim
+    restart: unless-stopped
+    init: true
+    depends_on:
+      broker: {condition: service_healthy}
+    environment:
+      BENCH_FUSION_HOST: broker
+      BENCH_FUSION_PORT: "1883"
+      BENCH_FUSION_USER: ${BROKER_PHYSICAL_USER}
+      BENCH_FUSION_PASSWORD: ${BROKER_PHYSICAL_PASSWORD}
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
+  # Turns the RF simulator's raw observations into the alerts fusion stores: three per scenario
+  # hour, the first about 21 minutes in.
+  rf-analytics:
+    <<: *hardening
+    build: ../rf-subsystem/analytics
+    image: black-relay/rf-analytics:sim
+    depends_on:
+      broker: {condition: service_healthy}
+    environment:
+      RF_PASSWORD: ${BROKER_RF_PASSWORD}
+    command:
+      - run
+      - --site=/rf/dev-site.yaml
+      - --rules=/app/config/rules.example.yaml
+      - --friendly=/app/config/friendly.example.yaml
+      - --mqtt-host=broker
+      - --mqtt-user=${BROKER_RF_USER}
+      - --mqtt-password-env=RF_PASSWORD
+      - --publish-host=broker
+      - --publish-user=${BROKER_RF_USER}
+      - --publish-password-env=RF_PASSWORD
+      - --outbox=/data/rf-outbox.jsonl
+      - -o
+      - none
+    volumes:
+      - ../rf-subsystem/simulator/sites/dev-site.yaml:/rf/dev-site.yaml:ro
+      - rf-analytics-data:/data
+    tmpfs: [/tmp]
+
+  # Replays the one-hour scenario in real time (faster runs stamp observations in the future and
+  # fusion rejects anything more than 60 s ahead); the restart policy starts it again when it ends.
+  # Observations go to detection/rf/sim/observations, which only the RF credential can read;
+  # fusion does not subscribe to it.
+  rfsim:
+    <<: *hardening
+    build:
+      context: ../rf-subsystem/simulator
+      dockerfile: ../../simulator-deploy/rfsim/Dockerfile
+    image: black-relay/rfsim:sim
+    depends_on:
+      broker: {condition: service_healthy}
+    environment:
+      RF_PASSWORD: ${BROKER_RF_PASSWORD}
+    command: [run, /app/scenarios/loiterer.yaml, --start-now, --realtime, --mqtt-host, broker, --mqtt-user, "${BROKER_RF_USER}", --mqtt-password-env, RF_PASSWORD, -o, /dev/null]
+    tmpfs: [/tmp]
+
+volumes:
+  broker-data:
+  fusion-data:
+  rf-analytics-data:

@@ -1,0 +1,35 @@
+# Nodes are not on the tailnet: capture and heartbeats go straight to central_host on the LAN.
+# Run with -e leave_tailnet=true once to take an older node off it (logout, then remove the package).
+- name: Is Tailscale installed?
+  ansible.builtin.stat:
+    path: /usr/bin/tailscale
+  register: ts_bin
+
+- name: Leave the tailnet and remove Tailscale
+  when: ts_bin.stat.exists
+  block:
+    - name: Still installed (pass -e leave_tailnet=true to remove it)
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} still has Tailscale; its capture now goes to {{ central_host }} on the LAN."
+      when: not leave_tailnet | bool
+
+    - name: tailscale logout
+      ansible.builtin.command: tailscale logout
+      changed_when: true
+      failed_when: false
+      when: leave_tailnet | bool
+
+    - name: Remove the package and its repository
+      when: leave_tailnet | bool
+      block:
+        - ansible.builtin.apt:
+            name: tailscale
+            state: absent
+            purge: true
+        - ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /etc/apt/sources.list.d/tailscale.list
+            - /etc/apt/sources.list.d/tailscale.sources
+            - /usr/share/keyrings/tailscale-archive-keyring.gpg

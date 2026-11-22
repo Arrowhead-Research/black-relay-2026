@@ -1,0 +1,34 @@
+# Access control. User names come from .env; entrypoint.sh substitutes the @...@ markers.
+# Mosquitto denies anything not listed: a publisher cannot read, and cannot write outside its prefix.
+user @FUSION_USER@
+topic read detection/#
+
+user @PHYSICAL_USER@
+topic write detection/physical/#
+
+user @RF_USER@
+topic write detection/rf/#
+# rf-analytics consumes simulator observations on this topic; nothing else under detection/rf is readable.
+topic read detection/rf/sim/#
+
+# rf-analytics on the central server (repo-root compose.yaml, profile "rf"): alerts, camera cues and
+# node status. Optional: entrypoint.sh drops this block when BROKER_RF_ANALYTICS_USER is unset.
+user @RF_ANALYTICS_USER@
+topic write detection/rf/#
+
+# Camera nodes share one login (the relay's design: the Frigate proxy secret and MediaMTX's video
+# pull derive from its password). They publish under detection/camera and read RF cues.
+user @CAMERA_USER@
+topic write detection/camera/#
+topic read detection/rf/cues/camera
+
+# The camera relay's API (camera-relay-service in the root compose): reads only the camera topics it
+# stores. Optional: entrypoint.sh drops this block when BROKER_RELAY_API_USER is unset.
+user @RELAY_API_USER@
+topic read detection/camera/detections
+topic read detection/camera/cue-acks
+topic read detection/camera/status/nodes
+
+# Per-node logins are appended by entrypoint.sh from BROKER_RF_NODE_LOGINS and BROKER_CAMERA_NODE_LOGINS
+# (kept by detection/central/node-logins.sh). rf-node-<node> gets `topic write detection/rf/nodes/<node>/#`
+# only; cam-node-<node> gets the two camera lines above, for its own login.

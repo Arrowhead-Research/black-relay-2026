@@ -1,0 +1,57 @@
+# Camera node: Hailo driver and Frigate's host units, the firewall, and the Docker stack (MQTT broker,
+# edge bridge, camera-link). Safe to re-run. eth0 is the camera link: changes to it apply at the
+# reboot at the end, never live (an SSH session may be on it).
+- name: Checks before anything changes
+  ansible.builtin.assert:
+    that:
+      - camera_zones is defined and camera_zones | length > 0
+      - camera_zones | map('regex_search', '^[a-zA-Z0-9_-]{2,}$') | select('none') | list | length == 0
+      - inventory_hostname is match('^[a-z0-9][a-z0-9-]*$')
+    fail_msg: "set camera_zones (a list of zone names, [a-zA-Z0-9_-]{2,}) for {{ inventory_hostname }} in host_vars/{{ inventory_hostname }}.yml"
+    quiet: true
+
+- name: Things that need a reboot to apply
+  ansible.builtin.set_fact:
+    reboot_reasons: []
+
+- name: Packages
+  ansible.builtin.include_tasks: packages.yml
+
+- name: Users and directories
+  ansible.builtin.include_tasks: dirs.yml
+
+- name: Hailo driver and model
+  ansible.builtin.include_tasks: hailo.yml
+
+- name: Network, Docker and Frigate's host units
+  ansible.builtin.include_tasks: host_units.yml
+
+- name: Firewall
+  ansible.builtin.include_tasks: firewall.yml
+
+- name: SSH, journal, time and broker name
+  ansible.builtin.include_tasks: system.yml
+
+- name: Node files for the bridge and camera-link
+  ansible.builtin.include_tasks: config.yml
+
+- name: Source tree and the Docker stack
+  ansible.builtin.include_tasks: stack.yml
+
+- name: Rescue hotspot watchdog
+  ansible.builtin.include_role:
+    name: fleet_common
+    tasks_from: watchdog
+
+- name: Apply unit changes before starting
+  ansible.builtin.meta: flush_handlers
+
+- name: Rescue hotspot timer
+  ansible.builtin.systemd_service:
+    name: rf-wifi-fallback.timer
+    state: started
+    enabled: true
+
+- name: Reboot to apply the driver, firewall and eth0 changes
+  ansible.builtin.include_tasks: reboot.yml
+  when: reboot_reasons | length > 0

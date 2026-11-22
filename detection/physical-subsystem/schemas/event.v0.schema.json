@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.invalid/physical/event.v0.schema.json",
+  "title": "Physical sensor event (v0, draft)",
+  "description": "One sensor event. Additional properties are allowed (additive-only versioning); consumers must ignore unknown ones.",
+  "type": "object",
+  "required": [
+    "schema",
+    "id",
+    "timestamp",
+    "site",
+    "seq",
+    "event_type",
+    "zone",
+    "state",
+    "previous_state",
+    "stale",
+    "source",
+    "synthetic"
+  ],
+  "properties": {
+    "schema": {
+      "const": "physical.event.v0"
+    },
+    "id": {
+      "$ref": "#/$defs/uuid4"
+    },
+    "timestamp": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "site": {
+      "$ref": "#/$defs/site"
+    },
+    "seq": {
+      "$ref": "#/$defs/seq"
+    },
+    "event_type": {
+      "enum": [
+        "zone_opened",
+        "zone_closed",
+        "motion_detected",
+        "motion_cleared",
+        "glass_break_detected",
+        "glass_break_cleared",
+        "zone_active",
+        "zone_idle",
+        "tamper",
+        "tamper_cleared",
+        "zone_added",
+        "zone_removed",
+        "zone_stale",
+        "zone_fresh",
+        "battery_low",
+        "battery_ok",
+        "zone_renamed"
+      ]
+    },
+    "zone": {
+      "$ref": "#/$defs/zone"
+    },
+    "state": {
+      "type": "string"
+    },
+    "previous_state": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "stale": {
+      "type": "boolean"
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "synthetic": {
+      "type": "boolean",
+      "description": "true when the bridge inferred the change by diffing a snapshot after a reconnect."
+    },
+    "tamper": {
+      "type": "boolean"
+    },
+    "prev_seq": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1,
+      "description": "seq of the event message the bridge published immediately before this one (null for the first one after the publisher's start position). A subscriber that last saw a different seq has lost messages; log rows of types that are not published (see MQTT-CONTRACT.md) leave gaps in seq but never in this chain."
+    },
+    "battery_low": {
+      "type": "boolean",
+      "description": "Present on battery_low / battery_ok."
+    },
+    "previous_name": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Present on zone_renamed: the zone's name before the rename (zone.name is the new one)."
+    }
+  },
+  "$defs": {
+    "uuid4": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "description": "UUID v4, lower case. Stable across re-sends; dedupe key."
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+      "description": "UTC RFC 3339, millisecond precision, literal Z."
+    },
+    "site": {
+      "type": "object",
+      "required": [
+        "id",
+        "name"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "zone": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "partition"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "contact",
+            "motion",
+            "glass_break",
+            "other"
+          ]
+        },
+        "partition": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "source": {
+      "enum": [
+        "iq_remote",
+        "control4",
+        null
+      ],
+      "description": "Panel link the data came from; null if unknown."
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The bridge's SQLite event-log sequence number of this event (gap-free in the log; the same number as `seq` in the REST/SSE API)."
+    }
+  }
+}

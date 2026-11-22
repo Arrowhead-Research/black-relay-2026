@@ -1,0 +1,159 @@
+# RF subsystem central services (DESIGN.md, section 7.1): Kismet, the WBT Console and live
+# analytics. The repo-root compose.yaml includes this file, so on the central server a plain
+# `docker compose up -d` from the repo root runs them beside the central broker and fusion.
+# On its own (lab, no central broker), from this directory:
+#
+#   docker compose up -d --build
+#
+# Nothing to prepare: rf-bootstrap generates every RF password on first start (bootstrap.sh).
+# .env is optional (see .env.example): ports' bind address, Kismet version, site/rules files.
+#
+# Ports bind to BIND_ADDR, else the central server's BIND_ADDRESS, else 127.0.0.1. Never bind to
+# 0.0.0.0 on a host with a public interface.
+
+name: rf-central
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: "3"}
+
+services:
+  # One-shot: generates the RF passwords into the rf-secrets volume (only missing ones), then exits.
+  rf-bootstrap:
+    <<: *logging
+    image: ${IMAGE_PREFIX-ghcr.io/arrowhead-research/}black-relay/rf-analytics:latest
+    build:
+      context: ../analytics
+    network_mode: none
+    user: "0:0"                    # only to hand each file to the container user that reads it
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER]
+    security_opt: ["no-new-privileges:true"]
+    entrypoint: ["/bin/sh", "/bootstrap.sh"]
+    volumes:
+      - ./bootstrap.sh:/bootstrap.sh:ro
+      - rf-secrets:/run/rf-secrets
+      - rf-analytics-data:/run/rf-analytics-data   # handed to rf-analytics' uid
+
+  kismet-server:
+    <<: *logging
+    build:
+      context: ./kismet
+      args:
+        KISMET_VERSION: ${KISMET_VERSION:-2026-10-R1}
+    image: ${IMAGE_PREFIX-ghcr.io/arrowhead-research/}black-relay/rf-kismet-server:latest
+    restart: unless-stopped
+    depends_on:
+      rf-bootstrap: {condition: service_completed_successfully}
+    environment:
+      KISMET_ADMIN_USER: ${KISMET_ADMIN_USER:-admin}
+      KISMET_ADMIN_PASSWORD: ${KISMET_ADMIN_PASSWORD:-}          # set: wins over the generated one
+      KISMET_ADMIN_PASSWORD_FILE: /run/rf-secrets/kismet-admin-password
+    ports:
+      - "${KISMET_UI_BIND:-127.0.0.1}:2501:2501"   # web UI and REST: loopback (SSH tunnel) unless set
+      - "${BIND_ADDR:-${BIND_ADDRESS:-127.0.0.1}}:3501:3501"   # node capture helpers (legacy TCP)
+    volumes:
+      - kismet-logs:/var/lib/kismet
+      - kismet-home:/root/.kismet
+      - rf-secrets:/run/rf-secrets:ro
+    healthcheck:
+      # 401 means the server is up but wants auth; that is healthy.
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://localhost:2501/system/status.json | grep -qE '200|401'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # WBT Console (web UI): live RF map, node placement, walls, calibration, and one workspace per
+  # building (Site menu: new, switch, export, clear, wipe). Open http://<bind address>:8080 and sign
+  # in with the generated passwords (bootstrap.sh). Site data is kept in the rf-console-data volume;
+  # ../console/site/layout.yaml (local, not committed) is the team template (node hardware, first
+  # site's layout). Positions and node status go to the central broker as rf-console.
+  rf-console:
+    <<: *logging
+    build:
+      context: ..
+      dockerfile: console/Dockerfile
+    image: ${IMAGE_PREFIX-ghcr.io/arrowhead-research/}black-relay/rf-console:latest
+    restart: unless-stopped
+    depends_on:
+      kismet-server: {condition: service_healthy}
+    environment:
+      KISMET_URL: http://kismet-server:2501
+      KISMET_USER: ${KISMET_ADMIN_USER:-admin}
+      KISMET_PASSWORD: ${KISMET_ADMIN_PASSWORD:-}
+      KISMET_PASSWORD_FILE: /run/rf-secrets/kismet-admin-password
+      CONSOLE_DATA: /data
+      CONSOLE_LAYOUT: /site/layout.yaml          # missing: falls back to the bundled example
+      CONSOLE_SITE: ${CONSOLE_SITE:-default}      # site to start on if none was chosen yet
+      CONSOLE_OPERATOR_PASSWORD: ${CONSOLE_OPERATOR_PASSWORD:-}
+      CONSOLE_OPERATOR_PASSWORD_FILE: /run/rf-secrets/console-operator-password
+      CONSOLE_ADMIN_PASSWORD: ${CONSOLE_ADMIN_PASSWORD:-}
+      CONSOLE_ADMIN_PASSWORD_FILE: /run/rf-secrets/console-admin-password
+      CONSOLE_KISMET_LOGS: /kismet-data/logs      # read-only: calibration spots from packet logs
+      CONSOLE_DEMO: ${CONSOLE_DEMO:-}             # 1 = add synthetic emitters with known positions
+      # The central broker (repo-root compose.yaml) with the rf-console login from the root .env.
+      # Standalone without BROKER_RF_PASSWORD: publishing is off.
+      CONSOLE_MQTT_HOST: ${CONSOLE_MQTT_HOST-${BROKER_RF_PASSWORD:+broker}}
+      CONSOLE_MQTT_USER: ${BROKER_RF_USER:-rf-console}
+      CONSOLE_MQTT_PASSWORD: ${BROKER_RF_PASSWORD:-}
+      CONSOLE_TOPIC_PREFIX: detection/rf
+      CONSOLE_NODE_TOKEN: ${CONSOLE_NODE_TOKEN:-}  # rf-node-agent heartbeats must send it (empty: accepted without)
+    ports:
+      - "${BIND_ADDR:-${BIND_ADDRESS:-127.0.0.1}}:${CONSOLE_PORT:-8080}:8080"
+    volumes:
+      - ../console/site:/site:ro
+      - rf-console-data:/data
+      - kismet-logs:/kismet-data:ro
+      - rf-secrets:/run/rf-secrets:ro
+
+  # Live analytics: polls kismet-server, runs the alert rules and publishes alerts, camera cues
+  # and node status under detection/rf/ to the central broker as rf-analytics (its password is
+  # generated by rf-bootstrap; the broker reads the same file). Site, rules and friendly files come
+  # from ../analytics/config: choose them with RF_SITE, RF_RULES and RF_FRIENDLY in .env.
+  rf-analytics:
+    <<: *logging
+    image: ${IMAGE_PREFIX-ghcr.io/arrowhead-research/}black-relay/rf-analytics:latest
+    build:
+      context: ../analytics
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    init: true
+    depends_on:
+      kismet-server: {condition: service_healthy}
+    environment:
+      KISMET_USER: ${KISMET_ADMIN_USER:-admin}
+      KISMET_PASSWORD: ${KISMET_ADMIN_PASSWORD:-}
+      KISMET_PASSWORD_FILE: /run/rf-secrets/kismet-admin-password
+      RF_BROKER_PASSWORD_FILE: /run/rf-secrets/analytics-broker-password
+    command:
+      - live
+      - --kismet-url=http://kismet-server:2501
+      - --site=/config/${RF_SITE:-site.wbt-nodes.example.yaml}
+      - --rules=/config/${RF_RULES:-rules.wbt-live.example.yaml}
+      - --friendly=/config/${RF_FRIENDLY:-friendly.wbt-nodes.example.yaml}
+      - --publish-host=${RF_BROKER_HOST:-broker}
+      - --publish-user=rf-analytics
+      - --publish-password-env=RF_BROKER_PASSWORD
+      - --topic-prefix=detection/rf
+      - --outbox=/data/rf-outbox.jsonl
+      - --events-out=/data/events.jsonl
+    tmpfs: ["/tmp:size=16m"]
+    volumes:
+      - ../analytics/config:/config:ro
+      - rf-analytics-data:/data
+      - rf-secrets:/run/rf-secrets:ro
+    stop_grace_period: 15s
+
+# Fixed names: the same data whether this file runs on its own or from the repo-root compose.yaml.
+volumes:
+  rf-secrets: {name: rf-central_rf-secrets}
+  kismet-logs: {name: rf-central_kismet-logs}
+  kismet-home: {name: rf-central_kismet-home}
+  rf-console-data: {name: rf-central_rf-console-data}
+  rf-analytics-data: {name: rf-central_rf-analytics-data}

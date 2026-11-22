@@ -1,0 +1,45 @@
+{
+  "request": [
+    {
+      "cmd": "GetEnc",
+      "action": 0,
+      "param": {
+        "channel": 0
+      }
+    }
+  ],
+  "http_status": 200,
+  "seconds": 0.06,
+  "response": [
+    {
+      "cmd": "GetEnc",
+      "code": 0,
+      "value": {
+        "Enc": {
+          "audio": 0,
+          "channel": 0,
+          "mainStream": {
+            "bitRate": 6144,
+            "frameRate": 25,
+            "gop": 2,
+            "height": 1920,
+            "profile": "High",
+            "size": "2560*1920",
+            "vType": "h264",
+            "width": 2560
+          },
+          "subStream": {
+            "bitRate": 256,
+            "frameRate": 10,
+            "gop": 4,
+            "height": 480,
+            "profile": "High",
+            "size": "640*480",
+            "vType": "h264",
+            "width": 640
+          }
+        }
+      }
+    }
+  ]
+}

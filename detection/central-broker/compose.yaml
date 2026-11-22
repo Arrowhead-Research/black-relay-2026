@@ -1,0 +1,55 @@
+# The central team MQTT broker. See README.md.
+#
+#   ./setup-credentials.sh        # writes .env; set BROKER_BIND_ADDRESS in it
+#   docker compose up -d
+
+name: central-broker
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.1.2-alpine
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    # entrypoint.sh writes the auth files as root, then mosquitto drops to its own user.
+    cap_add: [CHOWN, SETUID, SETGID]
+    security_opt: ["no-new-privileges:true"]
+    entrypoint: ["/bin/sh", "/broker/entrypoint.sh"]
+    environment:
+      BROKER_FUSION_USER: ${BROKER_FUSION_USER:?run ./setup-credentials.sh}
+      BROKER_FUSION_PASSWORD: ${BROKER_FUSION_PASSWORD:?run ./setup-credentials.sh}
+      BROKER_PHYSICAL_USER: ${BROKER_PHYSICAL_USER:?run ./setup-credentials.sh}
+      BROKER_PHYSICAL_PASSWORD: ${BROKER_PHYSICAL_PASSWORD:?run ./setup-credentials.sh}
+      BROKER_RF_USER: ${BROKER_RF_USER:?run ./setup-credentials.sh}
+      BROKER_RF_PASSWORD: ${BROKER_RF_PASSWORD:?run ./setup-credentials.sh}
+      BROKER_CAMERA_USER: ${BROKER_CAMERA_USER:?run ./setup-credentials.sh}
+      BROKER_CAMERA_PASSWORD: ${BROKER_CAMERA_PASSWORD:?run ./setup-credentials.sh}
+    # Above mosquitto.conf's 64 MiB queue limit, so that limit is reached first.
+    mem_limit: 256m
+    tmpfs:
+      - /tmp
+      - /run/mosquitto-auth:mode=0700
+      # The image declares this as a volume; logs go to stdout, so it would only be an orphan.
+      - /mosquitto/log
+    volumes:
+      - ./mosquitto.conf:/broker/mosquitto.conf:ro
+      - ./aclfile:/broker/aclfile:ro
+      - ./entrypoint.sh:/broker/entrypoint.sh:ro
+      - mosquitto-data:/mosquitto/data
+    ports:
+      # Bound to one address on purpose: the central node's address on the Detection network.
+      - "${BROKER_BIND_ADDRESS:?set BROKER_BIND_ADDRESS in .env}:${BROKER_PORT:-1883}:1883"
+    healthcheck:
+      # Connects and subscribes as fusion, exits on the subscribe acknowledgement: proves the
+      # listener, the password file and the ACL in one round trip.
+      test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -u \"$$BROKER_FUSION_USER\" -P \"$$BROKER_FUSION_PASSWORD\" -t 'detection/#' -E -W 3"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
+volumes:
+  mosquitto-data:

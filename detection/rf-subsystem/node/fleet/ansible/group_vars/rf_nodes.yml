@@ -1,0 +1,18 @@
+# Kismet capture goes to central_host (group_vars/fleet_nodes.yml) on this port.
+central_port: 3501
+
+# The connection and broker settings every node shares are in group_vars/fleet_nodes.yml.
+# Each RF node logs in to the broker as rf-node-<node> and publishes its health to detection/rf/nodes/<node>/.
+# For a broker certificate from the team's own CA instead of Let's Encrypt, set broker_ca_file (a CA .crt
+# on the admin machine, copied to each RF node). Camera nodes have no such setting (system CAs only).
+broker_ca_file: ""
+
+# Kismet capture helpers must match the central server's release (central/kismet/Dockerfile). The
+# Kismet apt repo only carries the current release: bump both together.
+kismet_version: 2026-10-R1
+capture_units: [kismet-cap-wifi, kismet-cap-bt, kismet-cap-tpms]
+
+# Capture adapters. Never the backhaul interface. Override per node in host_vars.
+wifi_iface: wlan1
+bt_prefer: usb
+# bt_addr: "AA:BB:CC:DD:EE:FF"   # pins the Bluetooth adapter (sudo btmgmt info); wins over bt_prefer

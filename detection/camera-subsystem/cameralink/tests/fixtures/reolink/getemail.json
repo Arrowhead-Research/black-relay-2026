@@ -1,0 +1,21 @@
+{
+  "request": [
+    {
+      "cmd": "GetEmail",
+      "action": 1,
+      "param": {}
+    }
+  ],
+  "http_status": 200,
+  "seconds": 0.05,
+  "response": [
+    {
+      "cmd": "Unknown",
+      "code": 1,
+      "error": {
+        "detail": "not support",
+        "rspCode": -9
+      }
+    }
+  ]
+}

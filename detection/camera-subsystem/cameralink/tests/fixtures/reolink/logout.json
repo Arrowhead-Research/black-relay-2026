@@ -1,0 +1,20 @@
+{
+  "request": [
+    {
+      "cmd": "Logout",
+      "action": 0,
+      "param": {}
+    }
+  ],
+  "http_status": 200,
+  "seconds": 0.07,
+  "response": [
+    {
+      "cmd": "Logout",
+      "code": 0,
+      "value": {
+        "rspCode": 200
+      }
+    }
+  ]
+}

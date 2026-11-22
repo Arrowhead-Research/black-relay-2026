@@ -1,0 +1,44 @@
+- name: SSH keys only, no root login
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/10-black-relay.conf
+    content: |
+      PasswordAuthentication no
+      PermitRootLogin no
+    mode: "0644"
+    validate: /usr/sbin/sshd -t -f %s
+  notify: Reload ssh
+
+- name: Journal kept across reboots (capped; it shares the SD card with recordings)
+  ansible.builtin.copy:
+    src: "{{ camera_provision_ops }}/journald-persistent.conf"
+    dest: /etc/systemd/journald.conf.d/90-black-relay.conf
+    mode: "0644"
+  notify: Restart journald
+
+- name: Time from the central server
+  ansible.builtin.copy:
+    dest: /etc/systemd/timesyncd.conf.d/black-relay.conf
+    content: |
+      [Time]
+      NTP={{ camera_ntp_server }}
+    mode: "0644"
+  notify: Restart timesyncd
+
+# timesyncd starts before Wi-Fi is up, fails its first try and backs off for up to ~34 min; it does
+# not follow NetworkManager. The bridge holds every event until NTP is synced, so ask again as soon
+# as the node has a network.
+- name: Retry time sync when the network comes up
+  ansible.builtin.copy:
+    dest: /etc/NetworkManager/dispatcher.d/50-black-relay-timesync
+    content: |
+      #!/bin/sh
+      # Written by Ansible: restart timesyncd when a connection comes up (see the camera_node role).
+      case "$2" in up|connectivity-change) systemctl restart systemd-timesyncd.service ;; esac
+    mode: "0755"
+
+- name: Broker name resolves to the central server on the LAN
+  ansible.builtin.include_role:
+    name: fleet_common
+    tasks_from: broker_hosts
+  vars:
+    broker_hosts_handler: Restart camera services

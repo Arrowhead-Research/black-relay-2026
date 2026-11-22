@@ -1,0 +1,6 @@
+fleet.env
+ansible/host_vars/*.yml
+!ansible/host_vars/*.yml.example
+*.retry
+rf-node-secrets*
+node-secrets*

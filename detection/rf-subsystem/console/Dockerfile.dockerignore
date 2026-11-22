@@ -1,0 +1,20 @@
+# Build context is rf-subsystem/; send only what the image needs (never central/.env).
+*
+!analytics/pyproject.toml
+!analytics/README.md
+!analytics/src
+!console/server.py
+!console/sites.py
+!console/auth.py
+!console/demo.py
+!console/locate.py
+!console/publish.py
+!console/alerting.py
+!console/calfit.py
+!console/baseline.py
+!console/replay.py
+!console/cotravel.py
+!console/nodehealth.py
+!console/layout.example.yaml
+!console/static
+**/__pycache__

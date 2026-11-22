@@ -1,0 +1,48 @@
+# Alert rules for live WBT nodes (rfanalytics live). Zone names match
+# config/site.wbt-nodes.example.yaml; rename them when the real site file
+# has real zones. See rules.example.yaml for the annotated reference.
+
+timezone: America/New_York
+
+rules:
+  - id: loiter
+    type: loiter
+    description: An emitter stays in one zone.
+    severity: medium
+    zones: [zone-wbt-1, zone-wbt-2, zone-wbt-3, zone-wbt-4]
+    min_dwell_s: 600
+    cooldown_s: 3600
+
+  - id: new-device-overnight
+    type: new_device
+    description: A never-before-seen stable device appears overnight.
+    severity: low
+    hours: { start: "22:00", end: "05:00" }
+    min_duration_s: 120
+    learn_s: 3600
+    include_randomized: false
+
+  - id: repeat-visitor
+    type: repeat_visitor
+    severity: medium
+    min_visits: 3
+    window_s: 86400
+
+  # A watchlist needs at least one ID or SSID; uncomment and fill in.
+  # - id: watchlist
+  #   type: watchlist
+  #   severity: high
+  #   emitter_ids: []        # e.g. tpms:1a2b3c4d, aa:bb:cc:dd:ee:ff
+  #   ssids: []
+
+  - id: node-offline
+    type: node_offline
+    severity: high
+    # Any radio on the node counts as "heard". Wi-Fi keeps a node alive on a
+    # busy site; until node heartbeats exist, silence is the only signal.
+    silence_s: 300
+
+  - id: tpms-camera-cue
+    type: camera_cue
+    emitter_types: [tpms]
+    cooldown_s: 60

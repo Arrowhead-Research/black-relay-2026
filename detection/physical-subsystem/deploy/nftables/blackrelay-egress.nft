@@ -1,0 +1,37 @@
+#!/usr/sbin/nft -f
+# Defence in depth for the "one-way" guarantee: even if an adapter process were compromised or buggy, the kernel only
+# lets it talk to the panel, and only on the one port its protocol needs. Containers run with host networking and
+# distinct uids (docker-compose.yml `user:`), so the output hook can tell them apart.
+#   iq-remote (uid 10001)  -> PANEL_IP tcp/8883   (panel's local MQTT broker)
+#   control4  (uid 10002)  -> PANEL_IP tcp/12345  (Control4 JSON/TLS)
+#   normalizer (uid 10004) -> no network at all   (network_mode: none; belt and braces)
+# Before loading: set PANEL_IP below to YOUR panel's address (README, "Install the egress firewall"). The value shipped
+# here is only a placeholder; with the wrong address the adapters are cut off.
+# Then: sudo nft -c -f deploy/nftables/blackrelay-egress.nft   (syntax check)  and  sudo nft -f ...  (load)
+# Persist via an include in /etc/nftables.conf.
+# ASSERTION (host, not enforceable here): net.ipv4.ip_forward=0. The bridge host joins the panel's Wi-Fi access point and
+# the Detection VLAN and must not route between them. Check before loading:
+#   test "$(sysctl -n net.ipv4.ip_forward)" = 0 || echo "ip_forward is on: stop"
+# (README, Assembly Steps 5).
+#
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# >>> EDIT THIS: the IQ Panel 5 address (same as iq_remote.panel_ip / control4.host in config.yaml)          <<<
+define PANEL_IP = 192.168.1.50
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+define UID_IQ  = 10001
+define UID_C4  = 10002
+define UID_NORM = 10004
+
+table inet blackrelay_egress
+delete table inet blackrelay_egress
+
+table inet blackrelay_egress {
+  chain output {
+    type filter hook output priority 0; policy accept;
+    meta skuid $UID_IQ  ip daddr $PANEL_IP tcp dport 8883  accept
+    meta skuid $UID_IQ  counter drop comment "iq-remote may reach only panel:8883"
+    meta skuid $UID_C4  ip daddr $PANEL_IP tcp dport 12345 accept
+    meta skuid $UID_C4  counter drop comment "control4 may reach only panel:12345"
+    meta skuid $UID_NORM counter drop comment "normalizer has no network"
+  }
+}

@@ -1,0 +1,117 @@
+# BlackRelay configuration. Copy to deploy/config/config.yaml and edit.
+# Secrets are never stored here. The MQTT password is read from /run/secrets/mqtt_password.
+# Paths are container paths; see deploy/docker-compose.yml. Defaults shown are the schema defaults.
+
+iq_remote:
+  enabled: true
+  panel_ip: 192.168.1.50          # IQ Panel 5 address; give the panel a DHCP reservation
+  plugin_ip: null                 # this host's LAN IP; null = auto-detect (set it on multi-NIC hosts)
+  pki_dir: /data/pki              # pairing keys (host: deploy/data/pki). Back this up.
+  panel_spki_sha256: null         # strict preset of the panel certificate (64 hex SPKI sha256). When set, pin_mode is `preset`:
+                                  # the file is ignored and nothing is ever recorded.
+  pin_mode: required              # required (default): a pin must already be recorded in <pki_dir>/panel_pin.json by `br2 pair`
+                                  # or `br2 repin --yes`; with none the adapter refuses to connect. tofu: opt-in, the first
+                                  # verified connection records it (dev/harness only). A pin file that exists but cannot be read
+                                  # is always refused (health reason pin_unreadable). A changed certificate is REFUSED until
+                                  # `br2 repin --yes`.
+  owner: "10001:10000"            # uid:gid the pin / pairing files are handed to when `br2 pair|repin` run as root (the uid
+                                  # the iq-remote container runs as); `dir` = whoever owns pki_dir
+  pin_accept_rotation: false      # dev/harness only: follow a changed panel certificate. Never enable in production.
+
+control4:                         # optional second adapter, used only as fallback
+  enabled: false
+  host: null                      # e.g. 192.168.1.60
+  port: 12345
+  token_file: null                # file holding the Control4 token; add a compose secret first
+  cert_sha256: null               # pinned panel cert fingerprint (hex SHA-256); null = refuse to connect
+
+timers:
+  silence_probe_s: 60             # no panel message for this long: probe the link
+  probe_timeout_s: 10             # how long a probe may take
+  backoff_initial_s: 1            # first reconnect delay
+  backoff_max_s: 60               # reconnect delay ceiling
+  fallback_after_s: 120           # primary adapter down this long: switch to control4 (if enabled)
+  failback_holddown_s: 3          # primary must stay up this long before the bridge returns to it (anti-flap)
+  ipc_liveness_s: 5               # an adapter silent this long (not even a keep-alive) is declared down
+
+zones:                            # keyed by panel zone id; every field is optional
+  12:
+    name: Front door              # overrides the panel's label
+    kind: contact                 # glass_break | motion | contact | other
+  13:
+    name: Garage motion
+    kind: motion
+  40:
+    ignore: true                  # excludes this zone from the output
+  include_keypads: false          # keypad / IQ Remote zones (incl. this bridge's own "IQ Remote 1") are not sensors:
+                                  # hidden by default. true = publish them as kind "other". Must be a real boolean.
+
+mqtt:
+  host: 127.0.0.1                 # host networking: reach the mosquitto container via its published port
+  port: 8883
+  tls: true
+  ca_file: /certs/ca.crt
+  username: blackrelay
+  password_file: /run/secrets/mqtt_password
+  topic_prefix: blackrelay/v1
+  client_id: blackrelay-bridge
+  ha_discovery: true              # publish Home Assistant MQTT discovery configs
+  ha_discovery_prefix: homeassistant
+  insecure_dev: false             # true ONLY to allow plaintext MQTT against a throw-away dev broker (tls: false)
+
+api:
+  host: 0.0.0.0
+  port: 8443
+  tls_cert: /certs/api/api.crt
+  tls_key: /certs/api/api.key
+  keys:                           # Bearer API keys. Only a key_id and an argon2 hash are stored here.
+    - name: home-assistant
+      # Generate with: docker compose run --rm bridge hash-key
+      # It prints a new key (shown once), its key_id and its hash. Paste key_id and argon2_hash here, never the key.
+      # key_id lets the API find the one record a presented key could match (so garbage keys cost nothing and a valid
+      # key is never queued behind them). key_id is REQUIRED on every record: without it the API refuses to start.
+      # Replace these placeholders before starting the bridge.
+      key_id: "0000000000000000"
+      argon2_hash: "$argon2id$v=19$m=65536,t=3,p=4$cGxhY2Vob2xkZXJzYWx0$cGxhY2Vob2xkZXJoYXNoLXJlcGxhY2UtbWUtMDAwMDAwMDA"
+  rate_limit_per_minute: 120
+  sse_idle_drop_s: 30             # drop an SSE client whose send buffer has not drained for this long (never-reading peers)
+  # sse_probe_bytes: 32768        # padding comment sent every sse_probe_interval_s so a non-reading client's buffers fill
+  # sse_probe_interval_s: 30
+  metrics_port: 9100
+  metrics_host: 127.0.0.1         # bind address of /metrics (default loopback; set the LAN IP for a remote Prometheus)
+
+site:                             # identifies this installation in every team message
+  id: sh1                         # same as fusion's site_id (detection/central/fusion.config.yaml), so fusion lists
+  name: sh1                       #   the bridge under the same site as the camera and RF nodes
+
+# Team ("fusion") MQTT output, DRAFT v0: see MQTT-CONTRACT.md. Publish-only, no retained messages, at least once.
+# Off by default; the bridge starts and runs normally with it off. Enable it by also starting the `fusion` compose
+# profile (own container, own outbound network; see docker-compose.yml).
+fusion:
+  enabled: false
+  host: reg.bulexa.com            # the central broker (repo-root compose.yaml on the central server)
+  port: 8883                      # TLS. 1883 is the same broker without TLS (avoid: the login would cross in clear)
+  tls:
+    ca_file: /etc/ssl/certs/ca-certificates.crt   # public CAs: the broker has a Let's Encrypt certificate
+    certfile: null                # optional client certificate
+    keyfile: null
+  username: physical-subsystem    # BROKER_PHYSICAL_USER on the central server
+  password_file: /run/secrets/fusion_password   # deploy/secrets/fusion/fusion_password (uid 10003, 0600)
+  topic_prefix: detection/physical
+  client_id: physical-subsystem   # must be unique on the team broker
+  status_interval_s: 60           # panel status and every zone status are re-sent at least this often
+  metrics_port: 9101              # standalone `fusion` container only: /metrics and /healthz (0 = off). In-process
+  metrics_host: 127.0.0.1         #   mode uses api.metrics_port instead. 127.0.0.1 = reachable inside the container only
+  health_max_tick_age_s: 30       # unhealthy if the producer loop has not run for this long
+  health_max_backlog_age_s: 300   # unhealthy if the oldest queued message is older than this (broker down / not acking)
+  outbox:
+    dir: null                     # null = <state dir>/fusion (compose: the out-state volume)
+    max_bytes: 10485760           # oldest messages are dropped (and counted) beyond these caps; status goes first
+    max_messages: 20000
+    max_age_s: 86400
+
+storage:
+  data_dir: /data
+  retention_days: 30              # event log retention
+
+log_level: INFO                   # DEBUG | INFO | WARNING | ERROR

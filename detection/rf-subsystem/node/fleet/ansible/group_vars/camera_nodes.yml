@@ -1,0 +1,22 @@
+# Camera kits (Raspberry Pi 5 + Hailo-8 + one Reolink on eth0). Connection and broker settings are in
+# group_vars/fleet_nodes.yml. Each node logs in to the broker as cam-node-<node>.
+
+# Frigate's detection model: path to yolov6n.hef on this admin machine (sha256 below). Needed until a node has it.
+# fleet.sh passes CAMERA_HEF from fleet.env.
+camera_hef: "{{ lookup('ansible.builtin.env', 'FLEET_CAMERA_HEF') }}"
+camera_hef_sha256: 6a20a3952732c7ea5f3f94a586f004015d3ae7d8f6ec5f7b2fcaa4126237124e
+
+# Hailo driver Frigate needs (installed with Frigate's own script, never the hailo-all package).
+hailo_driver_version: 4.21.0
+hailo_install_url: https://raw.githubusercontent.com/blakeblackshear/frigate/v0.18.2/docker/hailo8l/user_installation.sh
+hailo_install_sha256: 700f75db1669ca3447d4acd52bb418efe529962c990290eaa15a1ea5da42b501
+
+# Networks allowed to SSH to a node besides the central server (and the machine running Ansible, which
+# is added automatically): the setup network by default.
+fleet_admin_nets: ['10.42.0.0/24']
+
+# Time server for the node (the central server's chrony by default).
+# camera_ntp_server: 172.22.41.10
+
+# Run a prebuilt image instead of building on the node (docker compose pull).
+# camera_node_image: ghcr.io/example/black-relay-camera-node:1.0

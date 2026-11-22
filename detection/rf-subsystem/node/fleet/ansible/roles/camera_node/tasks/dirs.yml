@@ -1,0 +1,33 @@
+- name: Host user for the bridge container
+  ansible.builtin.user:
+    name: camerabridge
+    system: true
+    shell: /usr/sbin/nologin
+    home: /var/lib/camerabridge
+    create_home: false
+  register: bridge_user
+
+- name: Directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.group | default('root') }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /etc/camerabridge, group: camerabridge, mode: "0750" }
+    - { path: /var/lib/camerabridge, owner: camerabridge, group: camerabridge, mode: "0700" }
+    - { path: /var/lib/camera-link, mode: "0755" }
+    - { path: /var/lib/camera-provision, mode: "0755" }
+    - { path: /var/lib/frigate, mode: "0755" }
+    - { path: /var/lib/frigate/config, mode: "0755" }
+    - { path: /var/lib/frigate/media, mode: "0755" }
+    - { path: /var/lib/frigate/config/model_cache, mode: "0755" }
+    - { path: /etc/black-relay, mode: "0755" }
+    # Drop-in directories the role writes to; stock Raspberry Pi OS Lite does not ship them.
+    - { path: /etc/systemd/journald.conf.d, mode: "0755" }
+    - { path: /etc/systemd/timesyncd.conf.d, mode: "0755" }
+    - { path: /etc/docker, mode: "0755" }
+    - { path: /etc/systemd/system/docker.service.d, mode: "0755" }
+  loop_control:
+    label: "{{ item.path }}"
