@@ -4,8 +4,9 @@ The ordered run for when the owner is back on the site network. It installs the 
 riskiest and most basic first, so that a basic failure stops the run early instead of spending the camera's login
 attempts or a day of waiting.
 
-**Status of every check: NOT YET RUN.** Nothing in this file has been run on a Pi, a Hailo or the camera. A check
-passes only on the output described, recorded in its blank. A failed check is a defect to report, not a check to
+**Status.** The first run, on kit 1 on 2026-11-13, is recorded under each check. It passed C49, C50, C52, C53, C55
+(with a note) and C57, and partly ran C54 (with a defect), C73 and C74. Every check not labeled that way is NOT YET RUN.
+A check passes only on the output described, recorded in its blank. A failed check is a defect to report, not a check to
 relabel, and it is not reworded to fit. Thresholds marked *proposed* are mine, not the owner's or the plan's: they are
 there so that a result can be read, and the owner may change them.
 

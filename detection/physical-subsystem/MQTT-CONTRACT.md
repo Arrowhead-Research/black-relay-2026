@@ -14,15 +14,16 @@ Consumer: the fusion service (subscribes). The bridge is publish-only on this co
 | | |
 |---|---|
 | Broker | the central broker on the central server: `reg.bulexa.com:8883` (TLS) or `:1883`, repo-root `compose.yaml` |
-| Transport | TLS on 8883 (Let's Encrypt certificate) with a per-publisher username/password; the bridge logs in as `physical-subsystem` and may only write `detection/physical/#` |
+| Transport | TLS on 8883 (Let's Encrypt with `setup-central.sh --domain`, otherwise the store's own CA) with a per-publisher username/password; the bridge logs in as `physical-subsystem` and may only write `detection/physical/#` |
 | MQTT version | 3.1.1 |
 | Client id | `physical-subsystem` (config `fusion.client_id`; must be unique on the broker) |
 | Session | clean session. The bridge keeps its own durable outbox instead of relying on broker session state |
 | Direction | publish-only. The bridge subscribes to nothing and never reads from the broker |
 | Retained | never. No message is published with the retain flag |
 
-Plaintext is used only because the team broker is plaintext today. The bridge logs a warning at startup whenever TLS is
-off, and when a username is set without TLS.
+The bridge uses TLS when `fusion.tls` is set (the example does). Plaintext (`fusion.tls: null`) is only used for
+`central-broker:1883` inside Docker on `black-relay-local`, on a central server without a public name. The bridge logs a
+warning at startup whenever TLS is off, and when a username is set without TLS.
 
 ## 2. Topics
 
@@ -252,8 +253,9 @@ One message per zone.
   partition arming and alarm events, the raw panel record.
 - The connection is publish-only. The bridge never subscribes to the team broker, so nothing on the broker can reach
   the bridge or the panel.
-- Plaintext in v0 (section 1). Anyone on the `fusion` network can read these messages. Suggested broker ACL when the
-  broker gets one: client `physical-subsystem` may write `detection/physical/#` and nothing else.
+- TLS when `fusion.tls` is set (section 1); plaintext 1883 exposes the login and the messages on that network path. The
+  central broker's ACL (`detection/central-broker/aclfile`) lets `physical-subsystem` write `detection/physical/#` and
+  nothing else, and lets fusion read `detection/#`.
 
 ## 8. Versioning
 
@@ -277,10 +279,10 @@ zone status per zone within 60 s of the bridge starting.
 
 - Fusion standard not published: envelope field names, event vocabulary, `kind` values, the `site` object and `seq`
   semantics (global here, not per topic) may all change.
-- Broker auth/TLS plan and the client-id and ACL convention are not decided. The bridge supports TLS (`fusion.tls`) and
-  username + password file, but that is untested against the team broker.
-- The panel protocol has only been exercised against a simulator, not the real IQ5. Event content is only as correct as
-  that integration; see README.
+- The central broker has TLS on 8883, per-publisher logins and the ACL above. The bridge's TLS path to the deployed broker
+  is not recorded as verified (README, manual check 3).
+- Panel events were checked on a real IQ5 only for a door contact (README, "What has and has not been verified"); motion
+  and glass break are not yet verified on hardware.
 - Sensor-offline is a status field only, not an event. Whether fusion wants it (and arming data, which is out of
   scope here) as events is open.
 - If the outbox directory is lost, the `prev_seq` chain restarts at null and the publisher starts again at the head of
@@ -307,3 +309,4 @@ than `health_max_backlog_age_s` (default 300): the broker is unreachable or not 
 | 2026-11-14 | v0 draft | `seq` on events is now the SQLite event-log seq (was a bridge-wide counter); added `prev_seq`; removed `log_seq`; status messages no longer carry `seq`; stale/fresh are real log events; added `battery_low` / `battery_ok`; documented unpublished panel facts; section 11 (health and metrics). |
 | 2026-11-15 | v0 draft | Documented (no wire change): keypad / IQ Remote zones are not published by default (`zones.include_keypads`); the panel's motion delay (observed 310 s) delays `motion_cleared`; log-only event types (`zone.kind`, `zone.partition`, `partition.*`) and exact log replay; log rows carry the zone as of each event incl. tamper/battery/online. |
 | 2026-11-15 | v0 draft | Tamper, battery, stale/fresh and renamed events: `state` is the zone's state as of the event (stored in the log row), not as of message build time. |
+| 2026-11-21 | v0 draft | Documented (no wire change): TLS to the central broker is the default transport; the central broker's ACL; open items updated for the deployed broker and the real-IQ5 results. |

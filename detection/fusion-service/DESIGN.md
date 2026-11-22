@@ -20,6 +20,8 @@ RF Pis → central Kismet/Console → RF broker ──┼→ normalize → SQLit
 Physical bridge → team MQTT broker ──────────┘                 └→ latest node status
 ```
 
+On the central server all three use one broker (`broker`, repo-root `compose.yaml`) and one fusion connection (`central`).
+
 ## Contracts and normalization
 
 Accepted topics are the three camera outputs, RF positions/alerts/node status and physical
@@ -47,8 +49,8 @@ site identity. Source timestamps retain their source semantics and are normalize
 
 Physical subscriptions use the existing versioned team feed directly from Mosquitto. They do
 not access the panel, read physical's database, poll its API or consume the native TLS broker's
-`blackrelay/v1/...` feed. Enable physical's optional team publisher; default routing is the same
-`rf-mqtt:1883` broker used by RF. Fusion can subscribe to both with one persistent connection.
+`blackrelay/v1/...` feed. Enable physical's optional team publisher; its example routing is the
+broker RF uses (`rf-mqtt:1883` in the generic example). Fusion can subscribe to both with one persistent connection.
 
 Every physical connection requires `physical_node_id`, a stable configured bridge identity
 because its source messages lack one. Individual sensors remain `data.zone.id`. The v0 contract
@@ -86,7 +88,7 @@ remain in the local database and authenticated API.
 
 ## Persistence
 
-SQLite uses WAL and `synchronous=FULL`. Unknown future database schema versions fail startup.
+SQLite uses WAL and `synchronous=FULL`. A database whose schema version differs from the one this build knows fails startup.
 
 | Table | Purpose |
 |---|---|

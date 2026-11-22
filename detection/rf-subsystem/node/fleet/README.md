@@ -36,13 +36,13 @@ The fleet key pair (`SSH_KEY`, default `~/.ssh/blackrelay_fleet`) is created on 
 
 1. Installs the Kismet capture helpers from the Kismet apt repo **pinned to the central server's release** (`kismet_version`, same as `central/kismet/Dockerfile`) and holds them there, plus `rtl-433`, `bluez` and tools.
 2. Installs the files in `../` exactly as the node README describes: Bluetooth helper scripts, `rf-node-agent`, the `kismet-cap-*` and `rf-node-agent` units, the RTL-SDR driver blacklist.
-3. Writes `/etc/rf-node/rf-node.env` (0600): `CENTRAL_HOST`, `CENTRAL_PORT`, `NODE_NAME`, `WIFI_IFACE`, `BT_PREFER`/`BT_ADDR`, `NODE_TOKEN` and the node's broker login `MQTT_HOST`/`MQTT_PORT`/`MQTT_USER`/`MQTT_PASSWORD`. Other keys and hand edits are kept. Pins `reg.bulexa.com` to `172.20.100.150` in `/etc/hosts` so the broker's Let's Encrypt name works on the LAN.
+3. Writes `/etc/rf-node/rf-node.env` (0600): `CENTRAL_HOST`, `CENTRAL_PORT`, `NODE_NAME`, `WIFI_IFACE`, `BT_PREFER`/`BT_ADDR`, `NODE_TOKEN` and the node's broker login `MQTT_HOST`/`MQTT_PORT`/`MQTT_USER`/`MQTT_PASSWORD`. Other keys and hand edits are kept. Pins `reg.bulexa.com` to the central server (`172.22.41.10`) in `/etc/hosts` so the broker's Let's Encrypt name works on the LAN.
 4. Enables and starts capture and the agent.
 
-**Central connection.** Nodes are **not on the tailnet**. Everything goes to the central server (`172.20.100.150`) on the LAN:
+**Central connection.** Nodes are **not on the tailnet**. Everything goes to the central server (`172.22.41.10`, `central_host` in `ansible/group_vars/fleet_nodes.yml`) on the LAN:
 
 - **Central MQTT broker** (the root compose's `broker`, the same one the physical subsystem publishes to): each node logs in as its own `rf-node-<node>` on 8883 with TLS (the `reg.bulexa.com` Let's Encrypt certificate; `broker_tls` and `broker_port` in `ansible/group_vars/fleet_nodes.yml` cover the plain 1883 listener, `broker_ca_file` in `rf_nodes.yml` a private CA) and publishes its health, retained, to `detection/rf/nodes/<node>/health`, plus `.../online` (`1`, or `0` as its last will when it drops off). The broker only lets it write under its own `detection/rf/nodes/<node>/`.
-- **Kismet remote capture** on TCP 3501 (raw packets; the RF stack's analytics turn them into `detection/rf/...` messages under its own login) and **console heartbeats** on 8080. The RF stack must publish these on that address (`BIND_ADDR=172.20.100.150` in `rf-subsystem/central/.env`).
+- **Kismet remote capture** on TCP 3501 (raw packets; the RF stack's analytics turn them into `detection/rf/...` messages under its own login) and **console heartbeats** on 8080. The RF stack must publish these on that address: `BIND_ADDRESS` in the root `.env` (set by `setup-central.sh 172.22.41.10`) or `BIND_ADDR` in `rf-subsystem/central/.env`.
 
 The nodes' network must be allowed to reach 8883, 3501 and 8080 there. A node that was joined earlier stays joined until you run `fleet.sh provision <node> -e leave_tailnet=true` (logs out, removes the package).
 
@@ -79,11 +79,11 @@ For when the site's Wi-Fi isn't known at flash time. With `SETUP_SSID=BlackRelay
 
 **Hotspot can't be joined?** The hotspots are WPA2-AES with PMF off (the Pi's radio advertises PMF in hotspot mode but doesn't complete it, which stops iPhones and Macs joining). Give a node 3–4 minutes after first power-on. With the card in your machine, `./check-setup-pass.sh [/Volumes/bootfs]` tells you whether a passphrase matches the card's setup keys (it prints neither). For the node's own view, re-seed with `FLEET_DIAG=1`, boot it, try to join, then read `rf-diag.txt` from the card.
 
-Wi-Fi is only the node's link back to central, on the onboard radio (`wlan0`); capture stays on the external adapter. Only the derived WPA keys are stored on cards and nodes. Anyone with a card can join the setup network while it's up, so keep it off when you aren't staging; SSH still only accepts the fleet key and the broker link is TLS. The site network must reach the central server (172.20.100.150) for capture and MQTT.
+Wi-Fi is only the node's link back to central, on the onboard radio (`wlan0`); capture stays on the external adapter. Only the derived WPA keys are stored on cards and nodes. Anyone with a card can join the setup network while it's up, so keep it off when you aren't staging; SSH still only accepts the fleet key and the broker link is TLS. The site network must reach the central server (172.22.41.10) for capture and MQTT.
 
 ## Per-node settings
 
-Shared connection and broker settings are in `ansible/group_vars/fleet_nodes.yml`; RF defaults in `rf_nodes.yml`, camera defaults in `camera_nodes.yml`. Put anything node-specific in `ansible/host_vars/<node>.yml` (gitignored; see `wbt-1.yml.example`): its address if `<node>.local` does not resolve, `wifi_iface`, `bt_addr` (from `sudo btmgmt info`), or a shorter `capture_units` for a node without an RTL-SDR.
+Shared connection and broker settings are in `ansible/group_vars/fleet_nodes.yml`; RF defaults in `rf_nodes.yml`, camera defaults in `camera_nodes.yml`. Ansible connects over IPv4 only (`ansible_ssh_extra_args` in `fleet_nodes.yml`), because the camera firewalls admit the controller by the IPv4 address it connects from. Put anything node-specific in `ansible/host_vars/<node>.yml` (gitignored; see `wbt-1.yml.example`): its address if `<node>.local` does not resolve, `wifi_iface`, `bt_addr` (from `sudo btmgmt info`), or a shorter `capture_units` for a node without an RTL-SDR.
 
 **Existing nodes (wbt-1 … wbt-4).** Their key is not the fleet key yet: add it once (`ssh-copy-id -i ~/.ssh/blackrelay_fleet.pub pi@<node>`), give their addresses and adapter settings in `host_vars`, and review `fleet.sh provision wbt-1 --check --diff` before the real run. Do one node at a time and confirm its sources in Kismet.
 
@@ -93,7 +93,7 @@ Shared connection and broker settings are in `ansible/group_vars/fleet_nodes.yml
 
 ## Camera nodes
 
-Camera kits are a Raspberry Pi 5 with a Hailo-8 and one Reolink RLC-520A on `eth0` (code in `../../camera-subsystem`). They are flashed, bootstrapped and provisioned like the RF nodes: same `fleet.sh`, same inventory (`camera_nodes`: `cam-1` … `cam-4`), same `BlackRelay-Setup` network (hosted by the hub, `SETUP_HUB`), same `<node>-setup` rescue hotspot and watchdog.
+Camera kits are a Raspberry Pi 5 with a Hailo-8 and one Reolink RLC-520A on `eth0` (code in `detection/camera-subsystem`). They are flashed, bootstrapped and provisioned like the RF nodes: same `fleet.sh`, same inventory (`camera_nodes`: `cam-1` … `cam-4`), same `BlackRelay-Setup` network (hosted by the hub, `SETUP_HUB`), same `<node>-setup` rescue hotspot and watchdog.
 
 ```sh
 ./fleet.sh flash cam-2 /dev/disk4         # needs SETUP_SSID or WIFI_SSID in fleet.env
@@ -108,15 +108,15 @@ Put each node's covered zones in `ansible/host_vars/<node>.yml` first (`camera_z
 **What provisioning does** (role `camera_node`, safe to re-run):
 
 1. Installs NetworkManager, dnsmasq-base, nftables, avahi, Docker and Compose and the other host packages; stops and disables a host `mosquitto` (the broker runs in a container).
-2. Makes the `camerabridge` user and the `/etc/camerabridge`, `/var/lib/...` and `/etc/black-relay` directories.
+2. Makes the `camerabridge` user and the `/etc/camerabridge`, `/var/lib/...` and `/etc/black-relay` directories, and the systemd and Docker drop-in directories (stock Raspberry Pi OS Lite does not ship them).
 3. Installs the Hailo driver 4.21.0 with Frigate's own `user_installation.sh` (pinned tag, checksum checked) if it is not there already. It fails if `hailo-all` is installed.
 4. Copies `yolov6n.hef` into Frigate's model cache, checking its SHA-256 (`camera_hef_sha256`).
-5. Installs Frigate's host units (`frigate.service`, the camera-link DHCP service, the cache mount), `daemon.json`, the Hailo module option and the camera-link NetworkManager profile for `eth0`; removes `Wired connection 1` and any netplan file for `eth0`. Nothing brings `eth0` up or down live.
+5. Installs Frigate's host units (`frigate.service`, the camera-link DHCP service, the cache mount), `daemon.json`, the Hailo module option and the camera-link NetworkManager profile for `eth0`; removes `Wired connection 1` and any netplan file for `eth0`. `frigate.service` is not enabled: camera-link in the stack starts and stops Frigate. Docker is ordered after the cache mount (a drop-in), so its containers find `/run/frigate-cache` after a reboot. NetworkManager must have the `eth0` profile loaded: a run that finds it not loaded reboots, even when the file was already there. Nothing brings `eth0` up or down live.
 6. Installs the firewall (`/etc/nftables.conf`, checked with `nft -c` first): the same `black_relay` table as the camera image, minus the phone portal. Only the central server reaches SSH, Frigate and RTSP; the setup network and the machine running Ansible reach SSH only (`fleet_admin_nets`). The setup network is not blocked wholesale, because a fleet node is a client of it, and a rescue hotspot gets DHCP and DNS. Changes apply with a reload, so open sessions survive.
-7. Key-only SSH, persistent journal, time from the central server (`camera_ntp_server`), `reg.bulexa.com` pinned to the central address in `/etc/hosts`.
-8. Writes `/etc/camerabridge/bridge.yaml` (0600) and `/var/lib/camera-provision/node.json`, copies `camera-subsystem` to `/opt/black-relay/src` and runs `docker compose up -d --build` there (MQTT broker, bridge and camera-link containers). `camera_node_image` pulls a prebuilt image instead of building.
+7. Key-only SSH, persistent journal, time from the central server (`camera_ntp_server`, default `central_host`), `reg.bulexa.com` pinned to the central address in `/etc/hosts`. `systemd-timesyncd` starts before Wi-Fi and backs off, so a NetworkManager hook restarts it whenever a connection comes up. The bridge checks `timedatectl`'s `NTPSynchronized` and holds its events until it is `yes`.
+8. Writes `/etc/camerabridge/bridge.yaml` (0600) and `/var/lib/camera-provision/node.json`, copies `camera-subsystem` to `/opt/black-relay/src` and runs `docker compose up -d --build` there (MQTT broker, bridge and camera-link containers). `camera_node_image` pulls a prebuilt image instead of building. The build runs on the host network, because the node's Docker has no bridge network.
 9. Reboots, only when the Hailo driver, the first firewall, the `eth0` profile, `daemon.json` or the module option changed, then checks the stack is up.
-10. Nothing to do on the relay: `detection/camera-relay-service`, which the root compose runs on the central server, adds each node's video path from its heartbeats, once the node's Wi-Fi address is inside `RELAY_SITE_SUBNET` (root `.env`; default the `/24` of `BIND_ADDRESS`). A node still on the setup network gets no path.
+10. Nothing to do on the relay: `detection/camera-relay-service`, which the root compose runs on the central server, adds each node's video path from its heartbeats, once the node's Wi-Fi address is inside `RELAY_SITE_SUBNET` (root `.env`; default the `/24` of `BIND_ADDRESS`). A node still on the setup network gets no path. Live video is served by the central relay's MediaMTX: RTSP on 8554 and WebRTC on 8889.
 
 **What is different from RF nodes**
 
@@ -129,8 +129,8 @@ Put each node's covered zones in `ansible/host_vars/<node>.yml` first (`camera_z
 
 **Open caveats**
 
-- Not yet run on real hardware: the Ansible role is checked for syntax and its templates and firewall for validity, not against a node. `docker-compose` as Debian's Compose v2 package is unverified; so is cloud-init accepting a network config with no `eth0` and no Wi-Fi (a `cam-` card seeded with only `SETUP_SSID`).
+- Run on real hardware on cam-3 and cam-4 (Reolink adopted, Frigate healthy on the Hailo-8, bridge clock synced, connected to the broker over TLS; see `DEPLOY.md`), with the PR #18 fixes. `docker-compose` as Debian's Compose v2 package is unverified; so is cloud-init accepting a network config with no `eth0` and no Wi-Fi (a `cam-` card seeded with only `SETUP_SSID`).
 - The Hailo installer checksum was taken from the `v0.18.2` tag on GitHub; update `hailo_install_sha256` with the tag.
-- The cache mount has no `[Install]` section, so the playbook starts it and Frigate's unit pulls it in at boot.
+- The cache mount has no `[Install]` section, so the playbook starts it and a Docker drop-in (`docker.service.d/10-frigate-cache.conf`) pulls it in at boot, before the stack starts.
 - The controller's address is added to the SSH allow list each run, so SSH from another machine later needs `fleet_admin_nets` or a re-run from that machine.
 - A node reached over a hotspot at `10.42.0.1` and Wi-Fi hand-over (`fleet.sh wifi`) work as for RF nodes but have not been exercised on camera nodes.

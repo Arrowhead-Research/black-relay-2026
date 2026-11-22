@@ -1,7 +1,7 @@
 # BlackRelay black-box contract (all implementations)
 
 Every candidate implementation is judged ONLY through these external interfaces by the shared
-conformance harness in harness/harness. Internal design (language, IPC, cache/diff algorithm,
+conformance harness in `harness/` (`run.sh`, `conformance/`). Internal design (language, IPC, cache/diff algorithm,
 process split) is free.
 
 ## Task (from the owner)
@@ -31,8 +31,10 @@ MQTT (prefix blackrelay/v1), JSON payloads:
 - `partitions/{id}/state` retained, QoS1: id, name, arming (disarmed|arm_stay|arm_away|arm_night|exit_delay|
   entry_delay|alarm|unknown), alarm_type, last_changed, source, stale.
 - `events` QoS1 not retained: seq, id, ts, type (zone.state|zone.tamper|zone.battery|zone.online|zone.added|
-  zone.removed|partition.arming|partition.alarm|bridge.link), subject, from, to, source, synthetic.
-- `bridge/status` retained: online | degraded | offline (also the MQTT last will).
+  zone.removed|partition.arming|partition.alarm|bridge.link; the implementation also emits zone.stale|zone.kind|
+  zone.partition|zone.renamed|partition.added|partition.renamed|partition.stale|partition.removed), subject, from, to,
+  source, synthetic.
+- `bridge/status` retained: JSON `{"status": "online|degraded|offline"}` (the MQTT last will is `{"status": "offline"}`).
 - The bridge never subscribes to command topics.
 HTTPS (Bearer API key or X-API-Key; /v1/health is unauthenticated):
 GET /v1/zones[?kind=&partition=], /v1/zones/{id}, /v1/partitions, /v1/events?after=&limit=,

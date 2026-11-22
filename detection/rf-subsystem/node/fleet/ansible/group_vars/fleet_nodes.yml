@@ -17,7 +17,7 @@ ansible_ssh_extra_args: >-
 # The central server's LAN address: where Kismet capture (TCP 3501) and console heartbeats (8080) go,
 # and the one host a camera node's firewall admits. Nodes are not on the tailnet; the RF stack must
 # bind 3501/8080 on this address (BIND_ADDR in its .env).
-central_host: 172.20.100.150
+central_host: 172.22.41.10
 
 # Central MQTT broker (the root compose's `broker`, shared with the physical subsystem). Each node logs
 # in with its own login (rf-node-<node> or cam-node-<node>) over TLS. The certificate is Let's Encrypt
@@ -26,7 +26,7 @@ central_host: 172.20.100.150
 broker_host: reg.bulexa.com
 broker_port: 8883
 broker_tls: true
-broker_address: 172.20.100.150
+broker_address: 172.22.41.10
 
 # Provisioning without SSH to the central server: fleet.sh sets central_secrets_file to CENTRAL_SECRETS,
 # the saved output of detection/central/node-secrets.sh ("<key> <value>" lines), and the node plays read

@@ -1,10 +1,11 @@
 # Camera Subsystem Design (v0)
 
 Owner: Dmitri Warner (Camera Subsystem Lead)
-Status: Plans 1 and 2 built, not hardware-verified.
+Status: Plans 1 and 2 built. The fleet route (section 7) is proven on cam-3 and cam-4. The SD image route has run in
+part on kit 1 (`provision/ops/field-run-kit1.md`).
 Related: `../rf-subsystem/` (RF contract this mirrors — see dependency note in 1.1),
-`./README.md` (operating instructions, filled after build),
-`../camera-relay-servive/` (central relay, now in this subsystem's scope — section 4.2).
+`./README.md` (operating instructions),
+`../camera-relay-service/` (central relay, now in this subsystem's scope — section 4.2).
 
 ## 1. Intent and why
 
@@ -25,15 +26,14 @@ that camera's coverage) instead of going blind (lose the central box, lose
 everything). This is why detection and recording live at the edge, one
 self-contained node per camera, rather than on a shared central box.
 
-### 1.1 Dependency note — RF contract lives on an unmerged branch
+### 1.1 Dependency note — the RF contract
 
-The RF subsystem's concrete contract (`DESIGN.md`, `schemas/observation.v0.schema.json`,
-`formats.py`, the `rf.camera-cue.v0` wire format, and the shared site zones in
-`simulator/sites/dev-site.yaml`) currently exists **only on branch
-`detection/wifi-dev`**, not on `detection/develop` or `detection/camera`. On this
-branch `rf-subsystem/` is still a template. "Mirror RF" therefore references
-wifi-dev. Two items are **hard dependencies on that branch merging** (or on a
-joint agreement with the RF lead) before the camera contract can be frozen:
+The RF contract is on `detection/develop` now: `rf-subsystem/schemas/observation.v0.schema.json`, the shared
+site zones in `rf-subsystem/simulator/sites/dev-site.yaml`, `rf-subsystem/MQTT-CONTRACT.md`, and the RF analytics'
+`formats.py`. `MQTT-CONTRACT.md` names the `rf.camera-cue.v0` topic and schema but gives no fields yet ("no schema
+yet"), so the bridge parses a provisional cue shape (`bridge/src/camerabridge/cues.py`,
+`tests/fixtures/rf_cue.json`). Two items are still **hard dependencies** on agreement with the RF lead before the
+camera contract can be frozen:
 
 - the exact fields of `rf.camera-cue.v0` (section 5.4), and
 - the shared site zone vocabulary (section 6).
@@ -53,7 +53,7 @@ Everything else in this contract is self-consistent and can proceed.
   never corrupt fusion.
 - Headless field onboarding: a non-technical operator provisions a kit onto a
   network, VPN, and central node with no keyboard, monitor, or shell.
-- Own and build the central RTSP relay (`camera-relay-server`) that aggregates
+- Own and build the central RTSP relay (`camera-relay-service`) that aggregates
   every node's restream for local clients.
 - Reuse maintained software (Frigate, go2rtc, MediaMTX,
   NetworkManager, Tailscale). Write only the glue and the contract.
@@ -139,22 +139,22 @@ RLC-520A ──wired P2P──▶ Pi 5 + Hailo-8 (26 TOPS)
   when the other is down, so a central outage cannot lose a Frigate event and a
   local-broker outage cannot stop the heartbeat.
 
-### 4.2 Central relay (`camera-relay-server`) — in scope
+### 4.2 Central relay (`camera-relay-service`) — in scope
 
 The camera subsystem owns the central receiving side:
 
 - **MediaMTX** RTSP server gives clients one endpoint for all cameras, and pulls each
   node's stream on demand. The central API tells it each node's address, learned from
   heartbeats.
-- Camera nodes publish `detection/camera/*` to the central MQTT broker (the broker
-  itself is the shared compute node's; the camera subsystem is a publisher and
-  provides the relay config, not the broker software). Until that broker exists, the
-  relay bundle includes one, which can be turned off.
+- Camera nodes publish `detection/camera/*` to the central MQTT broker. The camera subsystem is a publisher and
+  provides the relay config, not the broker software. On the BlackRelay central server that broker is the root
+  compose's `broker`, and the relay bundle's own broker stays off. The bundle includes one for a site without it,
+  which can be turned off.
 - **Time:** the central node serves NTP on the site LAN from its own clock, with no
   dependency on the WAN (7.5).
-- **Host:** the central node is undecided: a Pi, a laptop, or a server, possibly a TAK
-  server. The relay is therefore a container bundle for any Linux host on arm64 or
-  amd64, and assumes nothing else about that host.
+- **Host:** the central node is a server (amd64, Ubuntu 22.04; its address is in `DEPLOY.md`) that runs the relay in
+  the root compose. The relay is still a container bundle for any Linux host on arm64 or amd64, and assumes nothing else
+  about that host.
 - **Central API (FastAPI):** the one way in for users and clients. Nodes still publish
   over MQTT, because the outbox, replay and RF cues are built on it. The API subscribes
   to the broker and serves events, node status, and proxied Frigate pages and snapshots.
@@ -219,6 +219,11 @@ fusion standard means changing that one file.
 (UUIDv4). Delivery is at-least-once (durable replay), which produces duplicates;
 `event_id` lets fusion dedupe idempotently. The RF envelope has no such field; the
 camera subsystem adds it and proposes RF and fusion adopt it.
+
+**Site:** `rf.*` messages carry `site: {id, name}` (`rf-subsystem/MQTT-CONTRACT.md`, section 3). Camera messages
+carry no site field. Fusion files each camera message under its broker's `site_id`, which is `sh1` on the central
+server (`detection/central/fusion.config.yaml`). Whether camera messages carry the site is open, to settle with the
+fusion standard.
 
 ### 5.1 Topics
 
@@ -321,8 +326,8 @@ messages.
 
 RF publishes a cue on a TPMS `first_heard` event to `detection/rf/cues/camera`.
 
-- **Cue contents (`rf.camera-cue.v0`):** RF-owned and defined on `detection/wifi-dev`
-  (unmerged — section 1.1). Expected to carry at least a cue id, a zone, a source
+- **Cue contents (`rf.camera-cue.v0`):** RF-owned. The topic and name are in `rf-subsystem/MQTT-CONTRACT.md`, with
+  no schema yet (section 1.1). Expected to carry at least a cue id, a zone, a source
   node, a timestamp, and the TPMS sensor id. Exact fields to be confirmed with the
   RF lead before freeze.
 - **Routing:** every node receives the single topic; **each node filters by zone**
@@ -417,11 +422,17 @@ option.
 For fusion to correlate layers ("zone-2 has an RF device and a camera person"),
 zone values must be a **single site vocabulary** shared by RF and camera. RF
 defines site zones in `../rf-subsystem/simulator/sites/dev-site.yaml` (on
-`detection/wifi-dev` — section 1.1). Camera (Frigate) zones must use the **same
+`detection/develop`, a notional dev site to be replaced with the real layout — section 1.1). Camera (Frigate) zones must use the **same
 zone names**. This is a hard dependency and a coordination item with the RF lead
 and fusion co-leads; it must be agreed before the contract freezes.
 
 ## 7. Field onboarding (headless provisioning)
+
+**Current routes.** Kits are provisioned with the fleet tool (`detection/rf-subsystem/node/fleet`,
+`./fleet.sh provision camera`). Ansible writes the config the portal would, so that route has no phone portal. Its
+nodes join the fleet's setup network, and a node with no network for three minutes opens its own rescue hotspot. The
+route runs the bridge and camera-link as containers (`node/`). The rest of this section is the
+SD image's route (`provision/ops`), which still works for kits built from it.
 
 Each kit ships blind. First boot with no saved network brings up a setup access
 point; the operator joins it, opens a captive portal, and configures the node.
@@ -435,6 +446,10 @@ label on the kit. It is not derived from the serial, because the SSID exposes th
 serial. Forwarding to and from the camera link is dropped, so an AP client cannot
 reach the camera.
 
+**Current behavior differs.** `seed-kit.sh` starts every image kit at the fleet default passphrase (see the seed section of `provision/ops/README.md`), and
+`change-passwords.sh setup-wifi` replaces it. The per-kit random passphrase above is not what seeding does. Which one
+stands is for the owner to decide.
+
 ### 7.2 Portal fields
 The portal collects, and writes to node config:
 - Wi-Fi client SSID + password (scanned via `nmcli dev wifi`) → a NetworkManager
@@ -442,7 +457,8 @@ The portal collects, and writes to node config:
 - Hostname. There is no VPN field: nodes do not run Tailscale (4.2).
 - **Central endpoints:** MQTT broker address + credentials/TLS. Central pulls video, so
   the node needs no MediaMTX address. The broker address must be an IP, because the node's firewall admits only that address
-  for SSH and Frigate. An address in Tailscale's `100.64.0.0/10` is rejected, because
+  for SSH and Frigate. (The fleet route pins the broker's name to the central address on each node and admits that
+  address, so its broker may be `reg.bulexa.com` on 8883 with TLS.) An address in Tailscale's `100.64.0.0/10` is rejected, because
   fusion traffic must not depend on Tailscale (7.3).
 - **Time server** (`ntp_server`), on the full form only. Blank means the broker host.
   It is written to a timesyncd drop-in as part of the same atomic save, and is not in
@@ -502,6 +518,11 @@ address follows the new broker, and the form and the saved page show what will b
 A node that cannot reach its server never syncs, so the bridge holds events as below and
 sends no heartbeat. By default that includes a node booting during a central outage.
 
+The fleet route also writes `/etc/NetworkManager/dispatcher.d/50-black-relay-timesync`, which restarts
+`systemd-timesyncd` on each connection up or connectivity change. timesyncd's first try, before Wi-Fi is up, fails
+and backs off for up to about 34 minutes, while the bridge holds events until it syncs. The SD image route has no
+such hook.
+
 Because the Pi 5 has no battery RTC, events created before NTP sync carry
 an untrusted clock, so the bridge holds them instead of stamping them:
 
@@ -551,8 +572,8 @@ contracts, not exhaustive coverage.
 - **Wi-Fi is the weak + emitting link.** Congestion or jamming stops restream and
   delays events (local detect/record continue by design). Emissions from each Pi
   are a fixed-position signature.
-- **RF contract is on an unmerged branch** (section 1.1): exact `rf.camera-cue.v0`
-  fields and the shared zone vocabulary are hard dependencies before freeze.
+- **RF cue schema not yet written** (section 1.1): exact `rf.camera-cue.v0` fields and the shared zone
+  vocabulary are hard dependencies before freeze.
 - **Fusion standard not yet defined.** The camera contract is v0 and self-consistent;
   it changes in one module when the fusion standard lands.
 - **Hailo driver coupling.** Frigate v0.18.2 needs HailoRT and driver 4.21.0, while
@@ -565,7 +586,7 @@ contracts, not exhaustive coverage.
 ## 10. Phases
 
 1. **v0 (this design):** edge node (Frigate + Hailo + RLC-520A), local record,
-   go2rtc restream, central MediaMTX relay (`camera-relay-server`),
+   go2rtc restream, central MediaMTX relay (`camera-relay-service`),
    `camera.detection.v0` + `camera.cue-ack.v0` + `camera.node-status.v0` over a
    durable outbox, inbound RF cue handling, headless onboarding, contract + bridge
    tests.
@@ -589,4 +610,3 @@ contracts, not exhaustive coverage.
   and 15 fps on sub. Measured on firmware `v3.2.0.5180_2507241369`
   after a factory reset: only port 9000 open, HTTP, RTSP and ONVIF off, P2P on, blank
   `admin` password. `reolink_aio` 0.22.0 turned HTTP and RTSP on over Baichuan.
-```

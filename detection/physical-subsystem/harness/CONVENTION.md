@@ -8,9 +8,9 @@ An implementation directory must contain an executable **`<impl_dir>/harness_sta
 
 * runs the bridge **in the foreground** (the harness SIGTERMs it, waits 10 s, then SIGKILLs; process-group kill is used, so
   child processes / compose-less multi-process designs are fine). Must `exec` or otherwise stay alive while the bridge runs.
-* may build on first call (the harness gives it up to 600 s to become healthy the first time, 30 s afterwards);
+* may build on first call (the harness gives it up to 600 s to become healthy the first time, 60 s afterwards);
   cwd is `<impl_dir>`.
-* stdout/stderr are captured to `harness/work/<run>/bridge.log`.
+* stdout/stderr are captured to `harness/work/<run>/bridge-<ms>.log` (one file per start).
 * the harness sets env `BR_HARNESS=1`; the impl may use it to relax things that only make sense in compose (nothing in the
   one-way / TLS / failover logic may differ).
 * the config.yaml follows `harness/config.example.yaml` plus the contract's test hooks, with these harness values:
@@ -20,12 +20,13 @@ An implementation directory must contain an executable **`<impl_dir>/harness_sta
   short timers (`silence_probe_s: 4, probe_timeout_s: 2, backoff_initial_s: 1, backoff_max_s: 2, fallback_after_s: 3`),
   `mqtt.host/port` = harness Mosquitto (TLS, user `blackrelay`, `ca_file`, `password_file`), `api.port`, `api.tls_cert/tls_key`
   (harness-generated, SAN 127.0.0.1), `api.metrics_port`, `storage.data_dir: <work>/data` (persistent across restarts within one test),
-  `storage.retention_days: 30` (a prune test restarts with 1 and a pre-aged DB — see test; impl must read the SQLite log schema
-  from `<impl_dir>/**/schema.sql` ONLY if `HARNESS.md` says; otherwise the prune test is SKIPPED, not failed).
+  `storage.retention_days: 30` (a prune test restarts with 1 and a pre-aged DB — see test; the prune test finds the
+  events table by scanning the data dir for `*.db`, `*.sqlite`, `*.sqlite3`, and is SKIPPED if none is found; a
+  `harness-prune-schema:` line in HARNESS.md is not read).
 * API keys: the config's `api.keys` holds an argon2 hash; harness uses the key `br_test_key_0123456789` and generates
   the argon2id hash with `argon2-cffi` (installed in harness venv) — keys list name `harness`. Impl must accept it as `Authorization: Bearer ...` and `X-API-Key`.
 * Readiness: harness polls `GET https://127.0.0.1:<api.port>/v1/health` (CA = harness CA).
-* Optional `<impl_dir>/HARNESS.md` documents quirks; harness only reads the optional line `harness-prune-schema: <path to .sql>` (not required).
+* Optional `<impl_dir>/HARNESS.md` documents quirks; the current harness reads none of it.
 * Pairing PKI: harness creates it; the impl just reads it. The sim panel CA is `<work>/sim-ca.crt`.
 
 ## Scenarios (conformance/, each is one pytest test; output shows PASS/FAIL/SKIP per test)
@@ -53,4 +54,4 @@ test_zz: static grep audit + whole-run zero state-changing messages. EVERY test 
   relaxed X.509 checks for that CA only (the library clears VERIFY_X509_STRICT). Its leaf certs carry SAN IP:127.0.0.1 and AKI.
 * Control4: SHA-256 is over the DER leaf cert; framing = concatenated JSON objects (PANEL_PROTOCOL.md part 2).
 Standalone simulator for manual work: `harness/.venv/bin/python -m sim.run_standalone` (see sim/run_standalone.py).
-Self-test of the harness: `harness/run.sh harness/dummy` (single-file reference bridge) and `harness/.venv/bin/python -m pytest harness/sim/tests`.
+Self-test of the simulator: `harness/.venv/bin/python -m pytest harness/sim/tests` (the single-file reference bridge `harness/dummy` is not in this tree).

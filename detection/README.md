@@ -7,14 +7,21 @@ This repository contains the software, hardware, and documentation for the detec
 ```text
 detection/
 ├── README.md
-├── camera-subsystem/
-├── docs/
-│   └── BOM.md
-├── physical-subsystem/
-├── rf-subsystem/
-├── fusion-service/
-└── camera-relay-server/
+├── FUSION-ARCHITECTURE.md   how each subsystem's output reaches fusion on the central node
+├── camera-subsystem/        camera kits (Pi + Hailo + Reolink)
+├── camera-relay-service/    camera relay on the central server: API, MediaMTX video, NTP
+├── physical-subsystem/      IQ5 panel bridge
+├── rf-subsystem/            WBT nodes, Kismet, WBT Console, rf-analytics, node fleet playbooks
+├── fusion-service/          fusion service and its API
+├── central/                 scripts for the central server (make-env.sh, node logins and secrets)
+├── central-broker/          the central MQTT broker's configuration
+├── central-store/           image registry and device secrets store
+└── simulator-deploy/        simulated sensors behind a real fusion API on one machine
 ```
+
+The central server (172.22.41.10, `/srv/sensor-fusion`) runs the broker, store, fusion, RF services and
+camera relay from `compose.yaml` at the repo root; deploy and update steps are in `DEPLOY.md` there, the bill
+of materials is `BOM.md` at the repo root.
 
 ## Team and Ownership
 
@@ -29,7 +36,7 @@ detection/
 
 Subsystem leads are the first point of contact for changes, documentation, and reviews affecting their subsystem. Changes that affect multiple subsystems should involve the relevant leads.
 
-The owner for `camera-relay-server` is **to be assigned**. Until then, coordinate changes with the Camera Subsystem Lead and any other affected subsystem leads.
+The owner for `camera-relay-service` is **to be assigned**. Until then, coordinate changes with the Camera Subsystem Lead and any other affected subsystem leads.
 
 ## CI Pipeline
 

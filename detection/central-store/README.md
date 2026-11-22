@@ -46,7 +46,10 @@ access, the bundles can move into OpenBao without changing the devices' layout.
 
 ## Server setup (once)
 
-On the central server (Linux, Docker with Compose v2), with this folder copied there:
+On the central server (172.22.41.10, Linux, Docker with Compose v2) this is part of the repo-root
+project: `./setup-central.sh` (see `DEPLOY.md`) runs `init`, gets the Let's Encrypt certificate,
+adds the renewal to cron and starts the stores with everything else from `/srv/sensor-fusion`. To
+run the stores alone (a test machine), from this folder:
 
 ```sh
 ./server.sh init 192.168.10.5 central.lan    # the server's LAN address hosts use, plus any other names
@@ -64,22 +67,22 @@ With a real certificate hosts trust the store out of the box: nothing to copy, n
 just `docker login`. Let's Encrypt checks the name through DNS (DNS-01), so the server stays on the
 LAN and never has to be reachable from the internet.
 
-1. In Cloudflare, add `A docker.bulexa.com -> 172.20.100.150`, **DNS only** (grey cloud).
+1. In Cloudflare, add `A reg.bulexa.com -> 172.22.41.10`, **DNS only** (grey cloud).
 2. Create a Cloudflare API token: *My Profile > API Tokens > Create Token > Edit zone DNS*, then
    **add a second permission, Zone > Zone > Read** (without it: "failed to find zone"), and set
    Zone Resources to Include > Specific zone > `bulexa.com`. On the server, save it (`state/` is private):
    `printf '%s' 'TOKEN' > state/cloudflare.token && chmod 600 state/cloudflare.token`
 3. Get the certificate (asks once to accept the Let's Encrypt Subscriber Agreement; the email is
    only for expiry notices):
-   `./server.sh letsencrypt docker.bulexa.com you@yourmail`
-4. Renew automatically: `crontab -e` and add
-   `0 4 * * * cd /PATH/central-store && ./server.sh letsencrypt >> state/renew.log 2>&1`
-   (renews when a third of its life is left and restarts the registries only when it changed).
+   `./server.sh letsencrypt reg.bulexa.com you@yourmail`
+4. Renew automatically: `setup-central.sh` adds this to the user's crontab; by hand, `crontab -e` and add
+   `0 4 * * * cd /srv/sensor-fusion/detection/central-store && ./server.sh letsencrypt >> state/renew.log 2>&1`
+   (renews when a third of its life is left and restarts the registries and the broker only when it changed).
 
-Hosts then use `docker.bulexa.com:5000` (pull) and `docker.bulexa.com:5001` (push), and devices
-run `./secrets.sh setup docker.bulexa.com NAME -` (the `-` means "no extra CA"). If a router on
+Hosts then use `reg.bulexa.com:5000` (pull) and `reg.bulexa.com:5001` (push), and devices
+run `./secrets.sh setup reg.bulexa.com NAME -` (the `-` means "no extra CA"). If a router on
 the way blocks public DNS answers that point at private IPs (DNS rebinding protection), allow
-`docker.bulexa.com` there or add it to your local DNS.
+`reg.bulexa.com` there or add it to your local DNS.
 
 Then one login per host:
 
@@ -112,15 +115,19 @@ then restart Docker. Not needed if the certificate is already trusted by the hos
 
 ## Publishing images (build machine)
 
+The images the compose files pull are built by CI and published to ghcr.io (see the repo README).
+The store is for an offline site, or to push a local build:
+
 ```sh
-PLATFORM=linux/amd64 ../deploy/build.sh                   # as before
 docker login SERVER:5001 -u publisher                     # needs the CA trusted, as above, for :5001
-./publish-images.sh SERVER
+./publish-images.sh SERVER [image ...]                    # default list: the simulator images and the store toolbox
+./publish-images.sh SERVER --bridge                       # the physical bridge, amd64 + arm64
 ```
 
-On the host, `IMAGE_PREFIX=SERVER:5000/` in the sf-dev bundle's `.env` makes its `compose.yaml`
-pull from the store; `docker compose pull && docker compose up -d --wait`. Leaving `IMAGE_PREFIX`
-unset keeps the tarball flow working.
+Hosts then set `IMAGE_PREFIX=SERVER:5000/` in the `.env` next to the compose file and run
+`docker compose pull && docker compose up -d --wait`. `publish-images.sh` pushes images that exist
+locally under their local names, so build them first (`docker compose build`, or pull them from
+ghcr.io).
 
 ## Sealing and fetching a device's secrets
 

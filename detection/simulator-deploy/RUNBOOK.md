@@ -29,7 +29,7 @@ Expect `"status":"ok"`.
 ```sh
 ./mock_rf.sh                 # one rf.alert
 ./mock_rf.sh position        # one rf.position
-./mock-camera.sh             # one camera heartbeat and three detections
+./mock-camera.sh             # one camera heartbeat and one person's three detection messages
 docker compose exec physical-sim sh -c 'echo "zone 12 Open" > /app/fusion-service/bench/sim.in'
 ```
 

@@ -71,6 +71,7 @@ physical-subsystem/
   HARNESS.md                     how the conformance harness starts the bridge
   harness/                       panel simulator and the 28 conformance tests (failover, reconciliation, one-way, TLS)
   harness_start.sh               harness entry point (creates .venv on first call)
+  pair-panel.sh                  pair this computer with the panel and print its zones (wraps br2 pair/snapshot)
   pyproject.toml                 package and dependencies
   schema.sql                     SQLite schema (event log, cached state)
   schemas/                       JSON Schemas (draft 2020-12) for the team messages
@@ -95,10 +96,12 @@ physical-subsystem/
       state.py  service.py
   deploy/
     docker-compose.yml           services, hardening, optional `fusion` profile and network
+    docker-compose.samehost.yml  overlay for the central server: the fusion publisher joins black-relay-local
     config/config.example.yaml   copy to deploy/config/config.yaml
     mosquitto/                   local broker config and ACL
     nftables/                    egress policy for the panel adapters
-    scripts/gen-certs.sh         generates local CA, certificates, secrets
+    scripts/                     gen-certs.sh (CA, certificates, secrets), bootstrap.sh (first start on a new device),
+                                 fetch-broker-login.sh and fusion-secret.sh (team broker login)
   docker/                        Dockerfile per service (base image by digest, build-time import smoke test), requirements,
                                  hashed lock files, relock.sh (regenerates the locks with a real resolver run)
   tools/pair_reference.py        reference pairing tool (qolsys-controller based); NOT used at runtime, not in the wheel or images
@@ -224,13 +227,13 @@ example file documents all of them.
 | `timers.silence_probe_s` | 60 | No panel message for this long: probe the link |
 | `zones.<id>.name`, `.kind`, `.ignore` | | Per-zone overrides |
 | `zones.include_keypads` | false | Publish keypad / IQ Remote zones (including the bridge's own) like sensors. They are hidden by default; only a real boolean `true` turns this on |
-| `mqtt.*` | TLS 8883 | Local read-only broker (`tls: false` is refused unless `insecure_dev: true`) |
+| `mqtt.*` | TLS 8883 (8884 on the central server) | Local read-only broker (`tls: false` is refused unless `insecure_dev: true`) |
 | `api.port`, `api.keys` | 8443, none | REST/SSE; each key is a record `{name, key_id, argon2_hash}` made by `docker compose run --rm bridge hash-key` (the key is shown once and never stored). `key_id` is an HMAC-SHA256 prefix of the key: the API looks the record up by it and runs argon2 only on a match, so garbage keys cost nothing and a valid key is never held up by failed attempts. `key_id` is required on every record: with a record that lacks it the API service refuses to start and says to re-run `hash-key` |
 | `api.metrics_port`, `.metrics_host` | 9100, 127.0.0.1 | Prometheus |
 | `storage.data_dir`, `.retention_days` | `/data`, 30 | SQLite event log |
-| `site.id`, `site.name` | `default`, `default` | Identifies this installation in team messages |
+| `site.id`, `site.name` | `default`, `default` | Identifies this installation in team messages. `sh1` in the example and on the central server; it must match fusion's site for this bridge |
 | `fusion.enabled` | false | Team MQTT output |
-| `fusion.host`, `.port` | `rf-mqtt`, 1883 (example: `reg.bulexa.com`, 8883) | The central broker (repo-root `compose.yaml` on the central server) |
+| `fusion.host`, `.port` | `rf-mqtt`, 1883 (schema default, a retired name; example: `reg.bulexa.com`, 8883) | The central broker (repo-root `compose.yaml` on the central server). `setup-central.sh` sets `reg.bulexa.com` 8883, or `central-broker` 1883 without a domain |
 | `fusion.tls` | null | null = plaintext (a warning is logged). Otherwise `{ca_file, certfile?, keyfile?}` |
 | `fusion.username`, `.password_file` | null | Optional; the password is read from the file |
 | `fusion.topic_prefix` | `detection/physical` | |
@@ -238,8 +241,10 @@ example file documents all of them.
 | `fusion.status_interval_s` | 60 | Heartbeat for panel and per-zone status |
 | `fusion.outbox.max_bytes`, `.max_messages`, `.max_age_s` | 10 MiB, 20000, 86400 | Outbox caps; oldest dropped and counted |
 
-Plaintext to the team broker is allowed only because that broker is plaintext today. The bridge's own TLS keys and
-certificates (`deploy/certs`, `deploy/secrets`, `deploy/data/pki`) are generated on the host and are git-ignored.
+The team broker is reached over TLS when `fusion.tls` is set (the example, and `setup-central.sh --domain`). Plaintext
+(`fusion.tls: null`) is only used for `central-broker:1883` inside Docker on `black-relay-local`, when the central server
+has no public name. The bridge's own TLS keys and certificates (`deploy/certs`, `deploy/secrets`, `deploy/data/pki`) are
+generated on the host and are git-ignored.
 
 ### Panel identity (certificate pinning)
 
@@ -280,8 +285,29 @@ with `br2 repin --yes` (it replaces a damaged file).
 
 ## Startup
 
-Bring-up order with Docker Compose (the intended deployment). Build before the first `docker compose run`, pair before the
-first `docker compose up`:
+### Central server
+
+On the central server the bridge is set up by the repo's script, which also brings up the central stack and connects the
+bridge's team publisher to its broker. From the repo root (`--panel-ip` is needed the first time):
+
+```sh
+./setup-central.sh <address> --domain reg.bulexa.com --email <email> --with-bridge --panel-ip <panel ip>
+```
+
+It creates the bridge's certificates and logins (once; the team password comes from the root `.env`), writes
+`deploy/config/config.yaml` with `site.id` `sh1` (the central fusion site, from `detection/central/fusion.config.yaml`),
+`mqtt.port` 8884 (the central broker keeps 8883) and `fusion.enabled: true`. It puts
+`COMPOSE_FILE=docker-compose.yml:docker-compose.samehost.yml` in `deploy/.env`, so the publisher joins `black-relay-local` and
+reaches the central broker as `reg.bulexa.com:8883` (TLS), or as `central-broker:1883` when there is no `--domain`. Then it
+builds and starts the bridge services with the `fusion` profile (`docker compose --profile fusion up -d` in `deploy/`).
+Still by hand: pair the panel (Pairing, below), set `PANEL_IP` in `deploy/nftables/blackrelay-egress.nft` and load it, and
+check `ip_forward` (Assembly Steps, step 5).
+
+### Any other host
+
+Bring-up order with Docker Compose. Build before the first `docker compose run`, pair before the first `docker compose up`.
+A new device can instead fill `deploy/.env` from `.env.example` and run `docker compose up`: the `bootstrap` service makes
+its keys, certificates and config, and waits for the panel pairing to be published in the secrets registry.
 
 ```sh
 cd deploy
@@ -366,7 +392,8 @@ added/removed, partition arming/alarm) for the requested time. With `pin_mode: r
 `watch` stop with `NO PANEL PIN RECORDED ... Run br2 pair ... or br2 repin --yes` and send nothing. None of them prints key
 material.
 
-Team output (optional): the central broker runs on the central server (repo-root `compose.yaml`). Put its physical
+Team output (optional): the central broker runs on the central server (repo-root `compose.yaml`). On that server
+`setup-central.sh --with-bridge` does the following (see Startup, Central server). Elsewhere, put its physical
 password in `deploy/secrets/fusion/fusion_password` (uid 10003, 0600). Automated: on the central server run
 `detection/central/share-broker-login.sh <device>` (seals it for this bridge in the secrets store), then here
 `deploy/scripts/fetch-broker-login.sh` (needs `central-store/secrets.sh setup` once). By hand:
@@ -377,7 +404,7 @@ in `config.yaml` (the example already points at `reg.bulexa.com:8883` with TLS a
 docker compose --profile fusion up -d
 ```
 
-This starts one more container from the same image, attached only to its own outbound network (`fusion-out`). It has a healthcheck
+This starts one more container from the same image, attached only to its own outbound network (`fusion-out`; on the central server also `black-relay-local`). It has a healthcheck
 (`python -m br2 healthcheck fusion`, backed by `GET /healthz` on `fusion.metrics_host:fusion.metrics_port`, default
 127.0.0.1:9101 inside the container) and serves `/metrics` there: outbox depth, drops, last PUBACK age (section 11 of
 MQTT-CONTRACT.md). `docker compose ps` shows it `healthy` once running. It is separate because the
@@ -488,7 +515,7 @@ verified on a real IQ5 Hub** (see "What has and has not been verified"), nor aga
 Compose smoke test (no panel hardware): build the images, point `iq_remote.panel_ip`, `panel_port` and `ca_file` of
 `config.yaml` at the harness simulator, record the simulator's certificate as the pin with
 `docker compose run --rm iq-tools repin --config /config/config.yaml --yes` (nothing is trusted automatically), start the
-default and `fusion` profiles with a throwaway plaintext mosquitto on an external `fusion` network, then:
+default and `fusion` profiles with a throwaway plaintext mosquitto on this host's LAN address (set `fusion.host` to it, `fusion.port` 1883, `fusion.tls: null`), then:
 
 ```sh
 docker compose --profile fusion ps                       # expect every service running; normalizer, outbound, fusion: healthy
@@ -524,7 +551,7 @@ relying on the stack; no result of such a run is recorded in this document.
 | `blackrelay_adapter_bad_zone_ids_total` rising | The panel sent a zone row whose id is not a plain integer; the row is dropped and one resync is requested. Look at `docker compose logs iq-remote` |
 | Log banner "WEAKENED PANEL CERTIFICATE PINNING" | `pin_mode` is `tofu` or `pin_accept_rotation` is on. Development only; switch back to the defaults |
 | `br2 pair`: "no panel completed the pairing" | Pair tapped on the panel? Same subnet? Inbound TCP to the printed port and UDP 5353 allowed on this host? `--plugin-ip` right on a multi-homed host? |
-| `fusion` container cannot connect | `reg.bulexa.com` resolves to the central server from this host? Port 8883 reachable? Password in `secrets/fusion/fusion_password` matches `BROKER_PHYSICAL_PASSWORD`? |
+| `fusion` container cannot connect | Off the central server: does `reg.bulexa.com` resolve to it from this host, and is 8883 reachable? On the central server: the publisher must be on `black-relay-local` (`COMPOSE_FILE` in `deploy/.env`). Either way: does the password in `secrets/fusion/fusion_password` match `BROKER_PHYSICAL_PASSWORD`? |
 | Log line "fusion: TLS is OFF" | `fusion.tls` is null: use port 8883 with the `tls` block from the example |
 | No messages on `detection/physical/#` | `fusion.enabled: true`? Correct host? `physical_fusion_connected` metric (in-process mode) or the container log. Client id clash with another client on the broker makes both disconnect repeatedly |
 | Messages arrive late or twice | Normal after an outage: at-least-once; dedupe on `id` |
@@ -541,17 +568,21 @@ Inputs:
 Outputs:
 
 - Team broker: `detection/physical/events`, `detection/physical/status/panel`, `detection/physical/status/zones`
-  (QoS 1, never retained, plaintext TCP in v0). See [MQTT-CONTRACT.md](MQTT-CONTRACT.md) and `schemas/`.
-- Local broker: `blackrelay/v1/...` and Home Assistant discovery, TLS 8883.
-- REST/SSE: HTTPS 8443 (`/v1/zones`, `/v1/events`, `/v1/stream`, `/v1/health`). Metrics: `:9100/metrics`.
+  (QoS 1, never retained; TLS when `fusion.tls` is set). See [MQTT-CONTRACT.md](MQTT-CONTRACT.md) and `schemas/`.
+- Local broker: `blackrelay/v1/...` and Home Assistant discovery, TLS 8883 (8884 on the central server).
+- REST/SSE: HTTPS 8443 (`/v1/zones`, `/v1/zones/{id}`, `/v1/partitions`, `/v1/events`, `/v1/stream`, `/v1/health`).
+  Metrics: `:9100/metrics`.
 
 Dependencies: Python 3.11 or newer; `aiomqtt`, `paho-mqtt`, `aiohttp`, `pyyaml`, `argon2-cffi`; for tests `pytest`,
 `pytest-asyncio`, `cryptography`, `jsonschema`, `httpx`, `setuptools`, `wheel` (the wheel-contents test); for `br2 pair` (host only) `cryptography` and `zeroconf`; Docker with Compose; Eclipse Mosquitto (container) for the
-local broker. The fusion service and the other subsystems are consumers on the team broker; the Docker network
-`fusion` is created outside this project.
+local broker. The fusion service and the other subsystems are consumers on the team broker. The `fusion` profile's network
+`fusion-out` is this project's; on the central server the publisher also joins `black-relay-local`, which the root
+`compose.yaml` creates.
 
 ## Change Notes
 
+- 2026-11-21: Docs only. Central-server deployment (`setup-central.sh --with-bridge`) documented: site `sh1`, local broker
+  8884, team publisher on `black-relay-local` over TLS. Transport text and the external `fusion` network reference corrected.
 - 2026-11-15: Last-audit LOW fixes and hardware corrections. API keys must carry a `key_id` (the service refuses to start
   otherwise; the legacy path is gone) and a cancelled first verification no longer fails concurrent verifications of
   the same key. Event log: `zone.added` carries tamper/battery/online, kind and partition changes are events

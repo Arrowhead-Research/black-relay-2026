@@ -2,8 +2,13 @@
 
 Builds the SD image for a camera edge node and defines how to check it in the field.
 
-**Nothing here has been verified on hardware.** Every check in the
-[field verification checklist](#field-verification-checklist) is labeled NOT YET RUN.
+**Current route:** camera kits are flashed and provisioned with the fleet tool, `detection/rf-subsystem/node/fleet`
+(`./fleet.sh provision camera`). That route runs the Docker stack in `../node/`, not the host services this image
+installs. This image is for kits already built from it.
+
+**Status:** each check in the [field verification checklist](#field-verification-checklist) says what has run. C01
+and C02 passed, C07 and C08 mostly passed, and C03 partly ran; C25 failed once. All on kit 1, 2026-11-05. The rest are
+NOT YET RUN. Kit 1's later run, of 2026-11-13, is in [`field-run-kit1.md`](field-run-kit1.md).
 
 **Covered by Plan 3, not here:** Frigate, go2rtc, camera link setup (the `eth0` static address), bench configuration of the camera, and the central relay. Plan 3 must meet
 [these requirements](#requirements-on-plan-3).
@@ -187,6 +192,10 @@ saved page names the server used. Any other typed value is kept. The one result 
 single save is a time server that stays on the old broker's address: re-provision once more and type
 it. To change the server, hold the button at boot and resubmit: a hand edit to the drop-in lasts only
 until the next full save.
+
+The fleet route adds a NetworkManager dispatcher hook that restarts `systemd-timesyncd` on each connection up or
+connectivity change. Its comment says timesyncd's first try, before Wi-Fi is up, fails and backs off for up to about 34
+minutes (PR #18). This image has no such hook, so after a cold boot with Wi-Fi down, check the clock with C31.
 
 **If the server cannot be reached, the node never syncs.** That includes a node booting during a
 central outage, if the server is the default. Until `timedatectl show -p NTPSynchronized --value` says
@@ -533,8 +542,9 @@ sudo /opt/black-relay/ops/seed-kit.sh --kit 2
 The number names the kit's console user: `kit-1`, `kit-2`, and so on, up to 99. It asks for nothing else.
 
 **Every kit starts with one default password, `BlackRelay2026`,** so that nobody handed a kit has to guess one. It is
-the password of the kit's console user and the passphrase of its setup WiFi. The central node gives the broker and
-viewer logins the same default: see `detection/camera-relay-service/README.md`. Whoever owns a kit changes them with `change-passwords.sh`,
+the password of the kit's console user and the passphrase of its setup WiFi. The standalone relay bundle gives its broker
+and viewer logins the same default: see `detection/camera-relay-service/README.md`. On the BlackRelay central server they
+are random, in the root `.env`. Whoever owns a kit changes them with `change-passwords.sh`,
 below. The default is in this repository, so treat a kit that still has it as open to anyone who has read this page
 and can reach its console or its setup WiFi.
 
@@ -561,9 +571,11 @@ sudo /opt/black-relay/ops/change-passwords.sh broker       # the broker password
 
 Each asks for the new password twice, never shows it, and changes nothing until the two match. A password is 8 to 63
 characters with no space, quote, backtick, backslash or dollar sign, which is what all three places can take. After
-`setup-wifi`, replace the label on the kit. After `broker`, give the central node the same password, with
-`./change-passwords.sh broker` in its `camera-relay-service` directory: until the two match, this kit's events queue on the kit and
-its video cannot be pulled.
+`setup-wifi`, replace the label on the kit. After `broker`, give the central node the same password. In the standalone
+bundle, that is `./change-passwords.sh broker` in its `camera-relay-service` directory. On the BlackRelay central server,
+it is `BROKER_CAMERA_PASSWORD` in the root `.env`, then `docker compose up -d` at the repo root. Until the two match, this
+kit's events queue on the kit and its video cannot be pulled. Kits provisioned by the fleet tool have no
+`change-passwords.sh`: change their login by re-provisioning them.
 
 **Print the label:** the image has no printing stack, so enter the four printed lines into your
 label printer's workstation, and do not save them to a file. Fix the label to the kit. Then reboot,
@@ -613,7 +625,7 @@ Detect and record do not depend on any of this.
 
 ## Field verification checklist
 
-**Status of every check: NOT YET RUN.** Change a check's status only after running it on the real
+**Status.** A check that is not labeled has not run. Change a check's status only after running it on the real
 hardware, and record the date and output.
 
 Bench: one kit with its camera, a second kit for C41, a site router you can power off, a laptop, an

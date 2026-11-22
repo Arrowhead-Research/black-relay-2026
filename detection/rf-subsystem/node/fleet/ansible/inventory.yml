@@ -23,4 +23,4 @@ all:
     central:
       hosts:
         rf-central:
-          ansible_host: 172.20.100.150
+          ansible_host: 172.22.41.10
